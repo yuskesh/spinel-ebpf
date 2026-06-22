@@ -119,9 +119,16 @@ as Prometheus metrics.
 
 ### The spinel dependency
 
-spinel-ebpf drives a patched build of spinel (a small fork that adds one
-env-gated hook) and links its in-process codegen against spinel's compiler
-objects. A setup script fetches and builds it into `deps/spinel`:
+spinel-ebpf builds against a small [fork of spinel](https://github.com/yuskesh/spinel)
+that carries a single **env-gated patch**: `SPINEL_EXTERN_METHODS` makes selected
+top-level methods emit as `extern` declarations (spinel's canonical value ABI) so
+their bodies can be provided by a separately-linked unit — which is how spinel-ebpf
+forwards a native call into an eBPF program for transparent dispatch
+(`--ebpf-dispatch`). With the variable unset the patch is byte-identical to
+upstream; details are in the fork's
+[FORK.md](https://github.com/yuskesh/spinel/blob/c-emit-ir/FORK.md). spinel-ebpf's
+in-process codegen also links against the fork's compiler objects. A setup script
+fetches and builds the fork into `deps/spinel`:
 
 ```sh
 scripts/setup.sh
