@@ -879,7 +879,14 @@ static CExpr *cc_build_expr(AST *ast, int nid) {
   if (ty && (!strcmp(ty, "OrNode") || !strcmp(ty, "AndNode"))) {
     int l = nt_ref(ast, nid, "left"), r = nt_ref(ast, nid, "right");
     if (l < 0 || r < 0) die("OrNode/AndNode missing operand", ty);
-    return ce_binop(ty[0] == 'O' ? "||" : "&&", cc_build_expr(ast, l), cc_build_expr(ast, r));
+    /* Build operands left-to-right via locals: cc_build_expr has side effects
+       (it allocates the _pN ivar-lookup temporaries and emits their prelude
+       lines), and C leaves the evaluation order of function arguments
+       unspecified — sequencing keeps the emitted output identical across
+       compilers/architectures (gcc evaluates args L->R on arm64 but R->L on x86). */
+    CExpr *lhs = cc_build_expr(ast, l);
+    CExpr *rhs = cc_build_expr(ast, r);
+    return ce_binop(ty[0] == 'O' ? "||" : "&&", lhs, rhs);
   }
   if (ty && !strcmp(ty, "CallNode")) {
     const char *name = nt_str(ast, nid, "name");
@@ -891,7 +898,10 @@ static CExpr *cc_build_expr(AST *ast, int nid) {
       if (!at || strcmp(at, "ArgumentsNode")) die("binop args not ArgumentsNode", NULL);
       int na; const int *ids = nt_arr(ast, args_id, "arguments", &na);
       if (na != 1) die("binop expects 1 arg", name);
-      return ce_binop(name, cc_build_expr(ast, recv), cc_build_expr(ast, ids[0]));
+      /* left-to-right via locals (unspecified arg-eval order; see OrNode above) */
+      CExpr *lhs = cc_build_expr(ast, recv);
+      CExpr *rhs = cc_build_expr(ast, ids[0]);
+      return ce_binop(name, lhs, rhs);
     }
   }
   return ce_raw(cc_expr_str(ast, nid));   /* leaf / not-yet-structured: primary */
