@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Kernel-independent gates. Loading/attaching the generated eBPF programs needs
+# the custom 7.x kernel (see the apple-container-ebpf-kernel repo) booted in a VM,
+# which is out of scope here; CI verifies everything up to and including codegen.
+jobs:
+  tests:
+    name: unit tests + golden gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Host unit tests (parsing / partition / codegen)
+        run: |
+          fail=0
+          for t in tests/spinel_ebpf/*_test.rb; do
+            ruby -Isrc -Itests "$t" || fail=1
+          done
+          exit $fail
+      - name: Golden codegen regression gate
+        run: |
+          make -C src/codegen_c
+          ruby tools/golden.rb
+
+  integration:
+    name: build spinel fork + emit .bpf.c
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Build the spinel compiler dependency (the patched fork)
+        run: scripts/setup.sh
+      - name: Compile a sample (in-process codegen against the fork)
+        run: |
+          cat > /tmp/sample.rb <<'RB'
+          def xdp__counter
+            @rx_pkts += 1
+            XDP_PASS
+          end
+          RB
+          ./bin/spinel-ebpf compile /tmp/sample.rb -o /tmp/out
+          test -f /tmp/out/sample.bpf.c
+          grep -q 'SEC("license")' /tmp/out/sample.bpf.c
+          echo "emitted .bpf.c OK"

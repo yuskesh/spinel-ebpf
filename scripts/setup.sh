@@ -29,10 +29,10 @@ SPINEL_DIR="${SPINEL_DIR:-$HERE/deps/spinel}"
 echo ">>> spinel: $SPINEL_REPO @ $SPINEL_REF"
 echo ">>> into:   $SPINEL_DIR"
 
-# Bootstrap build prerequisites on Debian/Ubuntu (the expected build container).
-# Harmless if already present; skipped on other distros (the check below still
-# enforces them).
-if command -v apt-get >/dev/null 2>&1; then
+# Bootstrap build prerequisites on Debian/Ubuntu when running as root (the
+# expected build container). Skipped for non-root (CI runners / dev machines
+# already have the tools); the check below enforces them either way.
+if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq || true
   apt-get install -y -qq --no-install-recommends \
