@@ -107,41 +107,49 @@ spinel-ebpf compile app.rb --instrument-self   # workload + agent in one self-at
 Latency is aggregated in a kernel keyed-histogram (overflow-immune) and exposed
 as Prometheus metrics.
 
-## Requirements
+## Getting started
 
-- A Linux kernel with BTF, the BPF JIT, `struct_ops`, and the tracing stack
-  enabled. On Apple Silicon macOS, build one with the companion
-  [apple-container-ebpf-kernel](https://github.com/yuskesh/apple-container-ebpf-kernel) repo.
-- The [spinel](https://github.com/yuskesh/spinel) compiler, fetched + built into
-  `deps/spinel` by `scripts/setup.sh` (see below).
-- clang/LLVM 19+, libbpf, bpftool, pahole — available in a `debian:trixie`
-  container.
+Work inside a Linux build environment with `clang`/LLVM 19+, `libbpf`, `bpftool`,
+`pahole`, plus `cc` / `make` / `ruby` / `git` / `curl` — all present in a
+`debian:trixie` container.
 
-### The spinel dependency
+### 1. An eBPF-capable kernel (needed to *run* the programs)
+
+The generated programs require a kernel with BTF, the BPF JIT, `struct_ops`, and
+the tracing stack. On Apple Silicon macOS, build one and install it into Apple
+`container` with the companion
+[apple-container-ebpf-kernel](https://github.com/yuskesh/apple-container-ebpf-kernel)
+repo. (You can *compile* without it — you just can't load and run the result.)
+
+### 2. Build the spinel compiler dependency
 
 spinel-ebpf builds against a small [fork of spinel](https://github.com/yuskesh/spinel)
-that carries a single **env-gated patch**: `SPINEL_EXTERN_METHODS` makes selected
+that carries a single **env-gated patch** — `SPINEL_EXTERN_METHODS` makes selected
 top-level methods emit as `extern` declarations (spinel's canonical value ABI) so
-their bodies can be provided by a separately-linked unit — which is how spinel-ebpf
-forwards a native call into an eBPF program for transparent dispatch
-(`--ebpf-dispatch`). With the variable unset the patch is byte-identical to
-upstream; details are in the fork's
-[FORK.md](https://github.com/yuskesh/spinel/blob/c-emit-ir/FORK.md). spinel-ebpf's
-in-process codegen also links against the fork's compiler objects. A setup script
-fetches and builds the fork into `deps/spinel`:
+their bodies can come from a separately-linked unit. spinel-ebpf uses it for
+transparent native→eBPF dispatch (`--ebpf-dispatch`); with the variable unset the
+patch is byte-identical to upstream (see the fork's
+[FORK.md](https://github.com/yuskesh/spinel/blob/c-emit-ir/FORK.md)).
+
+A setup script fetches the fork (at a pinned tag) and builds it into `deps/spinel`:
 
 ```sh
 scripts/setup.sh
 ```
 
-That clones the fork (default `https://github.com/yuskesh/spinel`, a pinned tag on
-`c-emit-ir`) and runs its build, producing `bin/spinel` + `build/csrc/*.o` +
-`build/libprism.a`. Afterwards `bin/spinel-ebpf` works with no further
-configuration — its default `SPINEL_DIR` is `deps/spinel`.
+It produces `bin/spinel` + `build/csrc/*.o` + `build/libprism.a` (the in-process
+codegen links against these). Afterwards `bin/spinel-ebpf` works with no further
+configuration — its default `SPINEL_DIR` is `deps/spinel`. Override with
+`SPINEL_REPO` / `SPINEL_REF` / `SPINEL_DIR` / `SPINEL_C_BIN`.
 
-Override with `SPINEL_REPO` / `SPINEL_REF` / `SPINEL_DIR` (or `SPINEL_C_BIN` to
-point at an already-built compiler binary). Run it inside the Linux build
-container — it needs `cc`, `make`, `ruby`, `git`, `curl`.
+### 3. Compile
+
+```sh
+bin/spinel-ebpf compile your_program.rb --build   # or any file under examples/
+```
+
+This emits the native C and `.bpf.c`, compiles the BPF object, and links a single
+binary that loads and attaches the program(s) on startup.
 
 ## Usage
 
