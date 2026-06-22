@@ -1,0 +1,721 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/29_http_parser_test.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name HttpRequest
+R 2 constant_path 3
+R 2 superclass -1
+N 4 StatementsNode
+N 5 CallNode
+S 5 name attr_reader
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 SymbolNode
+S 7 value verb
+N 8 SymbolNode
+S 8 value path
+N 9 SymbolNode
+S 9 value version
+N 10 SymbolNode
+S 10 value valid
+A 6 arguments 7,8,9,10
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 11 DefNode
+S 11 name initialize
+N 12 ParametersNode
+N 13 RequiredParameterNode
+S 13 name method
+N 14 RequiredParameterNode
+S 14 name path
+N 15 RequiredParameterNode
+S 15 name version
+N 16 RequiredParameterNode
+S 16 name valid
+A 12 requireds 13,14,15,16
+A 12 optionals 
+A 12 keywords 
+A 12 posts 
+R 11 parameters 12
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @verb
+N 19 LocalVariableReadNode
+S 19 name method
+R 18 value 19
+N 20 InstanceVariableWriteNode
+S 20 name @path
+N 21 LocalVariableReadNode
+S 21 name path
+R 20 value 21
+N 22 InstanceVariableWriteNode
+S 22 name @version
+N 23 LocalVariableReadNode
+S 23 name version
+R 22 value 23
+N 24 InstanceVariableWriteNode
+S 24 name @valid
+N 25 LocalVariableReadNode
+S 25 name valid
+R 24 value 25
+A 17 body 18,20,22,24
+R 11 body 17
+R 11 receiver -1
+A 4 body 5,11
+R 2 body 4
+N 26 DefNode
+S 26 name parse_request_line
+N 27 ParametersNode
+N 28 RequiredParameterNode
+S 28 name line
+A 27 requireds 28
+A 27 optionals 
+A 27 keywords 
+A 27 posts 
+R 26 parameters 27
+N 29 StatementsNode
+N 30 LocalVariableWriteNode
+S 30 name parts
+N 31 CallNode
+S 31 name split
+N 32 LocalVariableReadNode
+S 32 name line
+R 31 receiver 32
+N 33 ArgumentsNode
+N 34 StringNode
+S 34 content %20
+A 33 arguments 34
+R 31 arguments 33
+R 31 block -1
+S 31 call_operator .
+R 30 value 31
+N 35 IfNode
+N 36 CallNode
+S 36 name !=
+N 37 CallNode
+S 37 name length
+N 38 LocalVariableReadNode
+S 38 name parts
+R 37 receiver 38
+R 37 arguments -1
+R 37 block -1
+S 37 call_operator .
+R 36 receiver 37
+N 39 ArgumentsNode
+N 40 IntegerNode
+I 40 value 3
+A 39 arguments 40
+R 36 arguments 39
+R 36 block -1
+S 36 call_operator .
+R 35 predicate 36
+N 41 StatementsNode
+N 42 ReturnNode
+N 43 ArgumentsNode
+N 44 CallNode
+S 44 name new
+N 45 ConstantReadNode
+S 45 name HttpRequest
+R 44 receiver 45
+N 46 ArgumentsNode
+N 47 StringNode
+S 47 content 
+N 48 StringNode
+S 48 content 
+N 49 StringNode
+S 49 content 
+N 50 IntegerNode
+I 50 value 0
+A 46 arguments 47,48,49,50
+R 44 arguments 46
+R 44 block -1
+S 44 call_operator .
+A 43 arguments 44
+R 42 arguments 43
+A 41 body 42
+R 35 statements 41
+R 35 subsequent -1
+N 51 LocalVariableWriteNode
+S 51 name m
+N 52 CallNode
+S 52 name []
+N 53 LocalVariableReadNode
+S 53 name parts
+R 52 receiver 53
+N 54 ArgumentsNode
+N 55 IntegerNode
+I 55 value 0
+A 54 arguments 55
+R 52 arguments 54
+R 52 block -1
+S 52 call_operator .
+R 51 value 52
+N 56 LocalVariableWriteNode
+S 56 name p
+N 57 CallNode
+S 57 name []
+N 58 LocalVariableReadNode
+S 58 name parts
+R 57 receiver 58
+N 59 ArgumentsNode
+N 60 IntegerNode
+I 60 value 1
+A 59 arguments 60
+R 57 arguments 59
+R 57 block -1
+S 57 call_operator .
+R 56 value 57
+N 61 LocalVariableWriteNode
+S 61 name v
+N 62 CallNode
+S 62 name []
+N 63 LocalVariableReadNode
+S 63 name parts
+R 62 receiver 63
+N 64 ArgumentsNode
+N 65 IntegerNode
+I 65 value 2
+A 64 arguments 65
+R 62 arguments 64
+R 62 block -1
+S 62 call_operator .
+R 61 value 62
+N 66 LocalVariableWriteNode
+S 66 name valid
+N 67 IntegerNode
+I 67 value 1
+R 66 value 67
+N 68 IfNode
+N 69 AndNode
+N 70 CallNode
+S 70 name !=
+N 71 LocalVariableReadNode
+S 71 name v
+R 70 receiver 71
+N 72 ArgumentsNode
+N 73 StringNode
+S 73 content HTTP/1.0
+A 72 arguments 73
+R 70 arguments 72
+R 70 block -1
+S 70 call_operator .
+R 69 left 70
+N 74 CallNode
+S 74 name !=
+N 75 LocalVariableReadNode
+S 75 name v
+R 74 receiver 75
+N 76 ArgumentsNode
+N 77 StringNode
+S 77 content HTTP/1.1
+A 76 arguments 77
+R 74 arguments 76
+R 74 block -1
+S 74 call_operator .
+R 69 right 74
+R 68 predicate 69
+N 78 StatementsNode
+N 79 LocalVariableWriteNode
+S 79 name valid
+N 80 IntegerNode
+I 80 value 0
+R 79 value 80
+A 78 body 79
+R 68 statements 78
+R 68 subsequent -1
+N 81 IfNode
+N 82 OrNode
+N 83 CallNode
+S 83 name ==
+N 84 CallNode
+S 84 name length
+N 85 LocalVariableReadNode
+S 85 name p
+R 84 receiver 85
+R 84 arguments -1
+R 84 block -1
+S 84 call_operator .
+R 83 receiver 84
+N 86 ArgumentsNode
+N 87 IntegerNode
+I 87 value 0
+A 86 arguments 87
+R 83 arguments 86
+R 83 block -1
+S 83 call_operator .
+R 82 left 83
+N 88 CallNode
+S 88 name !=
+N 89 CallNode
+S 89 name []
+N 90 LocalVariableReadNode
+S 90 name p
+R 89 receiver 90
+N 91 ArgumentsNode
+N 92 IntegerNode
+I 92 value 0
+A 91 arguments 92
+R 89 arguments 91
+R 89 block -1
+S 89 call_operator .
+R 88 receiver 89
+N 93 ArgumentsNode
+N 94 StringNode
+S 94 content /
+A 93 arguments 94
+R 88 arguments 93
+R 88 block -1
+S 88 call_operator .
+R 82 right 88
+R 81 predicate 82
+N 95 StatementsNode
+N 96 LocalVariableWriteNode
+S 96 name valid
+N 97 IntegerNode
+I 97 value 0
+R 96 value 97
+A 95 body 96
+R 81 statements 95
+R 81 subsequent -1
+N 98 CallNode
+S 98 name new
+N 99 ConstantReadNode
+S 99 name HttpRequest
+R 98 receiver 99
+N 100 ArgumentsNode
+N 101 LocalVariableReadNode
+S 101 name m
+N 102 LocalVariableReadNode
+S 102 name p
+N 103 LocalVariableReadNode
+S 103 name v
+N 104 LocalVariableReadNode
+S 104 name valid
+A 100 arguments 101,102,103,104
+R 98 arguments 100
+R 98 block -1
+S 98 call_operator .
+A 29 body 30,35,51,56,61,66,68,81,98
+R 26 body 29
+R 26 receiver -1
+N 105 DefNode
+S 105 name show
+N 106 ParametersNode
+N 107 RequiredParameterNode
+S 107 name label
+N 108 RequiredParameterNode
+S 108 name req
+A 106 requireds 107,108
+A 106 optionals 
+A 106 keywords 
+A 106 posts 
+R 105 parameters 106
+N 109 StatementsNode
+N 110 CallNode
+S 110 name puts
+R 110 receiver -1
+N 111 ArgumentsNode
+N 112 CallNode
+S 112 name +
+N 113 CallNode
+S 113 name +
+N 114 CallNode
+S 114 name +
+N 115 CallNode
+S 115 name +
+N 116 CallNode
+S 116 name +
+N 117 CallNode
+S 117 name +
+N 118 CallNode
+S 118 name +
+N 119 CallNode
+S 119 name +
+N 120 LocalVariableReadNode
+S 120 name label
+R 119 receiver 120
+N 121 ArgumentsNode
+N 122 StringNode
+S 122 content :%20method=
+A 121 arguments 122
+R 119 arguments 121
+R 119 block -1
+S 119 call_operator .
+R 118 receiver 119
+N 123 ArgumentsNode
+N 124 CallNode
+S 124 name verb
+N 125 LocalVariableReadNode
+S 125 name req
+R 124 receiver 125
+R 124 arguments -1
+R 124 block -1
+S 124 call_operator .
+A 123 arguments 124
+R 118 arguments 123
+R 118 block -1
+S 118 call_operator .
+R 117 receiver 118
+N 126 ArgumentsNode
+N 127 StringNode
+S 127 content %20path=
+A 126 arguments 127
+R 117 arguments 126
+R 117 block -1
+S 117 call_operator .
+R 116 receiver 117
+N 128 ArgumentsNode
+N 129 CallNode
+S 129 name path
+N 130 LocalVariableReadNode
+S 130 name req
+R 129 receiver 130
+R 129 arguments -1
+R 129 block -1
+S 129 call_operator .
+A 128 arguments 129
+R 116 arguments 128
+R 116 block -1
+S 116 call_operator .
+R 115 receiver 116
+N 131 ArgumentsNode
+N 132 StringNode
+S 132 content %20version=
+A 131 arguments 132
+R 115 arguments 131
+R 115 block -1
+S 115 call_operator .
+R 114 receiver 115
+N 133 ArgumentsNode
+N 134 CallNode
+S 134 name version
+N 135 LocalVariableReadNode
+S 135 name req
+R 134 receiver 135
+R 134 arguments -1
+R 134 block -1
+S 134 call_operator .
+A 133 arguments 134
+R 114 arguments 133
+R 114 block -1
+S 114 call_operator .
+R 113 receiver 114
+N 136 ArgumentsNode
+N 137 StringNode
+S 137 content %20valid=
+A 136 arguments 137
+R 113 arguments 136
+R 113 block -1
+S 113 call_operator .
+R 112 receiver 113
+N 138 ArgumentsNode
+N 139 CallNode
+S 139 name to_s
+N 140 CallNode
+S 140 name valid
+N 141 LocalVariableReadNode
+S 141 name req
+R 140 receiver 141
+R 140 arguments -1
+R 140 block -1
+S 140 call_operator .
+R 139 receiver 140
+R 139 arguments -1
+R 139 block -1
+S 139 call_operator .
+A 138 arguments 139
+R 112 arguments 138
+R 112 block -1
+S 112 call_operator .
+A 111 arguments 112
+R 110 arguments 111
+R 110 block -1
+S 110 call_operator .
+A 109 body 110
+R 105 body 109
+R 105 receiver -1
+N 142 CallNode
+S 142 name show
+R 142 receiver -1
+N 143 ArgumentsNode
+N 144 StringNode
+S 144 content get_root
+N 145 CallNode
+S 145 name parse_request_line
+R 145 receiver -1
+N 146 ArgumentsNode
+N 147 StringNode
+S 147 content GET%20/%20HTTP/1.0
+A 146 arguments 147
+R 145 arguments 146
+R 145 block -1
+S 145 call_operator .
+A 143 arguments 144,145
+R 142 arguments 143
+R 142 block -1
+S 142 call_operator .
+N 148 CallNode
+S 148 name show
+R 148 receiver -1
+N 149 ArgumentsNode
+N 150 StringNode
+S 150 content get_health
+N 151 CallNode
+S 151 name parse_request_line
+R 151 receiver -1
+N 152 ArgumentsNode
+N 153 StringNode
+S 153 content GET%20/health%20HTTP/1.0
+A 152 arguments 153
+R 151 arguments 152
+R 151 block -1
+S 151 call_operator .
+A 149 arguments 150,151
+R 148 arguments 149
+R 148 block -1
+S 148 call_operator .
+N 154 CallNode
+S 154 name show
+R 154 receiver -1
+N 155 ArgumentsNode
+N 156 StringNode
+S 156 content get_deep_path
+N 157 CallNode
+S 157 name parse_request_line
+R 157 receiver -1
+N 158 ArgumentsNode
+N 159 StringNode
+S 159 content GET%20/a/b/c%20HTTP/1.0
+A 158 arguments 159
+R 157 arguments 158
+R 157 block -1
+S 157 call_operator .
+A 155 arguments 156,157
+R 154 arguments 155
+R 154 block -1
+S 154 call_operator .
+N 160 CallNode
+S 160 name show
+R 160 receiver -1
+N 161 ArgumentsNode
+N 162 StringNode
+S 162 content get_v11
+N 163 CallNode
+S 163 name parse_request_line
+R 163 receiver -1
+N 164 ArgumentsNode
+N 165 StringNode
+S 165 content GET%20/%20HTTP/1.1
+A 164 arguments 165
+R 163 arguments 164
+R 163 block -1
+S 163 call_operator .
+A 161 arguments 162,163
+R 160 arguments 161
+R 160 block -1
+S 160 call_operator .
+N 166 CallNode
+S 166 name show
+R 166 receiver -1
+N 167 ArgumentsNode
+N 168 StringNode
+S 168 content post
+N 169 CallNode
+S 169 name parse_request_line
+R 169 receiver -1
+N 170 ArgumentsNode
+N 171 StringNode
+S 171 content POST%20/api%20HTTP/1.0
+A 170 arguments 171
+R 169 arguments 170
+R 169 block -1
+S 169 call_operator .
+A 167 arguments 168,169
+R 166 arguments 167
+R 166 block -1
+S 166 call_operator .
+N 172 CallNode
+S 172 name show
+R 172 receiver -1
+N 173 ArgumentsNode
+N 174 StringNode
+S 174 content head
+N 175 CallNode
+S 175 name parse_request_line
+R 175 receiver -1
+N 176 ArgumentsNode
+N 177 StringNode
+S 177 content HEAD%20/robots.txt%20HTTP/1.0
+A 176 arguments 177
+R 175 arguments 176
+R 175 block -1
+S 175 call_operator .
+A 173 arguments 174,175
+R 172 arguments 173
+R 172 block -1
+S 172 call_operator .
+N 178 CallNode
+S 178 name show
+R 178 receiver -1
+N 179 ArgumentsNode
+N 180 StringNode
+S 180 content delete
+N 181 CallNode
+S 181 name parse_request_line
+R 181 receiver -1
+N 182 ArgumentsNode
+N 183 StringNode
+S 183 content DELETE%20/items/42%20HTTP/1.1
+A 182 arguments 183
+R 181 arguments 182
+R 181 block -1
+S 181 call_operator .
+A 179 arguments 180,181
+R 178 arguments 179
+R 178 block -1
+S 178 call_operator .
+N 184 CallNode
+S 184 name show
+R 184 receiver -1
+N 185 ArgumentsNode
+N 186 StringNode
+S 186 content empty_line
+N 187 CallNode
+S 187 name parse_request_line
+R 187 receiver -1
+N 188 ArgumentsNode
+N 189 StringNode
+S 189 content 
+A 188 arguments 189
+R 187 arguments 188
+R 187 block -1
+S 187 call_operator .
+A 185 arguments 186,187
+R 184 arguments 185
+R 184 block -1
+S 184 call_operator .
+N 190 CallNode
+S 190 name show
+R 190 receiver -1
+N 191 ArgumentsNode
+N 192 StringNode
+S 192 content missing_path
+N 193 CallNode
+S 193 name parse_request_line
+R 193 receiver -1
+N 194 ArgumentsNode
+N 195 StringNode
+S 195 content GET%20HTTP/1.0
+A 194 arguments 195
+R 193 arguments 194
+R 193 block -1
+S 193 call_operator .
+A 191 arguments 192,193
+R 190 arguments 191
+R 190 block -1
+S 190 call_operator .
+N 196 CallNode
+S 196 name show
+R 196 receiver -1
+N 197 ArgumentsNode
+N 198 StringNode
+S 198 content extra_token
+N 199 CallNode
+S 199 name parse_request_line
+R 199 receiver -1
+N 200 ArgumentsNode
+N 201 StringNode
+S 201 content GET%20/%20HTTP/1.0%20trailing
+A 200 arguments 201
+R 199 arguments 200
+R 199 block -1
+S 199 call_operator .
+A 197 arguments 198,199
+R 196 arguments 197
+R 196 block -1
+S 196 call_operator .
+N 202 CallNode
+S 202 name show
+R 202 receiver -1
+N 203 ArgumentsNode
+N 204 StringNode
+S 204 content bad_version
+N 205 CallNode
+S 205 name parse_request_line
+R 205 receiver -1
+N 206 ArgumentsNode
+N 207 StringNode
+S 207 content GET%20/%20HTTP/2.0
+A 206 arguments 207
+R 205 arguments 206
+R 205 block -1
+S 205 call_operator .
+A 203 arguments 204,205
+R 202 arguments 203
+R 202 block -1
+S 202 call_operator .
+N 208 CallNode
+S 208 name show
+R 208 receiver -1
+N 209 ArgumentsNode
+N 210 StringNode
+S 210 content no_version
+N 211 CallNode
+S 211 name parse_request_line
+R 211 receiver -1
+N 212 ArgumentsNode
+N 213 StringNode
+S 213 content GET%20/
+A 212 arguments 213
+R 211 arguments 212
+R 211 block -1
+S 211 call_operator .
+A 209 arguments 210,211
+R 208 arguments 209
+R 208 block -1
+S 208 call_operator .
+N 214 CallNode
+S 214 name show
+R 214 receiver -1
+N 215 ArgumentsNode
+N 216 StringNode
+S 216 content relative_path
+N 217 CallNode
+S 217 name parse_request_line
+R 217 receiver -1
+N 218 ArgumentsNode
+N 219 StringNode
+S 219 content GET%20foo%20HTTP/1.0
+A 218 arguments 219
+R 217 arguments 218
+R 217 block -1
+S 217 call_operator .
+A 215 arguments 216,217
+R 214 arguments 215
+R 214 block -1
+S 214 call_operator .
+N 220 CallNode
+S 220 name show
+R 220 receiver -1
+N 221 ArgumentsNode
+N 222 StringNode
+S 222 content uppercase_get
+N 223 CallNode
+S 223 name parse_request_line
+R 223 receiver -1
+N 224 ArgumentsNode
+N 225 StringNode
+S 225 content get%20/%20HTTP/1.0
+A 224 arguments 225
+R 223 arguments 224
+R 223 block -1
+S 223 call_operator .
+A 221 arguments 222,223
+R 220 arguments 221
+R 220 block -1
+S 220 call_operator .
+A 1 body 2,26,105,142,148,154,160,166,172,178,184,190,196,202,208,214,220
+R 0 statements 1

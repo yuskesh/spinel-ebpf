@@ -1,0 +1,142 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/30_tc_port_filter.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name TC_ACT_OK
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name TC_ACT_SHOT
+N 5 IntegerNode
+I 5 value 2
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @allowed_8080
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @dropped
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 DefNode
+S 10 name tc__ingress__http_filter
+R 10 parameters -1
+N 11 StatementsNode
+N 12 IfNode
+N 13 OrNode
+N 14 CallNode
+S 14 name ==
+N 15 CallNode
+S 15 name pkt_l4_dport
+R 15 receiver -1
+R 15 arguments -1
+R 15 block -1
+S 15 call_operator .
+R 14 receiver 15
+N 16 ArgumentsNode
+N 17 IntegerNode
+I 17 value 8080
+A 16 arguments 17
+R 14 arguments 16
+R 14 block -1
+S 14 call_operator .
+R 13 left 14
+N 18 CallNode
+S 18 name ==
+N 19 CallNode
+S 19 name pkt_l4_sport
+R 19 receiver -1
+R 19 arguments -1
+R 19 block -1
+S 19 call_operator .
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 8080
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 13 right 18
+R 12 predicate 13
+N 22 StatementsNode
+N 23 InstanceVariableWriteNode
+S 23 name @allowed_8080
+N 24 CallNode
+S 24 name +
+N 25 InstanceVariableReadNode
+S 25 name @allowed_8080
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 1
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+R 23 value 24
+N 28 ConstantReadNode
+S 28 name TC_ACT_OK
+A 22 body 23,28
+R 12 statements 22
+N 29 ElseNode
+N 30 StatementsNode
+N 31 InstanceVariableWriteNode
+S 31 name @dropped
+N 32 CallNode
+S 32 name +
+N 33 InstanceVariableReadNode
+S 33 name @dropped
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 IntegerNode
+I 35 value 1
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+R 31 value 32
+N 36 ConstantReadNode
+S 36 name TC_ACT_SHOT
+A 30 body 31,36
+R 29 statements 30
+R 12 subsequent 29
+A 11 body 12
+R 10 body 11
+R 10 receiver -1
+N 37 CallNode
+S 37 name puts
+R 37 receiver -1
+N 38 ArgumentsNode
+N 39 StringNode
+S 39 content [demo]%20TC%20ingress%20filter%20attached:%20only%20TCP/UDP%20dport=8080%20passes.
+A 38 arguments 39
+R 37 arguments 38
+R 37 block -1
+S 37 call_operator .
+N 40 CallNode
+S 40 name sleep
+R 40 receiver -1
+N 41 ArgumentsNode
+N 42 IntegerNode
+I 42 value 15
+A 41 arguments 42
+R 40 arguments 41
+R 40 block -1
+S 40 call_operator .
+N 43 CallNode
+S 43 name puts
+R 43 receiver -1
+N 44 ArgumentsNode
+N 45 StringNode
+S 45 content [demo]%20exiting;%20TC%20link%20released%20at%20destructor.
+A 44 arguments 45
+R 43 arguments 44
+R 43 block -1
+S 43 call_operator .
+A 1 body 2,4,6,8,10,37,40,43
+R 0 statements 1

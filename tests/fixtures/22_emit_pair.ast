@@ -1,0 +1,60 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/22_emit_pair.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name spnl_emit_pair
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name a
+N 8 RequiredParameterNode
+S 8 name b
+A 6 requireds 7,8
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+R 5 body -1
+R 5 receiver -1
+N 9 DefNode
+S 9 name tracepoint__sched__sched_switch
+N 10 ParametersNode
+N 11 RequiredParameterNode
+S 11 name prev_pid
+N 12 RequiredParameterNode
+S 12 name next_pid
+A 10 requireds 11,12
+A 10 optionals 
+A 10 keywords 
+A 10 posts 
+R 9 parameters 10
+N 13 StatementsNode
+N 14 CallNode
+S 14 name spnl_emit_pair
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 LocalVariableReadNode
+S 16 name prev_pid
+N 17 LocalVariableReadNode
+S 17 name next_pid
+A 15 arguments 16,17
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+A 13 body 14
+R 9 body 13
+R 9 receiver -1
+A 1 body 2,5,9
+R 0 statements 1

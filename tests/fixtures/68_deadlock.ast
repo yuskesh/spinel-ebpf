@@ -1,0 +1,91 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/68_deadlock.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name uprobe__pthread_mutex_lock
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name mutex
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name prev
+N 7 CallNode
+S 7 name task_swap
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name mutex
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 10 IfNode
+N 11 CallNode
+S 11 name !=
+N 12 LocalVariableReadNode
+S 12 name prev
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 0
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 CallNode
+S 16 name lock_edge
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name prev
+N 19 LocalVariableReadNode
+S 19 name mutex
+A 17 arguments 18,19
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 10 statements 15
+R 10 subsequent -1
+N 20 IntegerNode
+I 20 value 0
+A 5 body 6,10,20
+R 2 body 5
+R 2 receiver -1
+N 21 DefNode
+S 21 name uprobe__pthread_mutex_unlock
+N 22 ParametersNode
+N 23 RequiredParameterNode
+S 23 name mutex
+A 22 requireds 23
+A 22 optionals 
+A 22 keywords 
+A 22 posts 
+R 21 parameters 22
+N 24 StatementsNode
+N 25 CallNode
+S 25 name task_store
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 0
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+N 28 IntegerNode
+I 28 value 0
+A 24 body 25,28
+R 21 body 24
+R 21 receiver -1
+A 1 body 2,21
+R 0 statements 1

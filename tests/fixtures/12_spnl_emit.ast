@@ -1,0 +1,96 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/12_spnl_emit.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name report
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name x
+A 6 requireds 7
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+N 8 StatementsNode
+N 9 CallNode
+S 9 name spnl_emit
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name x
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+A 8 body 9
+R 5 body 8
+R 5 receiver -1
+N 12 DefNode
+S 12 name report_doubled
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name x
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 15 StatementsNode
+N 16 CallNode
+S 16 name spnl_emit
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 CallNode
+S 18 name +
+N 19 LocalVariableReadNode
+S 19 name x
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name x
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 12 body 15
+R 12 receiver -1
+N 22 CallNode
+S 22 name report
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 42
+A 23 arguments 24
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+N 25 CallNode
+S 25 name report_doubled
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 10
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 1 body 2,5,12,22,25
+R 0 statements 1

@@ -1,0 +1,239 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/31_tc_blocklist.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name TC_ACT_OK
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name TC_ACT_SHOT
+N 5 IntegerNode
+I 5 value 2
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name LOCALHOST_BE
+N 7 IntegerNode
+I 7 value 2130706433
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @blocked_hits
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 InstanceVariableWriteNode
+S 10 name @passed_hits
+N 11 IntegerNode
+I 11 value 0
+R 10 value 11
+N 12 DefNode
+S 12 name tc__ingress__blocklist_filter
+R 12 parameters -1
+N 13 StatementsNode
+N 14 IfNode
+N 15 CallNode
+S 15 name ==
+N 16 CallNode
+S 16 name blocklist_match
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 CallNode
+S 18 name pkt_ip4_src
+R 18 receiver -1
+R 18 arguments -1
+R 18 block -1
+S 18 call_operator .
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+R 15 receiver 16
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 15 arguments 19
+R 15 block -1
+S 15 call_operator .
+R 14 predicate 15
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @blocked_hits
+N 23 CallNode
+S 23 name +
+N 24 InstanceVariableReadNode
+S 24 name @blocked_hits
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 1
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+N 27 ConstantReadNode
+S 27 name TC_ACT_SHOT
+A 21 body 22,27
+R 14 statements 21
+N 28 ElseNode
+N 29 StatementsNode
+N 30 InstanceVariableWriteNode
+S 30 name @passed_hits
+N 31 CallNode
+S 31 name +
+N 32 InstanceVariableReadNode
+S 32 name @passed_hits
+R 31 receiver 32
+N 33 ArgumentsNode
+N 34 IntegerNode
+I 34 value 1
+A 33 arguments 34
+R 31 arguments 33
+R 31 block -1
+S 31 call_operator .
+R 30 value 31
+N 35 ConstantReadNode
+S 35 name TC_ACT_OK
+A 29 body 30,35
+R 28 statements 29
+R 14 subsequent 28
+A 13 body 14
+R 12 body 13
+R 12 receiver -1
+N 36 ModuleNode
+N 37 ConstantReadNode
+S 37 name Blocklist
+R 36 constant_path 37
+N 38 StatementsNode
+N 39 CallNode
+S 39 name ffi_func
+R 39 receiver -1
+N 40 ArgumentsNode
+N 41 SymbolNode
+S 41 value sp_bpf_blocklist_add
+N 42 ArrayNode
+N 43 SymbolNode
+S 43 value uint32
+A 42 elements 43
+N 44 SymbolNode
+S 44 value int
+A 40 arguments 41,42,44
+R 39 arguments 40
+R 39 block -1
+S 39 call_operator .
+N 45 CallNode
+S 45 name ffi_func
+R 45 receiver -1
+N 46 ArgumentsNode
+N 47 SymbolNode
+S 47 value sp_bpf_blocklist_del
+N 48 ArrayNode
+N 49 SymbolNode
+S 49 value uint32
+A 48 elements 49
+N 50 SymbolNode
+S 50 value int
+A 46 arguments 47,48,50
+R 45 arguments 46
+R 45 block -1
+S 45 call_operator .
+A 38 body 39,45
+R 36 body 38
+N 51 CallNode
+S 51 name puts
+R 51 receiver -1
+N 52 ArgumentsNode
+N 53 StringNode
+S 53 content [demo]%20t=0%20%20TC%20filter%20attached,%20blocklist%20empty%20(curl%20ok)
+A 52 arguments 53
+R 51 arguments 52
+R 51 block -1
+S 51 call_operator .
+N 54 CallNode
+S 54 name sleep
+R 54 receiver -1
+N 55 ArgumentsNode
+N 56 IntegerNode
+I 56 value 4
+A 55 arguments 56
+R 54 arguments 55
+R 54 block -1
+S 54 call_operator .
+N 57 CallNode
+S 57 name puts
+R 57 receiver -1
+N 58 ArgumentsNode
+N 59 StringNode
+S 59 content [demo]%20t=4%20%20adding%20127.0.0.1%20to%20blocklist%20(curl%20will%20be%20blocked)
+A 58 arguments 59
+R 57 arguments 58
+R 57 block -1
+S 57 call_operator .
+N 60 CallNode
+S 60 name sp_bpf_blocklist_add
+N 61 ConstantReadNode
+S 61 name Blocklist
+R 60 receiver 61
+N 62 ArgumentsNode
+N 63 ConstantReadNode
+S 63 name LOCALHOST_BE
+A 62 arguments 63
+R 60 arguments 62
+R 60 block -1
+S 60 call_operator .
+N 64 CallNode
+S 64 name sleep
+R 64 receiver -1
+N 65 ArgumentsNode
+N 66 IntegerNode
+I 66 value 4
+A 65 arguments 66
+R 64 arguments 65
+R 64 block -1
+S 64 call_operator .
+N 67 CallNode
+S 67 name puts
+R 67 receiver -1
+N 68 ArgumentsNode
+N 69 StringNode
+S 69 content [demo]%20t=8%20%20removing%20127.0.0.1%20from%20blocklist%20(curl%20ok%20again)
+A 68 arguments 69
+R 67 arguments 68
+R 67 block -1
+S 67 call_operator .
+N 70 CallNode
+S 70 name sp_bpf_blocklist_del
+N 71 ConstantReadNode
+S 71 name Blocklist
+R 70 receiver 71
+N 72 ArgumentsNode
+N 73 ConstantReadNode
+S 73 name LOCALHOST_BE
+A 72 arguments 73
+R 70 arguments 72
+R 70 block -1
+S 70 call_operator .
+N 74 CallNode
+S 74 name sleep
+R 74 receiver -1
+N 75 ArgumentsNode
+N 76 IntegerNode
+I 76 value 4
+A 75 arguments 76
+R 74 arguments 75
+R 74 block -1
+S 74 call_operator .
+N 77 CallNode
+S 77 name puts
+R 77 receiver -1
+N 78 ArgumentsNode
+N 79 StringNode
+S 79 content [demo]%20t=12%20exiting;%20TC%20link%20released%20at%20destructor
+A 78 arguments 79
+R 77 arguments 78
+R 77 block -1
+S 77 call_operator .
+A 1 body 2,4,6,8,10,12,36,51,54,57,60,64,67,70,74,77
+R 0 statements 1

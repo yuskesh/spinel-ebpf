@@ -1,0 +1,101 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/53_scx_simple.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name SimpleScx
+R 2 constant_path 3
+N 4 ConstantPathNode
+N 5 ConstantReadNode
+S 5 name BPF
+R 4 parent 5
+S 4 name SchedExt
+R 2 superclass 4
+N 6 StatementsNode
+N 7 DefNode
+S 7 name enqueue
+N 8 ParametersNode
+N 9 RequiredParameterNode
+S 9 name p
+N 10 RequiredParameterNode
+S 10 name enq_flags
+A 8 requireds 9,10
+A 8 optionals 
+A 8 keywords 
+A 8 posts 
+R 7 parameters 8
+N 11 StatementsNode
+N 12 CallNode
+S 12 name scx_dispatch
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name p
+N 15 ConstantPathNode
+N 16 ConstantPathNode
+N 17 ConstantReadNode
+S 17 name SCX
+R 16 parent 17
+S 16 name DSQ
+R 15 parent 16
+S 15 name GLOBAL
+N 18 ConstantPathNode
+N 19 ConstantReadNode
+S 19 name SCX
+R 18 parent 19
+S 18 name SLICE_DFL
+N 20 LocalVariableReadNode
+S 20 name enq_flags
+A 13 arguments 14,15,18,20
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+A 11 body 12
+R 7 body 11
+R 7 receiver -1
+N 21 DefNode
+S 21 name dispatch
+N 22 ParametersNode
+N 23 RequiredParameterNode
+S 23 name cpu
+N 24 RequiredParameterNode
+S 24 name prev
+A 22 requireds 23,24
+A 22 optionals 
+A 22 keywords 
+A 22 posts 
+R 21 parameters 22
+N 25 StatementsNode
+N 26 CallNode
+S 26 name scx_consume
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 ConstantPathNode
+N 29 ConstantPathNode
+N 30 ConstantReadNode
+S 30 name SCX
+R 29 parent 30
+S 29 name DSQ
+R 28 parent 29
+S 28 name GLOBAL
+A 27 arguments 28
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+A 25 body 26
+R 21 body 25
+R 21 receiver -1
+N 31 DefNode
+S 31 name init
+R 31 parameters -1
+N 32 StatementsNode
+N 33 IntegerNode
+I 33 value 0
+A 32 body 33
+R 31 body 32
+R 31 receiver -1
+A 6 body 7,21,31
+R 2 body 6
+A 1 body 2
+R 0 statements 1

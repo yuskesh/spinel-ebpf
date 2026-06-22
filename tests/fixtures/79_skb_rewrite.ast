@@ -1,0 +1,127 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/79_skb_rewrite.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @n
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__egress__ttl
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name ttl
+N 7 CallNode
+S 7 name skb_load_byte
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 IntegerNode
+I 9 value 22
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 10 IfNode
+N 11 CallNode
+S 11 name >
+N 12 LocalVariableReadNode
+S 12 name ttl
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 LocalVariableWriteNode
+S 16 name nt
+N 17 CallNode
+S 17 name -
+N 18 LocalVariableReadNode
+S 18 name ttl
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+N 21 CallNode
+S 21 name l3_csum_replace
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 24
+N 24 CallNode
+S 24 name <<
+N 25 LocalVariableReadNode
+S 25 name ttl
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 8
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+N 28 CallNode
+S 28 name <<
+N 29 LocalVariableReadNode
+S 29 name nt
+R 28 receiver 29
+N 30 ArgumentsNode
+N 31 IntegerNode
+I 31 value 8
+A 30 arguments 31
+R 28 arguments 30
+R 28 block -1
+S 28 call_operator .
+A 22 arguments 23,24,28
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+N 32 CallNode
+S 32 name skb_store_byte
+R 32 receiver -1
+N 33 ArgumentsNode
+N 34 IntegerNode
+I 34 value 22
+N 35 LocalVariableReadNode
+S 35 name nt
+A 33 arguments 34,35
+R 32 arguments 33
+R 32 block -1
+S 32 call_operator .
+N 36 InstanceVariableWriteNode
+S 36 name @n
+N 37 CallNode
+S 37 name +
+N 38 InstanceVariableReadNode
+S 38 name @n
+R 37 receiver 38
+N 39 ArgumentsNode
+N 40 IntegerNode
+I 40 value 1
+A 39 arguments 40
+R 37 arguments 39
+R 37 block -1
+S 37 call_operator .
+R 36 value 37
+A 15 body 16,21,32,36
+R 10 statements 15
+R 10 subsequent -1
+N 41 ConstantReadNode
+S 41 name TC_ACT_OK
+A 5 body 6,10,41
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

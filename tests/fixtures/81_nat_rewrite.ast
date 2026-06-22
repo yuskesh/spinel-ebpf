@@ -1,0 +1,111 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/81_nat_rewrite.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @n
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__dnat
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name dst
+N 7 CallNode
+S 7 name skb_load_u32
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 IntegerNode
+I 9 value 30
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 10 IfNode
+N 11 CallNode
+S 11 name ==
+N 12 LocalVariableReadNode
+S 12 name dst
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 167772162
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 LocalVariableWriteNode
+S 16 name new
+N 17 IntegerNode
+I 17 value 167772259
+R 16 value 17
+N 18 CallNode
+S 18 name l3_csum_replace_ip
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 24
+N 21 LocalVariableReadNode
+S 21 name dst
+N 22 LocalVariableReadNode
+S 22 name new
+A 19 arguments 20,21,22
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+N 23 CallNode
+S 23 name l4_csum_replace_ip
+R 23 receiver -1
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 50
+N 26 LocalVariableReadNode
+S 26 name dst
+N 27 LocalVariableReadNode
+S 27 name new
+A 24 arguments 25,26,27
+R 23 arguments 24
+R 23 block -1
+S 23 call_operator .
+N 28 CallNode
+S 28 name skb_store_u32
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 IntegerNode
+I 30 value 30
+N 31 LocalVariableReadNode
+S 31 name new
+A 29 arguments 30,31
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+N 32 InstanceVariableWriteNode
+S 32 name @n
+N 33 CallNode
+S 33 name +
+N 34 InstanceVariableReadNode
+S 34 name @n
+R 33 receiver 34
+N 35 ArgumentsNode
+N 36 IntegerNode
+I 36 value 1
+A 35 arguments 36
+R 33 arguments 35
+R 33 block -1
+S 33 call_operator .
+R 32 value 33
+A 15 body 16,18,23,28,32
+R 10 statements 15
+R 10 subsequent -1
+N 37 ConstantReadNode
+S 37 name TC_ACT_OK
+A 5 body 6,10,37
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

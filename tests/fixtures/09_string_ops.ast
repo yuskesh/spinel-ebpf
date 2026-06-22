@@ -1,0 +1,81 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/09_string_ops.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name greet
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name name
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name +
+N 7 CallNode
+S 7 name +
+N 8 StringNode
+S 8 content hello,%20
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name name
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 receiver 7
+N 11 ArgumentsNode
+N 12 StringNode
+S 12 content !
+A 11 arguments 12
+R 6 arguments 11
+R 6 block -1
+S 6 call_operator .
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+N 13 LocalVariableWriteNode
+S 13 name s
+N 14 CallNode
+S 14 name greet
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 StringNode
+S 16 content world
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+R 13 value 14
+N 17 CallNode
+S 17 name puts
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 CallNode
+S 19 name length
+N 20 LocalVariableReadNode
+S 20 name s
+R 19 receiver 20
+R 19 arguments -1
+R 19 block -1
+S 19 call_operator .
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+N 21 CallNode
+S 21 name puts
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 LocalVariableReadNode
+S 23 name s
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+A 1 body 2,13,17,21
+R 0 statements 1

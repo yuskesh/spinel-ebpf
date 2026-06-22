@@ -1,0 +1,62 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/20_top_ivar.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 InstanceVariableWriteNode
+S 5 name @open_count
+N 6 IntegerNode
+I 6 value 0
+R 5 value 6
+N 7 DefNode
+S 7 name tracepoint__syscalls__sys_enter_openat
+N 8 ParametersNode
+N 9 RequiredParameterNode
+S 9 name dfd
+A 8 requireds 9
+A 8 optionals 
+A 8 keywords 
+A 8 posts 
+R 7 parameters 8
+N 10 StatementsNode
+N 11 InstanceVariableWriteNode
+S 11 name @open_count
+N 12 CallNode
+S 12 name +
+N 13 InstanceVariableReadNode
+S 13 name @open_count
+R 12 receiver 13
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 1
+A 14 arguments 15
+R 12 arguments 14
+R 12 block -1
+S 12 call_operator .
+R 11 value 12
+N 16 CallNode
+S 16 name spnl_emit
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 InstanceVariableReadNode
+S 18 name @open_count
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 10 body 11,16
+R 7 body 10
+R 7 receiver -1
+A 1 body 2,5,7
+R 0 statements 1

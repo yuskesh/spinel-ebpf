@@ -1,0 +1,121 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/71_tcplife.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__sock__inet_sock_set_state
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name skaddr
+N 5 RequiredParameterNode
+S 5 name oldstate
+N 6 RequiredParameterNode
+S 6 name newstate
+N 7 RequiredParameterNode
+S 7 name sport
+N 8 RequiredParameterNode
+S 8 name dport
+A 3 requireds 4,5,6,7,8
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 9 StatementsNode
+N 10 IfNode
+N 11 CallNode
+S 11 name ==
+N 12 LocalVariableReadNode
+S 12 name newstate
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 CallNode
+S 16 name lat_start
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name skaddr
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 10 statements 15
+R 10 subsequent -1
+N 19 IfNode
+N 20 CallNode
+S 20 name ==
+N 21 LocalVariableReadNode
+S 21 name oldstate
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 1
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+R 19 predicate 20
+N 24 StatementsNode
+N 25 LocalVariableWriteNode
+S 25 name d
+N 26 CallNode
+S 26 name lat_end
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 LocalVariableReadNode
+S 28 name skaddr
+A 27 arguments 28
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+R 25 value 26
+N 29 IfNode
+N 30 CallNode
+S 30 name >
+N 31 LocalVariableReadNode
+S 31 name d
+R 30 receiver 31
+N 32 ArgumentsNode
+N 33 IntegerNode
+I 33 value 0
+A 32 arguments 33
+R 30 arguments 32
+R 30 block -1
+S 30 call_operator .
+R 29 predicate 30
+N 34 StatementsNode
+N 35 CallNode
+S 35 name spnl_emit3
+R 35 receiver -1
+N 36 ArgumentsNode
+N 37 LocalVariableReadNode
+S 37 name sport
+N 38 LocalVariableReadNode
+S 38 name dport
+N 39 LocalVariableReadNode
+S 39 name d
+A 36 arguments 37,38,39
+R 35 arguments 36
+R 35 block -1
+S 35 call_operator .
+A 34 body 35
+R 29 statements 34
+R 29 subsequent -1
+A 24 body 25,29
+R 19 statements 24
+R 19 subsequent -1
+N 40 IntegerNode
+I 40 value 0
+A 9 body 10,19,40
+R 2 body 9
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

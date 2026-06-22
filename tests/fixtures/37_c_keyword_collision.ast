@@ -1,0 +1,62 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/37_c_keyword_collision.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_test
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name double
+N 5 RequiredParameterNode
+S 5 name register
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 LocalVariableWriteNode
+S 7 name static
+N 8 CallNode
+S 8 name +
+N 9 LocalVariableReadNode
+S 9 name double
+R 8 receiver 9
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name register
+A 10 arguments 11
+R 8 arguments 10
+R 8 block -1
+S 8 call_operator .
+R 7 value 8
+N 12 LocalVariableWriteNode
+S 12 name volatile
+N 13 CallNode
+S 13 name *
+N 14 LocalVariableReadNode
+S 14 name static
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 2
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 17 CallNode
+S 17 name spnl_emit
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 LocalVariableReadNode
+S 19 name volatile
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+A 6 body 7,12,17
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

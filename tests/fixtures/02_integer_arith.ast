@@ -1,0 +1,112 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/02_integer_arith.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name add
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name a
+N 5 RequiredParameterNode
+S 5 name b
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name +
+N 8 LocalVariableReadNode
+S 8 name a
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name b
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+A 6 body 7
+R 2 body 6
+R 2 receiver -1
+N 11 DefNode
+S 11 name sub
+N 12 ParametersNode
+N 13 RequiredParameterNode
+S 13 name a
+N 14 RequiredParameterNode
+S 14 name b
+A 12 requireds 13,14
+A 12 optionals 
+A 12 keywords 
+A 12 posts 
+R 11 parameters 12
+N 15 StatementsNode
+N 16 CallNode
+S 16 name -
+N 17 LocalVariableReadNode
+S 17 name a
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 LocalVariableReadNode
+S 19 name b
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 11 body 15
+R 11 receiver -1
+N 20 LocalVariableWriteNode
+S 20 name x
+N 21 CallNode
+S 21 name add
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 2
+N 24 IntegerNode
+I 24 value 3
+A 22 arguments 23,24
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 LocalVariableWriteNode
+S 25 name y
+N 26 CallNode
+S 26 name sub
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 IntegerNode
+I 28 value 10
+N 29 IntegerNode
+I 29 value 4
+A 27 arguments 28,29
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+R 25 value 26
+N 30 CallNode
+S 30 name puts
+R 30 receiver -1
+N 31 ArgumentsNode
+N 32 CallNode
+S 32 name +
+N 33 LocalVariableReadNode
+S 33 name x
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 LocalVariableReadNode
+S 35 name y
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+A 31 arguments 32
+R 30 arguments 31
+R 30 block -1
+S 30 call_operator .
+A 1 body 2,11,20,25,30
+R 0 statements 1

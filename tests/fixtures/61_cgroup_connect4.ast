@@ -1,0 +1,43 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/61_cgroup_connect4.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name cgroup__connect4__guard
+R 2 parameters -1
+N 3 StatementsNode
+N 4 IfNode
+N 5 CallNode
+S 5 name ==
+N 6 CallNode
+S 6 name sock_addr_port
+R 6 receiver -1
+R 6 arguments -1
+R 6 block -1
+S 6 call_operator .
+R 5 receiver 6
+N 7 ArgumentsNode
+N 8 IntegerNode
+I 8 value 9999
+A 7 arguments 8
+R 5 arguments 7
+R 5 block -1
+S 5 call_operator .
+R 4 predicate 5
+N 9 StatementsNode
+N 10 IntegerNode
+I 10 value 0
+A 9 body 10
+R 4 statements 9
+N 11 ElseNode
+N 12 StatementsNode
+N 13 IntegerNode
+I 13 value 1
+A 12 body 13
+R 11 statements 12
+R 4 subsequent 11
+A 3 body 4
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

@@ -1,0 +1,16 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/01_hello.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name puts
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 StringNode
+S 4 content hello,%20world
+A 3 arguments 4
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+A 1 body 2
+R 0 statements 1

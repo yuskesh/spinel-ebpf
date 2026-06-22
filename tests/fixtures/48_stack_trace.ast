@@ -1,0 +1,64 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/48_stack_trace.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 LocalVariableWriteNode
+S 7 name ksid
+N 8 CallNode
+S 8 name stack_id
+R 8 receiver -1
+R 8 arguments -1
+R 8 block -1
+S 8 call_operator .
+R 7 value 8
+N 9 LocalVariableWriteNode
+S 9 name usid
+N 10 CallNode
+S 10 name user_stack_id
+R 10 receiver -1
+R 10 arguments -1
+R 10 block -1
+S 10 call_operator .
+R 9 value 10
+N 11 CallNode
+S 11 name hist_observe_by
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 LocalVariableReadNode
+S 13 name ksid
+N 14 IntegerNode
+I 14 value 1
+A 12 arguments 13,14
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+N 15 CallNode
+S 15 name spnl_emit_pair
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 LocalVariableReadNode
+S 17 name ksid
+N 18 LocalVariableReadNode
+S 18 name usid
+A 16 arguments 17,18
+R 15 arguments 16
+R 15 block -1
+S 15 call_operator .
+A 6 body 7,9,11,15
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

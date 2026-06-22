@@ -1,0 +1,38 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/78_fib_lookup_kprobe.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @x
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name kprobe__tcp_sendmsg
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name sk
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 InstanceVariableWriteNode
+S 8 name @x
+N 9 CallNode
+S 9 name fib_lookup
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name sk
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+A 7 body 8
+R 4 body 7
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

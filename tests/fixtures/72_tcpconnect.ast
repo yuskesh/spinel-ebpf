@@ -1,0 +1,81 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/72_tcpconnect.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__sock__inet_sock_set_state
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name daddr
+N 5 RequiredParameterNode
+S 5 name dport
+N 6 RequiredParameterNode
+S 6 name oldstate
+N 7 RequiredParameterNode
+S 7 name newstate
+A 3 requireds 4,5,6,7
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 8 StatementsNode
+N 9 IfNode
+N 10 AndNode
+N 11 ParenthesesNode
+N 12 StatementsNode
+N 13 CallNode
+S 13 name ==
+N 14 LocalVariableReadNode
+S 14 name oldstate
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 7
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+A 12 body 13
+R 11 body 12
+R 10 left 11
+N 17 ParenthesesNode
+N 18 StatementsNode
+N 19 CallNode
+S 19 name ==
+N 20 LocalVariableReadNode
+S 20 name newstate
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 IntegerNode
+I 22 value 2
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+A 18 body 19
+R 17 body 18
+R 10 right 17
+R 9 predicate 10
+N 23 StatementsNode
+N 24 CallNode
+S 24 name spnl_emit_pair
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 LocalVariableReadNode
+S 26 name daddr
+N 27 LocalVariableReadNode
+S 27 name dport
+A 25 arguments 26,27
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+A 23 body 24
+R 9 statements 23
+R 9 subsequent -1
+N 28 IntegerNode
+I 28 value 0
+A 8 body 9,28
+R 2 body 8
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

@@ -1,0 +1,216 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/10_polymorphic.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name Shape
+R 2 constant_path 3
+R 2 superclass -1
+N 4 StatementsNode
+N 5 DefNode
+S 5 name area
+R 5 parameters -1
+N 6 StatementsNode
+N 7 IntegerNode
+I 7 value 0
+A 6 body 7
+R 5 body 6
+R 5 receiver -1
+A 4 body 5
+R 2 body 4
+N 8 ClassNode
+N 9 ConstantReadNode
+S 9 name Square
+R 8 constant_path 9
+N 10 ConstantReadNode
+S 10 name Shape
+R 8 superclass 10
+N 11 StatementsNode
+N 12 DefNode
+S 12 name initialize
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name s
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @side
+N 17 LocalVariableReadNode
+S 17 name s
+R 16 value 17
+A 15 body 16
+R 12 body 15
+R 12 receiver -1
+N 18 DefNode
+S 18 name area
+R 18 parameters -1
+N 19 StatementsNode
+N 20 CallNode
+S 20 name *
+N 21 InstanceVariableReadNode
+S 21 name @side
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 InstanceVariableReadNode
+S 23 name @side
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+A 19 body 20
+R 18 body 19
+R 18 receiver -1
+A 11 body 12,18
+R 8 body 11
+N 24 ClassNode
+N 25 ConstantReadNode
+S 25 name Triangle
+R 24 constant_path 25
+N 26 ConstantReadNode
+S 26 name Shape
+R 24 superclass 26
+N 27 StatementsNode
+N 28 DefNode
+S 28 name initialize
+N 29 ParametersNode
+N 30 RequiredParameterNode
+S 30 name b
+N 31 RequiredParameterNode
+S 31 name h
+A 29 requireds 30,31
+A 29 optionals 
+A 29 keywords 
+A 29 posts 
+R 28 parameters 29
+N 32 StatementsNode
+N 33 InstanceVariableWriteNode
+S 33 name @b
+N 34 LocalVariableReadNode
+S 34 name b
+R 33 value 34
+N 35 InstanceVariableWriteNode
+S 35 name @h
+N 36 LocalVariableReadNode
+S 36 name h
+R 35 value 36
+A 32 body 33,35
+R 28 body 32
+R 28 receiver -1
+N 37 DefNode
+S 37 name area
+R 37 parameters -1
+N 38 StatementsNode
+N 39 CallNode
+S 39 name /
+N 40 CallNode
+S 40 name *
+N 41 InstanceVariableReadNode
+S 41 name @b
+R 40 receiver 41
+N 42 ArgumentsNode
+N 43 InstanceVariableReadNode
+S 43 name @h
+A 42 arguments 43
+R 40 arguments 42
+R 40 block -1
+S 40 call_operator .
+R 39 receiver 40
+N 44 ArgumentsNode
+N 45 IntegerNode
+I 45 value 2
+A 44 arguments 45
+R 39 arguments 44
+R 39 block -1
+S 39 call_operator .
+A 38 body 39
+R 37 body 38
+R 37 receiver -1
+A 27 body 28,37
+R 24 body 27
+N 46 LocalVariableWriteNode
+S 46 name shapes
+N 47 ArrayNode
+N 48 CallNode
+S 48 name new
+N 49 ConstantReadNode
+S 49 name Square
+R 48 receiver 49
+N 50 ArgumentsNode
+N 51 IntegerNode
+I 51 value 4
+A 50 arguments 51
+R 48 arguments 50
+R 48 block -1
+S 48 call_operator .
+N 52 CallNode
+S 52 name new
+N 53 ConstantReadNode
+S 53 name Triangle
+R 52 receiver 53
+N 54 ArgumentsNode
+N 55 IntegerNode
+I 55 value 3
+N 56 IntegerNode
+I 56 value 6
+A 54 arguments 55,56
+R 52 arguments 54
+R 52 block -1
+S 52 call_operator .
+A 47 elements 48,52
+R 46 value 47
+N 57 LocalVariableWriteNode
+S 57 name total
+N 58 IntegerNode
+I 58 value 0
+R 57 value 58
+N 59 CallNode
+S 59 name each
+N 60 LocalVariableReadNode
+S 60 name shapes
+R 59 receiver 60
+R 59 arguments -1
+N 61 BlockNode
+N 62 BlockParametersNode
+N 63 ParametersNode
+N 64 RequiredParameterNode
+S 64 name s
+A 63 requireds 64
+A 63 optionals 
+A 63 keywords 
+A 63 posts 
+R 62 parameters 63
+R 61 parameters 62
+N 65 StatementsNode
+N 66 LocalVariableOperatorWriteNode
+S 66 name total
+S 66 binary_operator +
+N 67 CallNode
+S 67 name area
+N 68 LocalVariableReadNode
+S 68 name s
+R 67 receiver 68
+R 67 arguments -1
+R 67 block -1
+S 67 call_operator .
+R 66 value 67
+A 65 body 66
+R 61 body 65
+R 59 block 61
+S 59 call_operator .
+N 69 CallNode
+S 69 name puts
+R 69 receiver -1
+N 70 ArgumentsNode
+N 71 LocalVariableReadNode
+S 71 name total
+A 70 arguments 71
+R 69 arguments 70
+R 69 block -1
+S 69 call_operator .
+A 1 body 2,8,24,46,57,59,69
+R 0 statements 1

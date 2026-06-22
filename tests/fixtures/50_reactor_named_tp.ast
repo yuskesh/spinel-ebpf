@@ -1,0 +1,96 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/50_reactor_named_tp.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name ReactorNamedTp
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value tracepoint
+N 12 StringNode
+S 12 content sched
+N 13 StringNode
+S 13 content sched_switch
+A 10 arguments 11,12,13
+R 9 arguments 10
+N 14 BlockNode
+N 15 BlockParametersNode
+N 16 ParametersNode
+N 17 RequiredParameterNode
+S 17 name prev_pid
+N 18 RequiredParameterNode
+S 18 name next_pid
+A 16 requireds 17,18
+A 16 optionals 
+A 16 keywords 
+A 16 posts 
+R 15 parameters 16
+R 14 parameters 15
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @switches
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @switches
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 InstanceVariableWriteNode
+S 25 name @last_prev
+N 26 LocalVariableReadNode
+S 26 name prev_pid
+R 25 value 26
+N 27 InstanceVariableWriteNode
+S 27 name @last_next
+N 28 LocalVariableReadNode
+S 28 name next_pid
+R 27 value 28
+A 19 body 20,25,27
+R 14 body 19
+R 9 block 14
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+N 29 InstanceVariableWriteNode
+S 29 name @switches
+N 30 IntegerNode
+I 30 value 0
+R 29 value 30
+N 31 InstanceVariableWriteNode
+S 31 name @last_prev
+N 32 IntegerNode
+I 32 value 0
+R 31 value 32
+N 33 InstanceVariableWriteNode
+S 33 name @last_next
+N 34 IntegerNode
+I 34 value 0
+R 33 value 34
+A 1 body 2,29,31,33
+R 0 statements 1

@@ -1,0 +1,99 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/64_xsk_dev_redirect.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name xdp__redir
+R 2 parameters -1
+N 3 StatementsNode
+N 4 LocalVariableWriteNode
+S 4 name p
+N 5 CallNode
+S 5 name pkt_l4_proto
+R 5 receiver -1
+R 5 arguments -1
+R 5 block -1
+S 5 call_operator .
+R 4 value 5
+N 6 IfNode
+N 7 CallNode
+S 7 name ==
+N 8 LocalVariableReadNode
+S 8 name p
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 ConstantPathNode
+N 11 ConstantPathNode
+N 12 ConstantReadNode
+S 12 name IP
+R 11 parent 12
+S 11 name Proto
+R 10 parent 11
+S 10 name TCP
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 predicate 7
+N 13 StatementsNode
+N 14 CallNode
+S 14 name xsk_redirect
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 0
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+A 13 body 14
+R 6 statements 13
+N 17 IfNode
+N 18 CallNode
+S 18 name ==
+N 19 LocalVariableReadNode
+S 19 name p
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 ConstantPathNode
+N 22 ConstantPathNode
+N 23 ConstantReadNode
+S 23 name IP
+R 22 parent 23
+S 22 name Proto
+R 21 parent 22
+S 21 name UDP
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 17 predicate 18
+N 24 StatementsNode
+N 25 CallNode
+S 25 name dev_redirect
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 0
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 24 body 25
+R 17 statements 24
+N 28 ElseNode
+N 29 StatementsNode
+N 30 ConstantPathNode
+N 31 ConstantReadNode
+S 31 name XDP
+R 30 parent 31
+S 30 name PASS
+A 29 body 30
+R 28 statements 29
+R 17 subsequent 28
+R 6 subsequent 17
+A 3 body 4,6
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

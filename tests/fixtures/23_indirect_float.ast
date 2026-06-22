@@ -1,0 +1,98 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/23_indirect_float.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name needs_float_indirect
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name *
+N 7 LocalVariableReadNode
+S 7 name x
+R 6 receiver 7
+N 8 ArgumentsNode
+N 9 IntegerNode
+I 9 value 2
+A 8 arguments 9
+R 6 arguments 8
+R 6 block -1
+S 6 call_operator .
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+N 10 DefNode
+S 10 name pure_int
+N 11 ParametersNode
+N 12 RequiredParameterNode
+S 12 name a
+N 13 RequiredParameterNode
+S 13 name b
+A 11 requireds 12,13
+A 11 optionals 
+A 11 keywords 
+A 11 posts 
+R 10 parameters 11
+N 14 StatementsNode
+N 15 CallNode
+S 15 name +
+N 16 LocalVariableReadNode
+S 16 name a
+R 15 receiver 16
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name b
+A 17 arguments 18
+R 15 arguments 17
+R 15 block -1
+S 15 call_operator .
+A 14 body 15
+R 10 body 14
+R 10 receiver -1
+N 19 CallNode
+S 19 name puts
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 CallNode
+S 21 name needs_float_indirect
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 FloatNode
+F 23 value 2.5
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+N 24 CallNode
+S 24 name puts
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 CallNode
+S 26 name pure_int
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 IntegerNode
+I 28 value 3
+N 29 IntegerNode
+I 29 value 4
+A 27 arguments 28,29
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+A 25 arguments 26
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+A 1 body 2,10,19,24
+R 0 statements 1

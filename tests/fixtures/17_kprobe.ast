@@ -1,0 +1,35 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/17_kprobe.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name tracepoint__syscalls__sys_enter_openat
+R 5 parameters -1
+N 6 StatementsNode
+N 7 CallNode
+S 7 name spnl_emit
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 IntegerNode
+I 9 value 1
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+A 6 body 7
+R 5 body 6
+R 5 receiver -1
+A 1 body 2,5
+R 0 statements 1

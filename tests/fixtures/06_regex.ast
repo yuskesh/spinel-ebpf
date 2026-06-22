@@ -1,0 +1,81 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/06_regex.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name looks_like_email?
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name s
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 IfNode
+N 7 CallNode
+S 7 name =~
+N 8 LocalVariableReadNode
+S 8 name s
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 RegularExpressionNode
+S 10 unescaped \A[^@\s]+@[^@\s]+\z
+I 10 flags 4098
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 predicate 7
+N 11 StatementsNode
+N 12 TrueNode
+A 11 body 12
+R 6 statements 11
+N 13 ElseNode
+N 14 StatementsNode
+N 15 FalseNode
+A 14 body 15
+R 13 statements 14
+R 6 subsequent 13
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+N 16 CallNode
+S 16 name puts
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 CallNode
+S 18 name looks_like_email?
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 StringNode
+S 20 content a@b.com
+A 19 arguments 20
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+N 21 CallNode
+S 21 name puts
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 CallNode
+S 23 name looks_like_email?
+R 23 receiver -1
+N 24 ArgumentsNode
+N 25 StringNode
+S 25 content nope
+A 24 arguments 25
+R 23 arguments 24
+R 23 block -1
+S 23 call_operator .
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+A 1 body 2,16,21
+R 0 statements 1

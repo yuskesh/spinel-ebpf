@@ -1,0 +1,230 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/73_irq.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__irq__irq_handler_entry
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name irq
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name lat_start
+R 6 receiver -1
+N 7 ArgumentsNode
+N 8 CallNode
+S 8 name +
+N 9 CallNode
+S 9 name cpu_id
+R 9 receiver -1
+R 9 arguments -1
+R 9 block -1
+S 9 call_operator .
+R 8 receiver 9
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name irq
+A 10 arguments 11
+R 8 arguments 10
+R 8 block -1
+S 8 call_operator .
+A 7 arguments 8
+R 6 arguments 7
+R 6 block -1
+S 6 call_operator .
+N 12 IntegerNode
+I 12 value 0
+A 5 body 6,12
+R 2 body 5
+R 2 receiver -1
+N 13 DefNode
+S 13 name tracepoint__irq__irq_handler_exit
+N 14 ParametersNode
+N 15 RequiredParameterNode
+S 15 name irq
+N 16 RequiredParameterNode
+S 16 name ret
+A 14 requireds 15,16
+A 14 optionals 
+A 14 keywords 
+A 14 posts 
+R 13 parameters 14
+N 17 StatementsNode
+N 18 LocalVariableWriteNode
+S 18 name d
+N 19 CallNode
+S 19 name lat_end
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 CallNode
+S 21 name +
+N 22 CallNode
+S 22 name cpu_id
+R 22 receiver -1
+R 22 arguments -1
+R 22 block -1
+S 22 call_operator .
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 LocalVariableReadNode
+S 24 name irq
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+N 25 IfNode
+N 26 CallNode
+S 26 name >
+N 27 LocalVariableReadNode
+S 27 name d
+R 26 receiver 27
+N 28 ArgumentsNode
+N 29 IntegerNode
+I 29 value 0
+A 28 arguments 29
+R 26 arguments 28
+R 26 block -1
+S 26 call_operator .
+R 25 predicate 26
+N 30 StatementsNode
+N 31 CallNode
+S 31 name hist_observe
+R 31 receiver -1
+N 32 ArgumentsNode
+N 33 LocalVariableReadNode
+S 33 name d
+A 32 arguments 33
+R 31 arguments 32
+R 31 block -1
+S 31 call_operator .
+A 30 body 31
+R 25 statements 30
+R 25 subsequent -1
+N 34 IntegerNode
+I 34 value 0
+A 17 body 18,25,34
+R 13 body 17
+R 13 receiver -1
+N 35 DefNode
+S 35 name tracepoint__irq__softirq_entry
+N 36 ParametersNode
+N 37 RequiredParameterNode
+S 37 name vec
+A 36 requireds 37
+A 36 optionals 
+A 36 keywords 
+A 36 posts 
+R 35 parameters 36
+N 38 StatementsNode
+N 39 CallNode
+S 39 name lat_start
+R 39 receiver -1
+N 40 ArgumentsNode
+N 41 CallNode
+S 41 name +
+N 42 CallNode
+S 42 name cpu_id
+R 42 receiver -1
+R 42 arguments -1
+R 42 block -1
+S 42 call_operator .
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 LocalVariableReadNode
+S 44 name vec
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+A 40 arguments 41
+R 39 arguments 40
+R 39 block -1
+S 39 call_operator .
+N 45 IntegerNode
+I 45 value 0
+A 38 body 39,45
+R 35 body 38
+R 35 receiver -1
+N 46 DefNode
+S 46 name tracepoint__irq__softirq_exit
+N 47 ParametersNode
+N 48 RequiredParameterNode
+S 48 name vec
+A 47 requireds 48
+A 47 optionals 
+A 47 keywords 
+A 47 posts 
+R 46 parameters 47
+N 49 StatementsNode
+N 50 LocalVariableWriteNode
+S 50 name d
+N 51 CallNode
+S 51 name lat_end
+R 51 receiver -1
+N 52 ArgumentsNode
+N 53 CallNode
+S 53 name +
+N 54 CallNode
+S 54 name cpu_id
+R 54 receiver -1
+R 54 arguments -1
+R 54 block -1
+S 54 call_operator .
+R 53 receiver 54
+N 55 ArgumentsNode
+N 56 LocalVariableReadNode
+S 56 name vec
+A 55 arguments 56
+R 53 arguments 55
+R 53 block -1
+S 53 call_operator .
+A 52 arguments 53
+R 51 arguments 52
+R 51 block -1
+S 51 call_operator .
+R 50 value 51
+N 57 IfNode
+N 58 CallNode
+S 58 name >
+N 59 LocalVariableReadNode
+S 59 name d
+R 58 receiver 59
+N 60 ArgumentsNode
+N 61 IntegerNode
+I 61 value 0
+A 60 arguments 61
+R 58 arguments 60
+R 58 block -1
+S 58 call_operator .
+R 57 predicate 58
+N 62 StatementsNode
+N 63 CallNode
+S 63 name hist_observe
+R 63 receiver -1
+N 64 ArgumentsNode
+N 65 LocalVariableReadNode
+S 65 name d
+A 64 arguments 65
+R 63 arguments 64
+R 63 block -1
+S 63 call_operator .
+A 62 body 63
+R 57 statements 62
+R 57 subsequent -1
+N 66 IntegerNode
+I 66 value 0
+A 49 body 50,57,66
+R 46 body 49
+R 46 receiver -1
+A 1 body 2,13,35,46
+R 0 statements 1

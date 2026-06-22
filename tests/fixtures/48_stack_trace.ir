@@ -1,0 +1,23 @@
+SPINEL-IR v1
+SA @meth_names 1 kprobe__do_sys_openat2
+SA @meth_param_names 1 dfd,filename
+SA @meth_param_types 1 int,int
+SA @meth_return_types 1 int
+IA @meth_body_ids 1 6
+SA @cls_names 0 
+SA @cls_parents 0 
+SA @cls_ivar_names 0 
+SA @cls_ivar_types 0 
+SA @cls_meth_names 0 
+SA @cls_meth_returns 0 
+SA @cls_meth_ptypes 0 
+SA @cls_meth_params 0 
+SA @cls_meth_bodies 0 
+SN 6 dfd|filename|ksid|usid
+ST 6 unknown|unknown|poly|poly
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

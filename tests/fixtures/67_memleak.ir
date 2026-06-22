@@ -1,0 +1,25 @@
+SPINEL-IR v1
+SA @meth_names 2 tracepoint__kmem__kmalloc|tracepoint__kmem__kfree
+SA @meth_param_names 2 call_site,ptr,bytes_req,bytes_alloc,gfp_flags,node|call_site,ptr
+SA @meth_param_types 2 int,int,int,int,int,int|int,int
+SA @meth_return_types 2 int|int
+IA @meth_body_ids 2 10,21
+SA @cls_names 0 
+SA @cls_parents 0 
+SA @cls_ivar_names 0 
+SA @cls_ivar_types 0 
+SA @cls_meth_names 0 
+SA @cls_meth_returns 0 
+SA @cls_meth_ptypes 0 
+SA @cls_meth_params 0 
+SA @cls_meth_bodies 0 
+SN 10 call_site|ptr|bytes_req|bytes_alloc|gfp_flags|node
+ST 10 unknown|unknown|unknown|unknown|unknown|unknown
+SN 21 call_site|ptr
+ST 21 unknown|unknown
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

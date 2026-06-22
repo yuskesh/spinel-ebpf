@@ -1,0 +1,33 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/62_iter_task.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @ntasks
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name iter__task__count
+R 4 parameters -1
+N 5 StatementsNode
+N 6 InstanceVariableWriteNode
+S 6 name @ntasks
+N 7 CallNode
+S 7 name +
+N 8 InstanceVariableReadNode
+S 8 name @ntasks
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 IntegerNode
+I 10 value 1
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+A 5 body 6
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

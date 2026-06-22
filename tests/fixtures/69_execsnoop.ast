@@ -1,0 +1,44 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/69_execsnoop.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__syscalls__sys_enter_execve
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name filename
+N 5 RequiredParameterNode
+S 5 name argv
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name spnl_emit_str
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name filename
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+N 10 CallNode
+S 10 name emit_argv
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name argv
+A 11 arguments 12
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+N 13 IntegerNode
+I 13 value 0
+A 6 body 7,10,13
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

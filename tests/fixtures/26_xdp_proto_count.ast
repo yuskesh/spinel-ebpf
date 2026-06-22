@@ -1,0 +1,212 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/26_xdp_proto_count.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name IPPROTO_ICMP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name IPPROTO_TCP
+N 7 IntegerNode
+I 7 value 6
+R 6 value 7
+N 8 ConstantWriteNode
+S 8 name IPPROTO_UDP
+N 9 IntegerNode
+I 9 value 17
+R 8 value 9
+N 10 InstanceVariableWriteNode
+S 10 name @rx_icmp
+N 11 IntegerNode
+I 11 value 0
+R 10 value 11
+N 12 InstanceVariableWriteNode
+S 12 name @rx_tcp
+N 13 IntegerNode
+I 13 value 0
+R 12 value 13
+N 14 InstanceVariableWriteNode
+S 14 name @rx_udp
+N 15 IntegerNode
+I 15 value 0
+R 14 value 15
+N 16 InstanceVariableWriteNode
+S 16 name @rx_other
+N 17 IntegerNode
+I 17 value 0
+R 16 value 17
+N 18 DefNode
+S 18 name xdp__main
+R 18 parameters -1
+N 19 StatementsNode
+N 20 LocalVariableWriteNode
+S 20 name p
+N 21 CallNode
+S 21 name pkt_l4_proto
+R 21 receiver -1
+R 21 arguments -1
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 22 IfNode
+N 23 CallNode
+S 23 name ==
+N 24 LocalVariableReadNode
+S 24 name p
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 ConstantReadNode
+S 26 name IPPROTO_ICMP
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 predicate 23
+N 27 StatementsNode
+N 28 InstanceVariableWriteNode
+S 28 name @rx_icmp
+N 29 CallNode
+S 29 name +
+N 30 InstanceVariableReadNode
+S 30 name @rx_icmp
+R 29 receiver 30
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 1
+A 31 arguments 32
+R 29 arguments 31
+R 29 block -1
+S 29 call_operator .
+R 28 value 29
+A 27 body 28
+R 22 statements 27
+N 33 IfNode
+N 34 CallNode
+S 34 name ==
+N 35 LocalVariableReadNode
+S 35 name p
+R 34 receiver 35
+N 36 ArgumentsNode
+N 37 ConstantReadNode
+S 37 name IPPROTO_TCP
+A 36 arguments 37
+R 34 arguments 36
+R 34 block -1
+S 34 call_operator .
+R 33 predicate 34
+N 38 StatementsNode
+N 39 InstanceVariableWriteNode
+S 39 name @rx_tcp
+N 40 CallNode
+S 40 name +
+N 41 InstanceVariableReadNode
+S 41 name @rx_tcp
+R 40 receiver 41
+N 42 ArgumentsNode
+N 43 IntegerNode
+I 43 value 1
+A 42 arguments 43
+R 40 arguments 42
+R 40 block -1
+S 40 call_operator .
+R 39 value 40
+A 38 body 39
+R 33 statements 38
+N 44 IfNode
+N 45 CallNode
+S 45 name ==
+N 46 LocalVariableReadNode
+S 46 name p
+R 45 receiver 46
+N 47 ArgumentsNode
+N 48 ConstantReadNode
+S 48 name IPPROTO_UDP
+A 47 arguments 48
+R 45 arguments 47
+R 45 block -1
+S 45 call_operator .
+R 44 predicate 45
+N 49 StatementsNode
+N 50 InstanceVariableWriteNode
+S 50 name @rx_udp
+N 51 CallNode
+S 51 name +
+N 52 InstanceVariableReadNode
+S 52 name @rx_udp
+R 51 receiver 52
+N 53 ArgumentsNode
+N 54 IntegerNode
+I 54 value 1
+A 53 arguments 54
+R 51 arguments 53
+R 51 block -1
+S 51 call_operator .
+R 50 value 51
+A 49 body 50
+R 44 statements 49
+N 55 ElseNode
+N 56 StatementsNode
+N 57 InstanceVariableWriteNode
+S 57 name @rx_other
+N 58 CallNode
+S 58 name +
+N 59 InstanceVariableReadNode
+S 59 name @rx_other
+R 58 receiver 59
+N 60 ArgumentsNode
+N 61 IntegerNode
+I 61 value 1
+A 60 arguments 61
+R 58 arguments 60
+R 58 block -1
+S 58 call_operator .
+R 57 value 58
+A 56 body 57
+R 55 statements 56
+R 44 subsequent 55
+R 33 subsequent 44
+R 22 subsequent 33
+N 62 ConstantReadNode
+S 62 name XDP_PASS
+A 19 body 20,22,62
+R 18 body 19
+R 18 receiver -1
+N 63 CallNode
+S 63 name puts
+R 63 receiver -1
+N 64 ArgumentsNode
+N 65 StringNode
+S 65 content [demo]%20XDP%20per-protocol%20counter%20attached.%20sleeping%2015s;%20dump%204%20counters%20via%20bpftool.
+A 64 arguments 65
+R 63 arguments 64
+R 63 block -1
+S 63 call_operator .
+N 66 CallNode
+S 66 name sleep
+R 66 receiver -1
+N 67 ArgumentsNode
+N 68 IntegerNode
+I 68 value 15
+A 67 arguments 68
+R 66 arguments 67
+R 66 block -1
+S 66 call_operator .
+N 69 CallNode
+S 69 name puts
+R 69 receiver -1
+N 70 ArgumentsNode
+N 71 StringNode
+S 71 content [demo]%20exiting.
+A 70 arguments 71
+R 69 arguments 70
+R 69 block -1
+S 69 call_operator .
+A 1 body 2,4,6,8,10,12,14,16,18,63,66,69
+R 0 statements 1

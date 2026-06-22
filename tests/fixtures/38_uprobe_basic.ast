@@ -1,0 +1,66 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/38_uprobe_basic.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @calls
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @returns
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @last_ret
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 DefNode
+S 8 name uprobe__readline
+N 9 ParametersNode
+N 10 RequiredParameterNode
+S 10 name prompt
+A 9 requireds 10
+A 9 optionals 
+A 9 keywords 
+A 9 posts 
+R 8 parameters 9
+N 11 StatementsNode
+N 12 InstanceVariableOperatorWriteNode
+S 12 name @calls
+S 12 binary_operator +
+N 13 IntegerNode
+I 13 value 1
+R 12 value 13
+A 11 body 12
+R 8 body 11
+R 8 receiver -1
+N 14 DefNode
+S 14 name uretprobe__readline
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name ret
+A 15 requireds 16
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+N 17 StatementsNode
+N 18 InstanceVariableOperatorWriteNode
+S 18 name @returns
+S 18 binary_operator +
+N 19 IntegerNode
+I 19 value 1
+R 18 value 19
+N 20 InstanceVariableWriteNode
+S 20 name @last_ret
+N 21 LocalVariableReadNode
+S 21 name ret
+R 20 value 21
+A 17 body 18,20
+R 14 body 17
+R 14 receiver -1
+A 1 body 2,4,6,8,14
+R 0 statements 1

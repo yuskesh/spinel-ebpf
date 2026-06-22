@@ -1,0 +1,70 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/63_queue_stack.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @last_popped
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fentry__do_sys_openat2
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name dfd
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 CallNode
+S 8 name fifo_push
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 IntegerNode
+I 10 value 42
+A 9 arguments 10
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 11 CallNode
+S 11 name lifo_push
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 IntegerNode
+I 13 value 7
+A 12 arguments 13
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+A 7 body 8,11
+R 4 body 7
+R 4 receiver -1
+N 14 DefNode
+S 14 name fexit__do_sys_openat2
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name dfd
+N 17 RequiredParameterNode
+S 17 name ret
+A 15 requireds 16,17
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+N 18 StatementsNode
+N 19 InstanceVariableWriteNode
+S 19 name @last_popped
+N 20 CallNode
+S 20 name fifo_pop
+R 20 receiver -1
+R 20 arguments -1
+R 20 block -1
+S 20 call_operator .
+R 19 value 20
+A 18 body 19
+R 14 body 18
+R 14 receiver -1
+A 1 body 2,4,14
+R 0 statements 1

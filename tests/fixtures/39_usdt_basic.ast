@@ -1,0 +1,62 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/39_usdt_basic.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @catches
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @throws
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name usdt__libstdcxx__throw
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name obj
+N 9 RequiredParameterNode
+S 9 name tinfo
+N 10 RequiredParameterNode
+S 10 name dest
+A 7 requireds 8,9,10
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 11 StatementsNode
+N 12 InstanceVariableOperatorWriteNode
+S 12 name @throws
+S 12 binary_operator +
+N 13 IntegerNode
+I 13 value 1
+R 12 value 13
+A 11 body 12
+R 6 body 11
+R 6 receiver -1
+N 14 DefNode
+S 14 name usdt__libstdcxx__catch
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name obj
+N 17 RequiredParameterNode
+S 17 name tinfo
+A 15 requireds 16,17
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+N 18 StatementsNode
+N 19 InstanceVariableOperatorWriteNode
+S 19 name @catches
+S 19 binary_operator +
+N 20 IntegerNode
+I 20 value 1
+R 19 value 20
+A 18 body 19
+R 14 body 18
+R 14 receiver -1
+A 1 body 2,4,6,14
+R 0 statements 1

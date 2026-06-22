@@ -1,0 +1,25 @@
+SPINEL-IR v1
+SA @meth_names 0 
+SA @meth_param_names 0 
+SA @meth_param_types 0 
+SA @meth_return_types 0 
+IA @meth_body_ids 0 
+SA @cls_names 1 SimpleScx
+SA @cls_parents 1 BPF_SchedExt
+SA @cls_ivar_names 1 
+SA @cls_ivar_types 1 
+SA @cls_meth_names 1 enqueue;dispatch;init
+SA @cls_meth_returns 1 nil;nil;int
+SA @cls_meth_ptypes 1 int,int%7Cint,int%7C
+SA @cls_meth_params 1 p,enq_flags%7Ccpu,prev%7C
+SA @cls_meth_bodies 1 11;25;32
+SN 11 p|enq_flags
+ST 11 unknown|unknown
+SN 25 cpu|prev
+ST 25 unknown|unknown
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

@@ -1,0 +1,100 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/98_bool_sig.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name is_big
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name size
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name >
+N 7 LocalVariableReadNode
+S 7 name size
+R 6 receiver 7
+N 8 ArgumentsNode
+N 9 IntegerNode
+I 9 value 256
+A 8 arguments 9
+R 6 arguments 8
+R 6 block -1
+S 6 call_operator .
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+N 10 DefNode
+S 10 name both
+N 11 ParametersNode
+N 12 RequiredParameterNode
+S 12 name flag
+A 11 requireds 12
+A 11 optionals 
+A 11 keywords 
+A 11 posts 
+R 10 parameters 11
+N 13 StatementsNode
+N 14 LocalVariableReadNode
+S 14 name flag
+A 13 body 14
+R 10 body 13
+R 10 receiver -1
+N 15 DefNode
+S 15 name kprobe__tcp_sendmsg
+N 16 ParametersNode
+N 17 RequiredParameterNode
+S 17 name sk
+N 18 RequiredParameterNode
+S 18 name msg
+N 19 RequiredParameterNode
+S 19 name size
+A 16 requireds 17,18,19
+A 16 optionals 
+A 16 keywords 
+A 16 posts 
+R 15 parameters 16
+N 20 StatementsNode
+N 21 IfNode
+N 22 CallNode
+S 22 name both
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 CallNode
+S 24 name is_big
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 LocalVariableReadNode
+S 26 name size
+A 25 arguments 26
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+A 23 arguments 24
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+R 21 predicate 22
+N 27 StatementsNode
+N 28 CallNode
+S 28 name spnl_emit
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 LocalVariableReadNode
+S 30 name size
+A 29 arguments 30
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+A 27 body 28
+R 21 statements 27
+R 21 subsequent -1
+A 20 body 21
+R 15 body 20
+R 15 receiver -1
+A 1 body 2,10,15
+R 0 statements 1

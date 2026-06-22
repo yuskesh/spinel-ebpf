@@ -1,0 +1,60 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/33_sk_reuseport.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name SK_PASS
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @pass_count
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name sk_reuseport__pass_all
+R 6 parameters -1
+N 7 StatementsNode
+N 8 InstanceVariableWriteNode
+S 8 name @pass_count
+N 9 CallNode
+S 9 name +
+N 10 InstanceVariableReadNode
+S 10 name @pass_count
+R 9 receiver 10
+N 11 ArgumentsNode
+N 12 IntegerNode
+I 12 value 1
+A 11 arguments 12
+R 9 arguments 11
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+N 13 ConstantReadNode
+S 13 name SK_PASS
+A 7 body 8,13
+R 6 body 7
+R 6 receiver -1
+N 14 CallNode
+S 14 name puts
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 StringNode
+S 16 content [demo]%20sk_reuseport%20program%20loaded%20(attach%20happens%20separately)
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+N 17 CallNode
+S 17 name sleep
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 5
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+A 1 body 2,4,6,14,17
+R 0 statements 1

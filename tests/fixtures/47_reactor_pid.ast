@@ -1,0 +1,144 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/47_reactor_pid.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name ReactorPid
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value uprobe
+N 12 StringNode
+S 12 content /usr/bin/bash:readline
+N 13 KeywordHashNode
+N 14 AssocNode
+N 15 SymbolNode
+S 15 value pid
+R 14 key 15
+N 16 IntegerNode
+I 16 value 12345
+R 14 value 16
+A 13 elements 14
+A 10 arguments 11,12,13
+R 9 arguments 10
+N 17 BlockNode
+N 18 BlockParametersNode
+N 19 ParametersNode
+N 20 RequiredParameterNode
+S 20 name prompt
+A 19 requireds 20
+A 19 optionals 
+A 19 keywords 
+A 19 posts 
+R 18 parameters 19
+R 17 parameters 18
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @hits
+N 23 CallNode
+S 23 name +
+N 24 InstanceVariableReadNode
+S 24 name @hits
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 1
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+A 21 body 22
+R 17 body 21
+R 9 block 17
+S 9 call_operator .
+N 27 CallNode
+S 27 name on
+R 27 receiver -1
+N 28 ArgumentsNode
+N 29 SymbolNode
+S 29 value usdt
+N 30 StringNode
+S 30 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+N 31 StringNode
+S 31 content libstdcxx
+N 32 StringNode
+S 32 content throw
+N 33 KeywordHashNode
+N 34 AssocNode
+N 35 SymbolNode
+S 35 value pid
+R 34 key 35
+N 36 IntegerNode
+I 36 value 67890
+R 34 value 36
+A 33 elements 34
+A 28 arguments 29,30,31,32,33
+R 27 arguments 28
+N 37 BlockNode
+N 38 BlockParametersNode
+N 39 ParametersNode
+N 40 RequiredParameterNode
+S 40 name obj
+N 41 RequiredParameterNode
+S 41 name tinfo
+N 42 RequiredParameterNode
+S 42 name dest
+A 39 requireds 40,41,42
+A 39 optionals 
+A 39 keywords 
+A 39 posts 
+R 38 parameters 39
+R 37 parameters 38
+N 43 StatementsNode
+N 44 InstanceVariableWriteNode
+S 44 name @throws
+N 45 CallNode
+S 45 name +
+N 46 InstanceVariableReadNode
+S 46 name @throws
+R 45 receiver 46
+N 47 ArgumentsNode
+N 48 IntegerNode
+I 48 value 1
+A 47 arguments 48
+R 45 arguments 47
+R 45 block -1
+S 45 call_operator .
+R 44 value 45
+A 43 body 44
+R 37 body 43
+R 27 block 37
+S 27 call_operator .
+A 4 body 5,9,27
+R 2 body 4
+N 49 InstanceVariableWriteNode
+S 49 name @hits
+N 50 IntegerNode
+I 50 value 0
+R 49 value 50
+N 51 InstanceVariableWriteNode
+S 51 name @throws
+N 52 IntegerNode
+I 52 value 0
+R 51 value 52
+A 1 body 2,49,51
+R 0 statements 1

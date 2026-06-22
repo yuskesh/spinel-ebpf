@@ -1,0 +1,23 @@
+SPINEL-IR v1
+SA @meth_names 0 
+SA @meth_param_names 0 
+SA @meth_param_types 0 
+SA @meth_return_types 0 
+IA @meth_body_ids 0 
+SA @cls_names 2 ReactorUsdtParams|Toplevel
+SA @cls_parents 2 |
+SA @cls_ivar_names 2 @last_obj;@count|@last_obj;@count
+SA @cls_ivar_types 2 int;int|int;int
+SA @cls_meth_names 2 |
+SA @cls_meth_returns 2 |
+SA @cls_meth_ptypes 2 |
+SA @cls_meth_params 2 |
+SA @cls_meth_bodies 2 |
+SN 1 obj
+ST 1 poly
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

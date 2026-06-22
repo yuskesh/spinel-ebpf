@@ -1,0 +1,196 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/55_qdisc_fifo.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name FifoQdisc
+R 2 constant_path 3
+N 4 ConstantPathNode
+N 5 ConstantReadNode
+S 5 name BPF
+R 4 parent 5
+S 4 name Qdisc
+R 2 superclass 4
+N 6 StatementsNode
+N 7 DefNode
+S 7 name init
+N 8 ParametersNode
+N 9 RequiredParameterNode
+S 9 name sch
+N 10 RequiredParameterNode
+S 10 name opt
+N 11 RequiredParameterNode
+S 11 name extack
+A 8 requireds 9,10,11
+A 8 optionals 
+A 8 keywords 
+A 8 posts 
+R 7 parameters 8
+N 12 StatementsNode
+N 13 IntegerNode
+I 13 value 0
+A 12 body 13
+R 7 body 12
+R 7 receiver -1
+N 14 DefNode
+S 14 name enqueue
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name skb
+N 17 RequiredParameterNode
+S 17 name sch
+N 18 RequiredParameterNode
+S 18 name to_free
+A 15 requireds 16,17,18
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @enqueued
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @enqueued
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 CallNode
+S 25 name queue_push
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 LocalVariableReadNode
+S 27 name skb
+N 28 LocalVariableReadNode
+S 28 name to_free
+A 26 arguments 27,28
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 19 body 20,25
+R 14 body 19
+R 14 receiver -1
+N 29 DefNode
+S 29 name dequeue
+N 30 ParametersNode
+N 31 RequiredParameterNode
+S 31 name sch
+A 30 requireds 31
+A 30 optionals 
+A 30 keywords 
+A 30 posts 
+R 29 parameters 30
+N 32 StatementsNode
+N 33 InstanceVariableWriteNode
+S 33 name @dequeued
+N 34 CallNode
+S 34 name +
+N 35 InstanceVariableReadNode
+S 35 name @dequeued
+R 34 receiver 35
+N 36 ArgumentsNode
+N 37 IntegerNode
+I 37 value 1
+A 36 arguments 37
+R 34 arguments 36
+R 34 block -1
+S 34 call_operator .
+R 33 value 34
+N 38 LocalVariableWriteNode
+S 38 name skb
+N 39 CallNode
+S 39 name queue_pop
+R 39 receiver -1
+R 39 arguments -1
+R 39 block -1
+S 39 call_operator .
+R 38 value 39
+N 40 IfNode
+N 41 CallNode
+S 41 name !=
+N 42 LocalVariableReadNode
+S 42 name skb
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 IntegerNode
+I 44 value 0
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+R 40 predicate 41
+N 45 StatementsNode
+N 46 CallNode
+S 46 name qdisc_bstats_update
+R 46 receiver -1
+N 47 ArgumentsNode
+N 48 LocalVariableReadNode
+S 48 name sch
+N 49 LocalVariableReadNode
+S 49 name skb
+A 47 arguments 48,49
+R 46 arguments 47
+R 46 block -1
+S 46 call_operator .
+A 45 body 46
+R 40 statements 45
+R 40 subsequent -1
+N 50 LocalVariableReadNode
+S 50 name skb
+A 32 body 33,38,40,50
+R 29 body 32
+R 29 receiver -1
+N 51 DefNode
+S 51 name reset
+N 52 ParametersNode
+N 53 RequiredParameterNode
+S 53 name sch
+A 52 requireds 53
+A 52 optionals 
+A 52 keywords 
+A 52 posts 
+R 51 parameters 52
+N 54 StatementsNode
+N 55 IntegerNode
+I 55 value 0
+A 54 body 55
+R 51 body 54
+R 51 receiver -1
+N 56 DefNode
+S 56 name destroy
+N 57 ParametersNode
+N 58 RequiredParameterNode
+S 58 name sch
+A 57 requireds 58
+A 57 optionals 
+A 57 keywords 
+A 57 posts 
+R 56 parameters 57
+N 59 StatementsNode
+N 60 IntegerNode
+I 60 value 0
+A 59 body 60
+R 56 body 59
+R 56 receiver -1
+A 6 body 7,14,29,51,56
+R 2 body 6
+N 61 InstanceVariableWriteNode
+S 61 name @enqueued
+N 62 IntegerNode
+I 62 value 0
+R 61 value 62
+N 63 InstanceVariableWriteNode
+S 63 name @dequeued
+N 64 IntegerNode
+I 64 value 0
+R 63 value 64
+A 1 body 2,61,63
+R 0 statements 1

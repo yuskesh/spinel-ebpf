@@ -1,0 +1,21 @@
+SPINEL-IR v1
+SA @meth_names 3 socket_filter__keep|flow_dissector__ok|sk_lookup__pass
+SA @meth_param_names 3 ||
+SA @meth_param_types 3 ||
+SA @meth_return_types 3 int|int|int
+IA @meth_body_ids 3 3,6,9
+SA @cls_names 0 
+SA @cls_parents 0 
+SA @cls_ivar_names 0 
+SA @cls_ivar_types 0 
+SA @cls_meth_names 0 
+SA @cls_meth_returns 0 
+SA @cls_meth_ptypes 0 
+SA @cls_meth_params 0 
+SA @cls_meth_bodies 0 
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

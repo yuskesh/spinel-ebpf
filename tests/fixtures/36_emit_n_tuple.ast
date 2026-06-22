@@ -1,0 +1,54 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/36_emit_n_tuple.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+N 6 RequiredParameterNode
+S 6 name how
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name spnl_emit3
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name dfd
+N 11 IntegerNode
+I 11 value 1
+N 12 IntegerNode
+I 12 value 2
+A 9 arguments 10,11,12
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 13 CallNode
+S 13 name spnl_emit4
+R 13 receiver -1
+N 14 ArgumentsNode
+N 15 LocalVariableReadNode
+S 15 name dfd
+N 16 IntegerNode
+I 16 value 1
+N 17 IntegerNode
+I 17 value 2
+N 18 IntegerNode
+I 18 value 3
+A 14 arguments 15,16,17,18
+R 13 arguments 14
+R 13 block -1
+S 13 call_operator .
+A 7 body 8,13
+R 2 body 7
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

@@ -1,0 +1,58 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/88_arena_config.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @got
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @scaled
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name tc__ingress__cfg
+R 6 parameters -1
+N 7 StatementsNode
+N 8 LocalVariableWriteNode
+S 8 name c
+N 9 CallNode
+S 9 name arena_get
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 IntegerNode
+I 11 value 0
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+N 12 InstanceVariableWriteNode
+S 12 name @got
+N 13 LocalVariableReadNode
+S 13 name c
+R 12 value 13
+N 14 InstanceVariableWriteNode
+S 14 name @scaled
+N 15 CallNode
+S 15 name *
+N 16 LocalVariableReadNode
+S 16 name c
+R 15 receiver 16
+N 17 ArgumentsNode
+N 18 IntegerNode
+I 18 value 10
+A 17 arguments 18
+R 15 arguments 17
+R 15 block -1
+S 15 call_operator .
+R 14 value 15
+N 19 ConstantReadNode
+S 19 name TC_ACT_OK
+A 7 body 8,12,14,19
+R 6 body 7
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

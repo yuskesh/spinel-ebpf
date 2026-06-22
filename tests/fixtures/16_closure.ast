@@ -1,0 +1,190 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/16_closure.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name sum_squares
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name n
+A 6 requireds 7
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+N 8 StatementsNode
+N 9 LocalVariableWriteNode
+S 9 name total
+N 10 IntegerNode
+I 10 value 0
+R 9 value 10
+N 11 CallNode
+S 11 name times
+N 12 LocalVariableReadNode
+S 12 name n
+R 11 receiver 12
+R 11 arguments -1
+N 13 BlockNode
+N 14 BlockParametersNode
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name i
+A 15 requireds 16
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+R 13 parameters 14
+N 17 StatementsNode
+N 18 LocalVariableWriteNode
+S 18 name total
+N 19 CallNode
+S 19 name +
+N 20 LocalVariableReadNode
+S 20 name total
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 CallNode
+S 22 name *
+N 23 LocalVariableReadNode
+S 23 name i
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 LocalVariableReadNode
+S 25 name i
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 17 body 18
+R 13 body 17
+R 11 block 13
+S 11 call_operator .
+N 26 LocalVariableReadNode
+S 26 name total
+A 8 body 9,11,26
+R 5 body 8
+R 5 receiver -1
+N 27 DefNode
+S 27 name emit_running_sum
+N 28 ParametersNode
+N 29 RequiredParameterNode
+S 29 name n
+A 28 requireds 29
+A 28 optionals 
+A 28 keywords 
+A 28 posts 
+R 27 parameters 28
+N 30 StatementsNode
+N 31 LocalVariableWriteNode
+S 31 name acc
+N 32 IntegerNode
+I 32 value 0
+R 31 value 32
+N 33 CallNode
+S 33 name times
+N 34 LocalVariableReadNode
+S 34 name n
+R 33 receiver 34
+R 33 arguments -1
+N 35 BlockNode
+N 36 BlockParametersNode
+N 37 ParametersNode
+N 38 RequiredParameterNode
+S 38 name i
+A 37 requireds 38
+A 37 optionals 
+A 37 keywords 
+A 37 posts 
+R 36 parameters 37
+R 35 parameters 36
+N 39 StatementsNode
+N 40 LocalVariableWriteNode
+S 40 name acc
+N 41 CallNode
+S 41 name +
+N 42 LocalVariableReadNode
+S 42 name acc
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 LocalVariableReadNode
+S 44 name i
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+R 40 value 41
+N 45 CallNode
+S 45 name spnl_emit
+R 45 receiver -1
+N 46 ArgumentsNode
+N 47 LocalVariableReadNode
+S 47 name acc
+A 46 arguments 47
+R 45 arguments 46
+R 45 block -1
+S 45 call_operator .
+A 39 body 40,45
+R 35 body 39
+R 33 block 35
+S 33 call_operator .
+N 48 LocalVariableReadNode
+S 48 name acc
+A 30 body 31,33,48
+R 27 body 30
+R 27 receiver -1
+N 49 CallNode
+S 49 name puts
+R 49 receiver -1
+N 50 ArgumentsNode
+N 51 CallNode
+S 51 name sum_squares
+R 51 receiver -1
+N 52 ArgumentsNode
+N 53 IntegerNode
+I 53 value 4
+A 52 arguments 53
+R 51 arguments 52
+R 51 block -1
+S 51 call_operator .
+A 50 arguments 51
+R 49 arguments 50
+R 49 block -1
+S 49 call_operator .
+N 54 CallNode
+S 54 name puts
+R 54 receiver -1
+N 55 ArgumentsNode
+N 56 CallNode
+S 56 name emit_running_sum
+R 56 receiver -1
+N 57 ArgumentsNode
+N 58 IntegerNode
+I 58 value 5
+A 57 arguments 58
+R 56 arguments 57
+R 56 block -1
+S 56 call_operator .
+A 55 arguments 56
+R 54 arguments 55
+R 54 block -1
+S 54 call_operator .
+A 1 body 2,5,27,49,54
+R 0 statements 1

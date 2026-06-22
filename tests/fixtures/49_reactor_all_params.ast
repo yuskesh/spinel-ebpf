@@ -1,0 +1,362 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/49_reactor_all_params.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name ReactorAllParams
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 StringNode
+S 12 content do_sys_openat2
+A 10 arguments 11,12
+R 9 arguments 10
+N 13 BlockNode
+N 14 BlockParametersNode
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name dfd
+N 17 RequiredParameterNode
+S 17 name filename
+A 15 requireds 16,17
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+R 13 parameters 14
+N 18 StatementsNode
+N 19 InstanceVariableWriteNode
+S 19 name @k_dfd
+N 20 LocalVariableReadNode
+S 20 name dfd
+R 19 value 20
+N 21 InstanceVariableWriteNode
+S 21 name @k_calls
+N 22 CallNode
+S 22 name +
+N 23 InstanceVariableReadNode
+S 23 name @k_calls
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 1
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+R 21 value 22
+A 18 body 19,21
+R 13 body 18
+R 9 block 13
+S 9 call_operator .
+N 26 CallNode
+S 26 name on
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 SymbolNode
+S 28 value kretprobe
+N 29 StringNode
+S 29 content do_sys_openat2
+A 27 arguments 28,29
+R 26 arguments 27
+N 30 BlockNode
+N 31 BlockParametersNode
+N 32 ParametersNode
+N 33 RequiredParameterNode
+S 33 name ret
+A 32 requireds 33
+A 32 optionals 
+A 32 keywords 
+A 32 posts 
+R 31 parameters 32
+R 30 parameters 31
+N 34 StatementsNode
+N 35 InstanceVariableWriteNode
+S 35 name @kr_ret
+N 36 LocalVariableReadNode
+S 36 name ret
+R 35 value 36
+A 34 body 35
+R 30 body 34
+R 26 block 30
+S 26 call_operator .
+N 37 CallNode
+S 37 name on
+R 37 receiver -1
+N 38 ArgumentsNode
+N 39 SymbolNode
+S 39 value fentry
+N 40 StringNode
+S 40 content tcp_v4_rcv
+A 38 arguments 39,40
+R 37 arguments 38
+N 41 BlockNode
+N 42 BlockParametersNode
+N 43 ParametersNode
+N 44 RequiredParameterNode
+S 44 name skb
+A 43 requireds 44
+A 43 optionals 
+A 43 keywords 
+A 43 posts 
+R 42 parameters 43
+R 41 parameters 42
+N 45 StatementsNode
+N 46 InstanceVariableWriteNode
+S 46 name @fe_calls
+N 47 CallNode
+S 47 name +
+N 48 InstanceVariableReadNode
+S 48 name @fe_calls
+R 47 receiver 48
+N 49 ArgumentsNode
+N 50 IntegerNode
+I 50 value 1
+A 49 arguments 50
+R 47 arguments 49
+R 47 block -1
+S 47 call_operator .
+R 46 value 47
+A 45 body 46
+R 41 body 45
+R 37 block 41
+S 37 call_operator .
+N 51 CallNode
+S 51 name on
+R 51 receiver -1
+N 52 ArgumentsNode
+N 53 SymbolNode
+S 53 value fexit
+N 54 StringNode
+S 54 content tcp_v4_rcv
+A 52 arguments 53,54
+R 51 arguments 52
+N 55 BlockNode
+N 56 BlockParametersNode
+N 57 ParametersNode
+N 58 RequiredParameterNode
+S 58 name skb
+N 59 RequiredParameterNode
+S 59 name ret
+A 57 requireds 58,59
+A 57 optionals 
+A 57 keywords 
+A 57 posts 
+R 56 parameters 57
+R 55 parameters 56
+N 60 StatementsNode
+N 61 InstanceVariableWriteNode
+S 61 name @fx_ret
+N 62 LocalVariableReadNode
+S 62 name ret
+R 61 value 62
+A 60 body 61
+R 55 body 60
+R 51 block 55
+S 51 call_operator .
+N 63 CallNode
+S 63 name on
+R 63 receiver -1
+N 64 ArgumentsNode
+N 65 SymbolNode
+S 65 value tracepoint
+N 66 StringNode
+S 66 content syscalls
+N 67 StringNode
+S 67 content sys_enter_write
+A 64 arguments 65,66,67
+R 63 arguments 64
+N 68 BlockNode
+N 69 BlockParametersNode
+N 70 ParametersNode
+N 71 RequiredParameterNode
+S 71 name fd
+N 72 RequiredParameterNode
+S 72 name buf
+N 73 RequiredParameterNode
+S 73 name count
+A 70 requireds 71,72,73
+A 70 optionals 
+A 70 keywords 
+A 70 posts 
+R 69 parameters 70
+R 68 parameters 69
+N 74 StatementsNode
+N 75 InstanceVariableWriteNode
+S 75 name @tp_count
+N 76 LocalVariableReadNode
+S 76 name count
+R 75 value 76
+A 74 body 75
+R 68 body 74
+R 63 block 68
+S 63 call_operator .
+N 77 CallNode
+S 77 name on
+R 77 receiver -1
+N 78 ArgumentsNode
+N 79 SymbolNode
+S 79 value uprobe
+N 80 StringNode
+S 80 content /usr/bin/bash:readline
+A 78 arguments 79,80
+R 77 arguments 78
+N 81 BlockNode
+N 82 BlockParametersNode
+N 83 ParametersNode
+N 84 RequiredParameterNode
+S 84 name prompt
+A 83 requireds 84
+A 83 optionals 
+A 83 keywords 
+A 83 posts 
+R 82 parameters 83
+R 81 parameters 82
+N 85 StatementsNode
+N 86 InstanceVariableWriteNode
+S 86 name @up_prompt
+N 87 LocalVariableReadNode
+S 87 name prompt
+R 86 value 87
+A 85 body 86
+R 81 body 85
+R 77 block 81
+S 77 call_operator .
+N 88 CallNode
+S 88 name on
+R 88 receiver -1
+N 89 ArgumentsNode
+N 90 SymbolNode
+S 90 value uretprobe
+N 91 StringNode
+S 91 content /usr/bin/bash:readline
+A 89 arguments 90,91
+R 88 arguments 89
+N 92 BlockNode
+N 93 BlockParametersNode
+N 94 ParametersNode
+N 95 RequiredParameterNode
+S 95 name ret
+A 94 requireds 95
+A 94 optionals 
+A 94 keywords 
+A 94 posts 
+R 93 parameters 94
+R 92 parameters 93
+N 96 StatementsNode
+N 97 InstanceVariableWriteNode
+S 97 name @uret_ret
+N 98 LocalVariableReadNode
+S 98 name ret
+R 97 value 98
+A 96 body 97
+R 92 body 96
+R 88 block 92
+S 88 call_operator .
+N 99 CallNode
+S 99 name on
+R 99 receiver -1
+N 100 ArgumentsNode
+N 101 SymbolNode
+S 101 value usdt
+N 102 StringNode
+S 102 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+N 103 StringNode
+S 103 content libstdcxx
+N 104 StringNode
+S 104 content throw
+A 100 arguments 101,102,103,104
+R 99 arguments 100
+N 105 BlockNode
+N 106 BlockParametersNode
+N 107 ParametersNode
+N 108 RequiredParameterNode
+S 108 name obj
+N 109 RequiredParameterNode
+S 109 name tinfo
+N 110 RequiredParameterNode
+S 110 name dest
+A 107 requireds 108,109,110
+A 107 optionals 
+A 107 keywords 
+A 107 posts 
+R 106 parameters 107
+R 105 parameters 106
+N 111 StatementsNode
+N 112 InstanceVariableWriteNode
+S 112 name @us_obj
+N 113 LocalVariableReadNode
+S 113 name obj
+R 112 value 113
+A 111 body 112
+R 105 body 111
+R 99 block 105
+S 99 call_operator .
+A 4 body 5,9,26,37,51,63,77,88,99
+R 2 body 4
+N 114 InstanceVariableWriteNode
+S 114 name @k_dfd
+N 115 IntegerNode
+I 115 value 0
+R 114 value 115
+N 116 InstanceVariableWriteNode
+S 116 name @k_calls
+N 117 IntegerNode
+I 117 value 0
+R 116 value 117
+N 118 InstanceVariableWriteNode
+S 118 name @kr_ret
+N 119 IntegerNode
+I 119 value 0
+R 118 value 119
+N 120 InstanceVariableWriteNode
+S 120 name @fe_calls
+N 121 IntegerNode
+I 121 value 0
+R 120 value 121
+N 122 InstanceVariableWriteNode
+S 122 name @fx_ret
+N 123 IntegerNode
+I 123 value 0
+R 122 value 123
+N 124 InstanceVariableWriteNode
+S 124 name @tp_count
+N 125 IntegerNode
+I 125 value 0
+R 124 value 125
+N 126 InstanceVariableWriteNode
+S 126 name @up_prompt
+N 127 IntegerNode
+I 127 value 0
+R 126 value 127
+N 128 InstanceVariableWriteNode
+S 128 name @uret_ret
+N 129 IntegerNode
+I 129 value 0
+R 128 value 129
+N 130 InstanceVariableWriteNode
+S 130 name @us_obj
+N 131 IntegerNode
+I 131 value 0
+R 130 value 131
+A 1 body 2,114,116,118,120,122,124,126,128,130
+R 0 statements 1

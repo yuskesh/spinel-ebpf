@@ -1,0 +1,33 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/66_niche_progs.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name socket_filter__keep
+R 2 parameters -1
+N 3 StatementsNode
+N 4 IntegerNode
+I 4 value 65535
+A 3 body 4
+R 2 body 3
+R 2 receiver -1
+N 5 DefNode
+S 5 name flow_dissector__ok
+R 5 parameters -1
+N 6 StatementsNode
+N 7 IntegerNode
+I 7 value 0
+A 6 body 7
+R 5 body 6
+R 5 receiver -1
+N 8 DefNode
+S 8 name sk_lookup__pass
+R 8 parameters -1
+N 9 StatementsNode
+N 10 IntegerNode
+I 10 value 1
+A 9 body 10
+R 8 body 9
+R 8 receiver -1
+A 1 body 2,5,8
+R 0 statements 1

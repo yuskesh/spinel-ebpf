@@ -1,0 +1,119 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/94_router.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @redirects
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__router
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name oif
+N 7 CallNode
+S 7 name fib_lookup
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 CallNode
+S 9 name pkt_ip4_dst
+R 9 receiver -1
+R 9 arguments -1
+R 9 block -1
+S 9 call_operator .
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 10 IfNode
+N 11 CallNode
+S 11 name <
+N 12 LocalVariableReadNode
+S 12 name oif
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 0
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 LocalVariableWriteNode
+S 16 name oif
+N 17 CallNode
+S 17 name arena_get
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 0
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+A 15 body 16
+R 10 statements 15
+R 10 subsequent -1
+N 20 LocalVariableWriteNode
+S 20 name out
+N 21 IntegerNode
+I 21 value 0
+R 20 value 21
+N 22 IfNode
+N 23 CallNode
+S 23 name >
+N 24 LocalVariableReadNode
+S 24 name oif
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 0
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 predicate 23
+N 27 StatementsNode
+N 28 InstanceVariableWriteNode
+S 28 name @redirects
+N 29 CallNode
+S 29 name +
+N 30 InstanceVariableReadNode
+S 30 name @redirects
+R 29 receiver 30
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 1
+A 31 arguments 32
+R 29 arguments 31
+R 29 block -1
+S 29 call_operator .
+R 28 value 29
+N 33 LocalVariableWriteNode
+S 33 name out
+N 34 CallNode
+S 34 name redirect
+R 34 receiver -1
+N 35 ArgumentsNode
+N 36 LocalVariableReadNode
+S 36 name oif
+A 35 arguments 36
+R 34 arguments 35
+R 34 block -1
+S 34 call_operator .
+R 33 value 34
+A 27 body 28,33
+R 22 statements 27
+R 22 subsequent -1
+N 37 LocalVariableReadNode
+S 37 name out
+A 5 body 6,10,20,22,37
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

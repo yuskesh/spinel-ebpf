@@ -1,0 +1,42 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/91_ip_options.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @sport
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__demo
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name l4
+N 7 CallNode
+S 7 name l4_offset
+R 7 receiver -1
+R 7 arguments -1
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @sport
+N 9 CallNode
+S 9 name skb_load_u16
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name l4
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+N 12 ConstantReadNode
+S 12 name TC_ACT_OK
+A 5 body 6,8,12
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

@@ -1,0 +1,217 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/13_locals.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name calc
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name a
+N 5 RequiredParameterNode
+S 5 name b
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 LocalVariableWriteNode
+S 7 name x
+N 8 CallNode
+S 8 name +
+N 9 LocalVariableReadNode
+S 9 name a
+R 8 receiver 9
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name b
+A 10 arguments 11
+R 8 arguments 10
+R 8 block -1
+S 8 call_operator .
+R 7 value 8
+N 12 LocalVariableWriteNode
+S 12 name y
+N 13 CallNode
+S 13 name *
+N 14 LocalVariableReadNode
+S 14 name x
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 2
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 17 CallNode
+S 17 name -
+N 18 LocalVariableReadNode
+S 18 name y
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+A 6 body 7,12,17
+R 2 body 6
+R 2 receiver -1
+N 21 DefNode
+S 21 name step
+N 22 ParametersNode
+N 23 RequiredParameterNode
+S 23 name n
+A 22 requireds 23
+A 22 optionals 
+A 22 keywords 
+A 22 posts 
+R 21 parameters 22
+N 24 StatementsNode
+N 25 LocalVariableWriteNode
+S 25 name inc
+N 26 CallNode
+S 26 name +
+N 27 LocalVariableReadNode
+S 27 name n
+R 26 receiver 27
+N 28 ArgumentsNode
+N 29 IntegerNode
+I 29 value 1
+A 28 arguments 29
+R 26 arguments 28
+R 26 block -1
+S 26 call_operator .
+R 25 value 26
+N 30 LocalVariableWriteNode
+S 30 name doubled
+N 31 CallNode
+S 31 name *
+N 32 LocalVariableReadNode
+S 32 name inc
+R 31 receiver 32
+N 33 ArgumentsNode
+N 34 IntegerNode
+I 34 value 2
+A 33 arguments 34
+R 31 arguments 33
+R 31 block -1
+S 31 call_operator .
+R 30 value 31
+N 35 LocalVariableReadNode
+S 35 name doubled
+A 24 body 25,30,35
+R 21 body 24
+R 21 receiver -1
+N 36 DefNode
+S 36 name reassign
+N 37 ParametersNode
+N 38 RequiredParameterNode
+S 38 name n
+A 37 requireds 38
+A 37 optionals 
+A 37 keywords 
+A 37 posts 
+R 36 parameters 37
+N 39 StatementsNode
+N 40 LocalVariableWriteNode
+S 40 name acc
+N 41 IntegerNode
+I 41 value 0
+R 40 value 41
+N 42 LocalVariableWriteNode
+S 42 name acc
+N 43 CallNode
+S 43 name +
+N 44 LocalVariableReadNode
+S 44 name acc
+R 43 receiver 44
+N 45 ArgumentsNode
+N 46 LocalVariableReadNode
+S 46 name n
+A 45 arguments 46
+R 43 arguments 45
+R 43 block -1
+S 43 call_operator .
+R 42 value 43
+N 47 LocalVariableWriteNode
+S 47 name acc
+N 48 CallNode
+S 48 name +
+N 49 LocalVariableReadNode
+S 49 name acc
+R 48 receiver 49
+N 50 ArgumentsNode
+N 51 LocalVariableReadNode
+S 51 name n
+A 50 arguments 51
+R 48 arguments 50
+R 48 block -1
+S 48 call_operator .
+R 47 value 48
+N 52 LocalVariableReadNode
+S 52 name acc
+A 39 body 40,42,47,52
+R 36 body 39
+R 36 receiver -1
+N 53 CallNode
+S 53 name puts
+R 53 receiver -1
+N 54 ArgumentsNode
+N 55 CallNode
+S 55 name calc
+R 55 receiver -1
+N 56 ArgumentsNode
+N 57 IntegerNode
+I 57 value 3
+N 58 IntegerNode
+I 58 value 4
+A 56 arguments 57,58
+R 55 arguments 56
+R 55 block -1
+S 55 call_operator .
+A 54 arguments 55
+R 53 arguments 54
+R 53 block -1
+S 53 call_operator .
+N 59 CallNode
+S 59 name puts
+R 59 receiver -1
+N 60 ArgumentsNode
+N 61 CallNode
+S 61 name step
+R 61 receiver -1
+N 62 ArgumentsNode
+N 63 IntegerNode
+I 63 value 5
+A 62 arguments 63
+R 61 arguments 62
+R 61 block -1
+S 61 call_operator .
+A 60 arguments 61
+R 59 arguments 60
+R 59 block -1
+S 59 call_operator .
+N 64 CallNode
+S 64 name puts
+R 64 receiver -1
+N 65 ArgumentsNode
+N 66 CallNode
+S 66 name reassign
+R 66 receiver -1
+N 67 ArgumentsNode
+N 68 IntegerNode
+I 68 value 7
+A 67 arguments 68
+R 66 arguments 67
+R 66 block -1
+S 66 call_operator .
+A 65 arguments 66
+R 64 arguments 65
+R 64 block -1
+S 64 call_operator .
+A 1 body 2,21,36,53,59,64
+R 0 statements 1

@@ -1,0 +1,97 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/87_arena_hash_del.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @before
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @after
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name tc__ingress__hashdemo
+R 6 parameters -1
+N 7 StatementsNode
+N 8 CallNode
+S 8 name arena_hash_set
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 IntegerNode
+I 10 value 1001
+N 11 IntegerNode
+I 11 value 42
+A 9 arguments 10,11
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 12 CallNode
+S 12 name arena_hash_set
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 2002
+N 15 IntegerNode
+I 15 value 99
+A 13 arguments 14,15
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+N 16 CallNode
+S 16 name arena_hash_set
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 IntegerNode
+I 18 value 3003
+N 19 IntegerNode
+I 19 value 7
+A 17 arguments 18,19
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+N 20 InstanceVariableWriteNode
+S 20 name @before
+N 21 CallNode
+S 21 name arena_hash_get
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 2002
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 24 CallNode
+S 24 name arena_hash_del
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 2002
+A 25 arguments 26
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+N 27 InstanceVariableWriteNode
+S 27 name @after
+N 28 CallNode
+S 28 name arena_hash_get
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 IntegerNode
+I 30 value 2002
+A 29 arguments 30
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+R 27 value 28
+N 31 ConstantReadNode
+S 31 name TC_ACT_OK
+A 7 body 8,12,16,20,24,27,31
+R 6 body 7
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

@@ -1,0 +1,25 @@
+SPINEL-IR v1
+SA @meth_names 3 spnl_emit|emit_squares|emit_indices
+SA @meth_param_names 3 x|n|n
+SA @meth_param_types 3 int|int|int
+SA @meth_return_types 3 nil|int|int
+IA @meth_body_ids 3 -1,8,25
+SA @cls_names 0 
+SA @cls_parents 0 
+SA @cls_ivar_names 0 
+SA @cls_ivar_types 0 
+SA @cls_meth_names 0 
+SA @cls_meth_returns 0 
+SA @cls_meth_ptypes 0 
+SA @cls_meth_params 0 
+SA @cls_meth_bodies 0 
+SN 8 n|i__bp11
+ST 8 int|int
+SN 25 n|i
+ST 25 int|int
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

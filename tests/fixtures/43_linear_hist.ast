@@ -1,0 +1,66 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/43_linear_hist.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name latency_start
+R 7 receiver -1
+R 7 arguments -1
+R 7 block -1
+S 7 call_operator .
+A 6 body 7
+R 2 body 6
+R 2 receiver -1
+N 8 DefNode
+S 8 name kretprobe__do_sys_openat2
+N 9 ParametersNode
+N 10 RequiredParameterNode
+S 10 name ret
+A 9 requireds 10
+A 9 optionals 
+A 9 keywords 
+A 9 posts 
+R 8 parameters 9
+N 11 StatementsNode
+N 12 CallNode
+S 12 name hist_observe_linear
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 CallNode
+S 14 name >>
+N 15 CallNode
+S 15 name latency_end
+R 15 receiver -1
+R 15 arguments -1
+R 15 block -1
+S 15 call_operator .
+R 14 receiver 15
+N 16 ArgumentsNode
+N 17 IntegerNode
+I 17 value 10
+A 16 arguments 17
+R 14 arguments 16
+R 14 block -1
+S 14 call_operator .
+A 13 arguments 14
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+A 11 body 12
+R 8 body 11
+R 8 receiver -1
+A 1 body 2,8
+R 0 statements 1

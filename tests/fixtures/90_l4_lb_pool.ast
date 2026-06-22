@@ -1,0 +1,171 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/90_l4_lb_pool.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @rewrites
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__lb
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name bip
+N 7 CallNode
+S 7 name flow_get
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 SymbolNode
+S 9 value conn
+N 10 SymbolNode
+S 10 value backend_ip
+A 8 arguments 9,10
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 11 IfNode
+N 12 CallNode
+S 12 name ==
+N 13 LocalVariableReadNode
+S 13 name bip
+R 12 receiver 13
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 0
+A 14 arguments 15
+R 12 arguments 14
+R 12 block -1
+S 12 call_operator .
+R 11 predicate 12
+N 16 StatementsNode
+N 17 LocalVariableWriteNode
+S 17 name idx
+N 18 CallNode
+S 18 name &
+N 19 CallNode
+S 19 name skb_load_u16
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 34
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 receiver 19
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 15
+A 22 arguments 23
+R 18 arguments 22
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+N 24 LocalVariableWriteNode
+S 24 name bip
+N 25 CallNode
+S 25 name arena_get
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 LocalVariableReadNode
+S 27 name idx
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+R 24 value 25
+N 28 CallNode
+S 28 name flow_set
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 SymbolNode
+S 30 value conn
+N 31 SymbolNode
+S 31 value backend_ip
+N 32 LocalVariableReadNode
+S 32 name bip
+A 29 arguments 30,31,32
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+N 33 InstanceVariableWriteNode
+S 33 name @rewrites
+N 34 CallNode
+S 34 name +
+N 35 InstanceVariableReadNode
+S 35 name @rewrites
+R 34 receiver 35
+N 36 ArgumentsNode
+N 37 IntegerNode
+I 37 value 1
+A 36 arguments 37
+R 34 arguments 36
+R 34 block -1
+S 34 call_operator .
+R 33 value 34
+A 16 body 17,24,28,33
+R 11 statements 16
+R 11 subsequent -1
+N 38 LocalVariableWriteNode
+S 38 name old
+N 39 CallNode
+S 39 name skb_load_u32
+R 39 receiver -1
+N 40 ArgumentsNode
+N 41 IntegerNode
+I 41 value 30
+A 40 arguments 41
+R 39 arguments 40
+R 39 block -1
+S 39 call_operator .
+R 38 value 39
+N 42 CallNode
+S 42 name l3_csum_replace_ip
+R 42 receiver -1
+N 43 ArgumentsNode
+N 44 IntegerNode
+I 44 value 24
+N 45 LocalVariableReadNode
+S 45 name old
+N 46 LocalVariableReadNode
+S 46 name bip
+A 43 arguments 44,45,46
+R 42 arguments 43
+R 42 block -1
+S 42 call_operator .
+N 47 CallNode
+S 47 name l4_csum_replace_ip
+R 47 receiver -1
+N 48 ArgumentsNode
+N 49 IntegerNode
+I 49 value 50
+N 50 LocalVariableReadNode
+S 50 name old
+N 51 LocalVariableReadNode
+S 51 name bip
+A 48 arguments 49,50,51
+R 47 arguments 48
+R 47 block -1
+S 47 call_operator .
+N 52 CallNode
+S 52 name skb_store_u32
+R 52 receiver -1
+N 53 ArgumentsNode
+N 54 IntegerNode
+I 54 value 30
+N 55 LocalVariableReadNode
+S 55 name bip
+A 53 arguments 54,55
+R 52 arguments 53
+R 52 block -1
+S 52 call_operator .
+N 56 ConstantReadNode
+S 56 name TC_ACT_OK
+A 5 body 6,11,38,42,47,52,56
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

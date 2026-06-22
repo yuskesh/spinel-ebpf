@@ -1,0 +1,39 @@
+# The spinel compiler dependency, fetched + built by scripts/setup.sh
+/deps/
+
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+
+# eBPF generated
+*.bpf.o
+*.skel.h
+vmlinux.h
+
+# Ruby
+*.rbc
+.bundle/
+vendor/bundle/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
+
+# Local env overrides
+.env
+.envrc
+*.local

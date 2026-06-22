@@ -1,0 +1,90 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/45_reactor_usdt_params.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name ReactorUsdtParams
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value usdt
+N 12 StringNode
+S 12 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+N 13 StringNode
+S 13 content libstdcxx
+N 14 StringNode
+S 14 content throw
+A 10 arguments 11,12,13,14
+R 9 arguments 10
+N 15 BlockNode
+N 16 BlockParametersNode
+N 17 ParametersNode
+N 18 RequiredParameterNode
+S 18 name obj
+N 19 RequiredParameterNode
+S 19 name tinfo
+N 20 RequiredParameterNode
+S 20 name dest
+A 17 requireds 18,19,20
+A 17 optionals 
+A 17 keywords 
+A 17 posts 
+R 16 parameters 17
+R 15 parameters 16
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @last_obj
+N 23 LocalVariableReadNode
+S 23 name obj
+R 22 value 23
+N 24 InstanceVariableWriteNode
+S 24 name @count
+N 25 CallNode
+S 25 name +
+N 26 InstanceVariableReadNode
+S 26 name @count
+R 25 receiver 26
+N 27 ArgumentsNode
+N 28 IntegerNode
+I 28 value 1
+A 27 arguments 28
+R 25 arguments 27
+R 25 block -1
+S 25 call_operator .
+R 24 value 25
+A 21 body 22,24
+R 15 body 21
+R 9 block 15
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+N 29 InstanceVariableWriteNode
+S 29 name @last_obj
+N 30 IntegerNode
+I 30 value 0
+R 29 value 30
+N 31 InstanceVariableWriteNode
+S 31 name @count
+N 32 IntegerNode
+I 32 value 0
+R 31 value 32
+A 1 body 2,29,31
+R 0 statements 1

@@ -1,0 +1,91 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/70_runqlat.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__sched__sched_wakeup
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name pid
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name lat_start
+R 6 receiver -1
+N 7 ArgumentsNode
+N 8 LocalVariableReadNode
+S 8 name pid
+A 7 arguments 8
+R 6 arguments 7
+R 6 block -1
+S 6 call_operator .
+N 9 IntegerNode
+I 9 value 0
+A 5 body 6,9
+R 2 body 5
+R 2 receiver -1
+N 10 DefNode
+S 10 name tracepoint__sched__sched_switch
+N 11 ParametersNode
+N 12 RequiredParameterNode
+S 12 name prev_pid
+N 13 RequiredParameterNode
+S 13 name next_pid
+A 11 requireds 12,13
+A 11 optionals 
+A 11 keywords 
+A 11 posts 
+R 10 parameters 11
+N 14 StatementsNode
+N 15 LocalVariableWriteNode
+S 15 name d
+N 16 CallNode
+S 16 name lat_end
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name next_pid
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+N 19 IfNode
+N 20 CallNode
+S 20 name >
+N 21 LocalVariableReadNode
+S 21 name d
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 0
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+R 19 predicate 20
+N 24 StatementsNode
+N 25 CallNode
+S 25 name hist_observe
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 LocalVariableReadNode
+S 27 name d
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 24 body 25
+R 19 statements 24
+R 19 subsequent -1
+N 28 IntegerNode
+I 28 value 0
+A 14 body 15,19,28
+R 10 body 14
+R 10 receiver -1
+A 1 body 2,10
+R 0 statements 1

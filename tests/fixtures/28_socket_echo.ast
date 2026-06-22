@@ -1,0 +1,346 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/28_socket_echo.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name Net
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name ffi_func
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 SymbolNode
+S 7 value sp_net_listen
+N 8 ArrayNode
+N 9 SymbolNode
+S 9 value int
+N 10 SymbolNode
+S 10 value int
+A 8 elements 9,10
+N 11 SymbolNode
+S 11 value int
+A 6 arguments 7,8,11
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 12 CallNode
+S 12 name ffi_func
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 SymbolNode
+S 14 value sp_net_accept
+N 15 ArrayNode
+N 16 SymbolNode
+S 16 value int
+A 15 elements 16
+N 17 SymbolNode
+S 17 value int
+A 13 arguments 14,15,17
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+N 18 CallNode
+S 18 name ffi_func
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 SymbolNode
+S 20 value sp_net_read_line
+N 21 ArrayNode
+N 22 SymbolNode
+S 22 value int
+A 21 elements 22
+N 23 SymbolNode
+S 23 value str
+A 19 arguments 20,21,23
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+N 24 CallNode
+S 24 name ffi_func
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 SymbolNode
+S 26 value sp_net_write_str
+N 27 ArrayNode
+N 28 SymbolNode
+S 28 value int
+N 29 SymbolNode
+S 29 value str
+A 27 elements 28,29
+N 30 SymbolNode
+S 30 value int
+A 25 arguments 26,27,30
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+N 31 CallNode
+S 31 name ffi_func
+R 31 receiver -1
+N 32 ArgumentsNode
+N 33 SymbolNode
+S 33 value sp_net_close
+N 34 ArrayNode
+N 35 SymbolNode
+S 35 value int
+A 34 elements 35
+N 36 SymbolNode
+S 36 value int
+A 32 arguments 33,34,36
+R 31 arguments 32
+R 31 block -1
+S 31 call_operator .
+A 4 body 5,12,18,24,31
+R 2 body 4
+N 37 LocalVariableWriteNode
+S 37 name server
+N 38 CallNode
+S 38 name sp_net_listen
+N 39 ConstantReadNode
+S 39 name Net
+R 38 receiver 39
+N 40 ArgumentsNode
+N 41 IntegerNode
+I 41 value 8080
+N 42 IntegerNode
+I 42 value 0
+A 40 arguments 41,42
+R 38 arguments 40
+R 38 block -1
+S 38 call_operator .
+R 37 value 38
+N 43 IfNode
+N 44 CallNode
+S 44 name <
+N 45 LocalVariableReadNode
+S 45 name server
+R 44 receiver 45
+N 46 ArgumentsNode
+N 47 IntegerNode
+I 47 value 0
+A 46 arguments 47
+R 44 arguments 46
+R 44 block -1
+S 44 call_operator .
+R 43 predicate 44
+N 48 StatementsNode
+N 49 CallNode
+S 49 name puts
+R 49 receiver -1
+N 50 ArgumentsNode
+N 51 StringNode
+S 51 content [echo]%20tcp_listen%20failed
+A 50 arguments 51
+R 49 arguments 50
+R 49 block -1
+S 49 call_operator .
+N 52 CallNode
+S 52 name exit
+R 52 receiver -1
+N 53 ArgumentsNode
+N 54 IntegerNode
+I 54 value 1
+A 53 arguments 54
+R 52 arguments 53
+R 52 block -1
+S 52 call_operator .
+A 48 body 49,52
+R 43 statements 48
+R 43 subsequent -1
+N 55 CallNode
+S 55 name puts
+R 55 receiver -1
+N 56 ArgumentsNode
+N 57 StringNode
+S 57 content [echo]%20listening%20on%20127.0.0.1:8080
+A 56 arguments 57
+R 55 arguments 56
+R 55 block -1
+S 55 call_operator .
+N 58 LocalVariableWriteNode
+S 58 name client
+N 59 CallNode
+S 59 name sp_net_accept
+N 60 ConstantReadNode
+S 60 name Net
+R 59 receiver 60
+N 61 ArgumentsNode
+N 62 LocalVariableReadNode
+S 62 name server
+A 61 arguments 62
+R 59 arguments 61
+R 59 block -1
+S 59 call_operator .
+R 58 value 59
+N 63 IfNode
+N 64 CallNode
+S 64 name <
+N 65 LocalVariableReadNode
+S 65 name client
+R 64 receiver 65
+N 66 ArgumentsNode
+N 67 IntegerNode
+I 67 value 0
+A 66 arguments 67
+R 64 arguments 66
+R 64 block -1
+S 64 call_operator .
+R 63 predicate 64
+N 68 StatementsNode
+N 69 CallNode
+S 69 name puts
+R 69 receiver -1
+N 70 ArgumentsNode
+N 71 StringNode
+S 71 content [echo]%20accept%20failed
+A 70 arguments 71
+R 69 arguments 70
+R 69 block -1
+S 69 call_operator .
+N 72 CallNode
+S 72 name sp_net_close
+N 73 ConstantReadNode
+S 73 name Net
+R 72 receiver 73
+N 74 ArgumentsNode
+N 75 LocalVariableReadNode
+S 75 name server
+A 74 arguments 75
+R 72 arguments 74
+R 72 block -1
+S 72 call_operator .
+N 76 CallNode
+S 76 name exit
+R 76 receiver -1
+N 77 ArgumentsNode
+N 78 IntegerNode
+I 78 value 1
+A 77 arguments 78
+R 76 arguments 77
+R 76 block -1
+S 76 call_operator .
+A 68 body 69,72,76
+R 63 statements 68
+R 63 subsequent -1
+N 79 CallNode
+S 79 name puts
+R 79 receiver -1
+N 80 ArgumentsNode
+N 81 StringNode
+S 81 content [echo]%20accepted%20client
+A 80 arguments 81
+R 79 arguments 80
+R 79 block -1
+S 79 call_operator .
+N 82 LocalVariableWriteNode
+S 82 name line
+N 83 CallNode
+S 83 name sp_net_read_line
+N 84 ConstantReadNode
+S 84 name Net
+R 83 receiver 84
+N 85 ArgumentsNode
+N 86 LocalVariableReadNode
+S 86 name client
+A 85 arguments 86
+R 83 arguments 85
+R 83 block -1
+S 83 call_operator .
+R 82 value 83
+N 87 CallNode
+S 87 name puts
+R 87 receiver -1
+N 88 ArgumentsNode
+N 89 InterpolatedStringNode
+N 90 StringNode
+S 90 content [echo]%20got:%20
+N 91 EmbeddedStatementsNode
+N 92 StatementsNode
+N 93 LocalVariableReadNode
+S 93 name line
+A 92 body 93
+R 91 statements 92
+A 89 parts 90,91
+A 88 arguments 89
+R 87 arguments 88
+R 87 block -1
+S 87 call_operator .
+N 94 CallNode
+S 94 name sp_net_write_str
+N 95 ConstantReadNode
+S 95 name Net
+R 94 receiver 95
+N 96 ArgumentsNode
+N 97 LocalVariableReadNode
+S 97 name client
+N 98 StringNode
+S 98 content echo:%20
+A 96 arguments 97,98
+R 94 arguments 96
+R 94 block -1
+S 94 call_operator .
+N 99 CallNode
+S 99 name sp_net_write_str
+N 100 ConstantReadNode
+S 100 name Net
+R 99 receiver 100
+N 101 ArgumentsNode
+N 102 LocalVariableReadNode
+S 102 name client
+N 103 LocalVariableReadNode
+S 103 name line
+A 101 arguments 102,103
+R 99 arguments 101
+R 99 block -1
+S 99 call_operator .
+N 104 CallNode
+S 104 name sp_net_write_str
+N 105 ConstantReadNode
+S 105 name Net
+R 104 receiver 105
+N 106 ArgumentsNode
+N 107 LocalVariableReadNode
+S 107 name client
+N 108 StringNode
+S 108 content %0A
+A 106 arguments 107,108
+R 104 arguments 106
+R 104 block -1
+S 104 call_operator .
+N 109 CallNode
+S 109 name sp_net_close
+N 110 ConstantReadNode
+S 110 name Net
+R 109 receiver 110
+N 111 ArgumentsNode
+N 112 LocalVariableReadNode
+S 112 name client
+A 111 arguments 112
+R 109 arguments 111
+R 109 block -1
+S 109 call_operator .
+N 113 CallNode
+S 113 name sp_net_close
+N 114 ConstantReadNode
+S 114 name Net
+R 113 receiver 114
+N 115 ArgumentsNode
+N 116 LocalVariableReadNode
+S 116 name server
+A 115 arguments 116
+R 113 arguments 115
+R 113 block -1
+S 113 call_operator .
+N 117 CallNode
+S 117 name puts
+R 117 receiver -1
+N 118 ArgumentsNode
+N 119 StringNode
+S 119 content [echo]%20done
+A 118 arguments 119
+R 117 arguments 118
+R 117 block -1
+S 117 call_operator .
+A 1 body 2,37,43,55,58,63,79,82,87,94,99,104,109,113,117
+R 0 statements 1

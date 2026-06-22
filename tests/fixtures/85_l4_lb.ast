@@ -1,0 +1,236 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/85_l4_lb.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @new_flows
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__lb
+R 4 parameters -1
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name bip
+N 7 CallNode
+S 7 name flow_get
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 SymbolNode
+S 9 value conn
+N 10 SymbolNode
+S 10 value backend_ip
+A 8 arguments 9,10
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 11 IfNode
+N 12 CallNode
+S 12 name ==
+N 13 LocalVariableReadNode
+S 13 name bip
+R 12 receiver 13
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 0
+A 14 arguments 15
+R 12 arguments 14
+R 12 block -1
+S 12 call_operator .
+R 11 predicate 12
+N 16 StatementsNode
+N 17 LocalVariableWriteNode
+S 17 name idx
+N 18 CallNode
+S 18 name &
+N 19 CallNode
+S 19 name skb_load_u16
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 34
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 receiver 19
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 3
+A 22 arguments 23
+R 18 arguments 22
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+N 24 IfNode
+N 25 CallNode
+S 25 name ==
+N 26 LocalVariableReadNode
+S 26 name idx
+R 25 receiver 26
+N 27 ArgumentsNode
+N 28 IntegerNode
+I 28 value 0
+A 27 arguments 28
+R 25 arguments 27
+R 25 block -1
+S 25 call_operator .
+R 24 predicate 25
+N 29 StatementsNode
+N 30 LocalVariableWriteNode
+S 30 name bip
+N 31 IntegerNode
+I 31 value 167772261
+R 30 value 31
+A 29 body 30
+R 24 statements 29
+N 32 IfNode
+N 33 CallNode
+S 33 name ==
+N 34 LocalVariableReadNode
+S 34 name idx
+R 33 receiver 34
+N 35 ArgumentsNode
+N 36 IntegerNode
+I 36 value 1
+A 35 arguments 36
+R 33 arguments 35
+R 33 block -1
+S 33 call_operator .
+R 32 predicate 33
+N 37 StatementsNode
+N 38 LocalVariableWriteNode
+S 38 name bip
+N 39 IntegerNode
+I 39 value 167772262
+R 38 value 39
+A 37 body 38
+R 32 statements 37
+N 40 IfNode
+N 41 CallNode
+S 41 name ==
+N 42 LocalVariableReadNode
+S 42 name idx
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 IntegerNode
+I 44 value 2
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+R 40 predicate 41
+N 45 StatementsNode
+N 46 LocalVariableWriteNode
+S 46 name bip
+N 47 IntegerNode
+I 47 value 167772263
+R 46 value 47
+A 45 body 46
+R 40 statements 45
+N 48 ElseNode
+N 49 StatementsNode
+N 50 LocalVariableWriteNode
+S 50 name bip
+N 51 IntegerNode
+I 51 value 167772264
+R 50 value 51
+A 49 body 50
+R 48 statements 49
+R 40 subsequent 48
+R 32 subsequent 40
+R 24 subsequent 32
+N 52 CallNode
+S 52 name flow_set
+R 52 receiver -1
+N 53 ArgumentsNode
+N 54 SymbolNode
+S 54 value conn
+N 55 SymbolNode
+S 55 value backend_ip
+N 56 LocalVariableReadNode
+S 56 name bip
+A 53 arguments 54,55,56
+R 52 arguments 53
+R 52 block -1
+S 52 call_operator .
+N 57 InstanceVariableWriteNode
+S 57 name @new_flows
+N 58 CallNode
+S 58 name +
+N 59 InstanceVariableReadNode
+S 59 name @new_flows
+R 58 receiver 59
+N 60 ArgumentsNode
+N 61 IntegerNode
+I 61 value 1
+A 60 arguments 61
+R 58 arguments 60
+R 58 block -1
+S 58 call_operator .
+R 57 value 58
+A 16 body 17,24,52,57
+R 11 statements 16
+R 11 subsequent -1
+N 62 LocalVariableWriteNode
+S 62 name old
+N 63 CallNode
+S 63 name skb_load_u32
+R 63 receiver -1
+N 64 ArgumentsNode
+N 65 IntegerNode
+I 65 value 30
+A 64 arguments 65
+R 63 arguments 64
+R 63 block -1
+S 63 call_operator .
+R 62 value 63
+N 66 CallNode
+S 66 name l3_csum_replace_ip
+R 66 receiver -1
+N 67 ArgumentsNode
+N 68 IntegerNode
+I 68 value 24
+N 69 LocalVariableReadNode
+S 69 name old
+N 70 LocalVariableReadNode
+S 70 name bip
+A 67 arguments 68,69,70
+R 66 arguments 67
+R 66 block -1
+S 66 call_operator .
+N 71 CallNode
+S 71 name l4_csum_replace_ip
+R 71 receiver -1
+N 72 ArgumentsNode
+N 73 IntegerNode
+I 73 value 50
+N 74 LocalVariableReadNode
+S 74 name old
+N 75 LocalVariableReadNode
+S 75 name bip
+A 72 arguments 73,74,75
+R 71 arguments 72
+R 71 block -1
+S 71 call_operator .
+N 76 CallNode
+S 76 name skb_store_u32
+R 76 receiver -1
+N 77 ArgumentsNode
+N 78 IntegerNode
+I 78 value 30
+N 79 LocalVariableReadNode
+S 79 name bip
+A 77 arguments 78,79
+R 76 arguments 77
+R 76 block -1
+S 76 call_operator .
+N 80 ConstantReadNode
+S 80 name TC_ACT_OK
+A 5 body 6,11,62,66,71,76,80
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

@@ -1,0 +1,42 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/18_tp_args.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name tracepoint__syscalls__sys_enter_openat
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name dfd
+A 6 requireds 7
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+N 8 StatementsNode
+N 9 CallNode
+S 9 name spnl_emit
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name dfd
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+A 8 body 9
+R 5 body 8
+R 5 receiver -1
+A 1 body 2,5
+R 0 statements 1

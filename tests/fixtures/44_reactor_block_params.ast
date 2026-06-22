@@ -1,0 +1,72 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/44_reactor_block_params.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name ReactorBlockParams
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value uprobe
+N 12 StringNode
+S 12 content /usr/bin/bash:readline
+A 10 arguments 11,12
+R 9 arguments 10
+N 13 BlockNode
+N 14 BlockParametersNode
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name prompt
+A 15 requireds 16
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+R 13 parameters 14
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @sum
+N 19 CallNode
+S 19 name +
+N 20 InstanceVariableReadNode
+S 20 name @sum
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 LocalVariableReadNode
+S 22 name prompt
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 17 body 18
+R 13 body 17
+R 9 block 13
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+N 23 InstanceVariableWriteNode
+S 23 name @sum
+N 24 IntegerNode
+I 24 value 0
+R 23 value 24
+A 1 body 2,23
+R 0 statements 1

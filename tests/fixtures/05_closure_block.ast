@@ -1,0 +1,83 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/05_closure_block.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name sum_squares
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name n
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name total
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 CallNode
+S 8 name times
+N 9 LocalVariableReadNode
+S 9 name n
+R 8 receiver 9
+R 8 arguments -1
+N 10 BlockNode
+N 11 BlockParametersNode
+N 12 ParametersNode
+N 13 RequiredParameterNode
+S 13 name i
+A 12 requireds 13
+A 12 optionals 
+A 12 keywords 
+A 12 posts 
+R 11 parameters 12
+R 10 parameters 11
+N 14 StatementsNode
+N 15 LocalVariableOperatorWriteNode
+S 15 name total
+S 15 binary_operator +
+N 16 CallNode
+S 16 name *
+N 17 LocalVariableReadNode
+S 17 name i
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 LocalVariableReadNode
+S 19 name i
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+A 14 body 15
+R 10 body 14
+R 8 block 10
+S 8 call_operator .
+N 20 LocalVariableReadNode
+S 20 name total
+A 5 body 6,8,20
+R 2 body 5
+R 2 receiver -1
+N 21 CallNode
+S 21 name puts
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 CallNode
+S 23 name sum_squares
+R 23 receiver -1
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 5
+A 24 arguments 25
+R 23 arguments 24
+R 23 block -1
+S 23 call_operator .
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+A 1 body 2,21
+R 0 statements 1

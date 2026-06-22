@@ -1,0 +1,90 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/24_xdp_counter.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_ABORTED
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name XDP_DROP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name XDP_PASS
+N 7 IntegerNode
+I 7 value 2
+R 6 value 7
+N 8 ConstantWriteNode
+S 8 name XDP_TX
+N 9 IntegerNode
+I 9 value 3
+R 8 value 9
+N 10 ConstantWriteNode
+S 10 name XDP_REDIRECT
+N 11 IntegerNode
+I 11 value 4
+R 10 value 11
+N 12 InstanceVariableWriteNode
+S 12 name @rx_pkts
+N 13 IntegerNode
+I 13 value 0
+R 12 value 13
+N 14 DefNode
+S 14 name xdp__main
+R 14 parameters -1
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @rx_pkts
+N 17 CallNode
+S 17 name +
+N 18 InstanceVariableReadNode
+S 18 name @rx_pkts
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+N 21 ConstantReadNode
+S 21 name XDP_PASS
+A 15 body 16,21
+R 14 body 15
+R 14 receiver -1
+N 22 CallNode
+S 22 name puts
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 StringNode
+S 24 content [demo]%20XDP%20attached.%20sleeping%2010s;%20inspect%20counter%20via%20bpftool.
+A 23 arguments 24
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+N 25 CallNode
+S 25 name sleep
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 10
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+N 28 CallNode
+S 28 name puts
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 StringNode
+S 30 content [demo]%20exiting;%20XDP%20detaches%20at%20destructor.
+A 29 arguments 30
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+A 1 body 2,4,6,8,10,12,14,22,25,28
+R 0 statements 1

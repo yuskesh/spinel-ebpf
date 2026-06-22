@@ -1,0 +1,82 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/58_lsm_fmod.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @opens
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @injected
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name lsm__file_open
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name file
+N 9 RequiredParameterNode
+S 9 name ret
+A 7 requireds 8,9
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 10 StatementsNode
+N 11 InstanceVariableWriteNode
+S 11 name @opens
+N 12 CallNode
+S 12 name +
+N 13 InstanceVariableReadNode
+S 13 name @opens
+R 12 receiver 13
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 1
+A 14 arguments 15
+R 12 arguments 14
+R 12 block -1
+S 12 call_operator .
+R 11 value 12
+N 16 IntegerNode
+I 16 value 0
+A 10 body 11,16
+R 6 body 10
+R 6 receiver -1
+N 17 DefNode
+S 17 name fmod_ret__security_file_open
+N 18 ParametersNode
+N 19 RequiredParameterNode
+S 19 name file
+N 20 RequiredParameterNode
+S 20 name ret
+A 18 requireds 19,20
+A 18 optionals 
+A 18 keywords 
+A 18 posts 
+R 17 parameters 18
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @injected
+N 23 CallNode
+S 23 name +
+N 24 InstanceVariableReadNode
+S 24 name @injected
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 1
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+N 27 LocalVariableReadNode
+S 27 name ret
+A 21 body 22,27
+R 17 body 21
+R 17 receiver -1
+A 1 body 2,4,6,17
+R 0 statements 1

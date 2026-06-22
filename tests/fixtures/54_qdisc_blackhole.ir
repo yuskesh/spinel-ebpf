@@ -1,0 +1,31 @@
+SPINEL-IR v1
+SA @meth_names 0 
+SA @meth_param_names 0 
+SA @meth_param_types 0 
+SA @meth_return_types 0 
+IA @meth_body_ids 0 
+SA @cls_names 2 BlackHole|Toplevel
+SA @cls_parents 2 BPF_Qdisc|
+SA @cls_ivar_names 2 @dropped|@dropped
+SA @cls_ivar_types 2 int|int
+SA @cls_meth_names 2 init;enqueue;dequeue;reset;destroy|
+SA @cls_meth_returns 2 int;int;int;nil;nil|
+SA @cls_meth_ptypes 2 int,int,int%7Cint,int,int%7Cint%7Cint%7Cint|
+SA @cls_meth_params 2 sch,opt,extack%7Cskb,sch,to_free%7Csch%7Csch%7Csch|
+SA @cls_meth_bodies 2 12;23;37;42;49|
+SN 12 sch|opt|extack
+ST 12 unknown|unknown|unknown
+SN 23 skb|sch|to_free
+ST 23 unknown|unknown|unknown
+SN 37 sch
+ST 37 unknown
+SN 42 sch
+ST 42 unknown
+SN 49 sch
+ST 49 unknown
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

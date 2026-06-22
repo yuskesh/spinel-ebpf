@@ -1,0 +1,74 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/08_file_io.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name read_first_line
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name path
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 CallNode
+S 6 name open
+N 7 ConstantReadNode
+S 7 name File
+R 6 receiver 7
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name path
+N 10 StringNode
+S 10 content r
+A 8 arguments 9,10
+R 6 arguments 8
+N 11 BlockNode
+N 12 BlockParametersNode
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name f
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+R 11 parameters 12
+N 15 StatementsNode
+N 16 CallNode
+S 16 name gets
+N 17 LocalVariableReadNode
+S 17 name f
+R 16 receiver 17
+R 16 arguments -1
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 11 body 15
+R 6 block 11
+S 6 call_operator .
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+N 18 CallNode
+S 18 name puts
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 CallNode
+S 20 name read_first_line
+R 20 receiver -1
+N 21 ArgumentsNode
+N 22 StringNode
+S 22 content /etc/hostname
+A 21 arguments 22
+R 20 arguments 21
+R 20 block -1
+S 20 call_operator .
+A 19 arguments 20
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+A 1 body 2,18
+R 0 statements 1

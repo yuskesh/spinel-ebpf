@@ -1,0 +1,88 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/51_perf_event.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name PerfSample
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value perf_event
+N 12 KeywordHashNode
+N 13 AssocNode
+N 14 SymbolNode
+S 14 value hz
+R 13 key 14
+N 15 IntegerNode
+I 15 value 99
+R 13 value 15
+A 12 elements 13
+A 10 arguments 11,12
+R 9 arguments 10
+N 16 BlockNode
+N 17 StatementsNode
+N 18 LocalVariableWriteNode
+S 18 name sid
+N 19 CallNode
+S 19 name stack_id
+R 19 receiver -1
+R 19 arguments -1
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+N 20 IfNode
+N 21 CallNode
+S 21 name >=
+N 22 LocalVariableReadNode
+S 22 name sid
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 0
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 predicate 21
+N 25 StatementsNode
+N 26 CallNode
+S 26 name hist_observe_by
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 LocalVariableReadNode
+S 28 name sid
+N 29 IntegerNode
+I 29 value 1
+A 27 arguments 28,29
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+A 25 body 26
+R 20 statements 25
+R 20 subsequent -1
+A 17 body 18,20
+R 16 body 17
+R 9 block 16
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

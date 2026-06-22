@@ -1,0 +1,146 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/11_max_if.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name max
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name a
+N 5 RequiredParameterNode
+S 5 name b
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 IfNode
+N 8 CallNode
+S 8 name >
+N 9 LocalVariableReadNode
+S 9 name a
+R 8 receiver 9
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name b
+A 10 arguments 11
+R 8 arguments 10
+R 8 block -1
+S 8 call_operator .
+R 7 predicate 8
+N 12 StatementsNode
+N 13 LocalVariableReadNode
+S 13 name a
+A 12 body 13
+R 7 statements 12
+N 14 ElseNode
+N 15 StatementsNode
+N 16 LocalVariableReadNode
+S 16 name b
+A 15 body 16
+R 14 statements 15
+R 7 subsequent 14
+A 6 body 7
+R 2 body 6
+R 2 receiver -1
+N 17 DefNode
+S 17 name sign
+N 18 ParametersNode
+N 19 RequiredParameterNode
+S 19 name x
+A 18 requireds 19
+A 18 optionals 
+A 18 keywords 
+A 18 posts 
+R 17 parameters 18
+N 20 StatementsNode
+N 21 IfNode
+N 22 CallNode
+S 22 name >
+N 23 LocalVariableReadNode
+S 23 name x
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 0
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+R 21 predicate 22
+N 26 StatementsNode
+N 27 IntegerNode
+I 27 value 1
+A 26 body 27
+R 21 statements 26
+N 28 IfNode
+N 29 CallNode
+S 29 name <
+N 30 LocalVariableReadNode
+S 30 name x
+R 29 receiver 30
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 0
+A 31 arguments 32
+R 29 arguments 31
+R 29 block -1
+S 29 call_operator .
+R 28 predicate 29
+N 33 StatementsNode
+N 34 IntegerNode
+I 34 value -1
+A 33 body 34
+R 28 statements 33
+N 35 ElseNode
+N 36 StatementsNode
+N 37 IntegerNode
+I 37 value 0
+A 36 body 37
+R 35 statements 36
+R 28 subsequent 35
+R 21 subsequent 28
+A 20 body 21
+R 17 body 20
+R 17 receiver -1
+N 38 CallNode
+S 38 name puts
+R 38 receiver -1
+N 39 ArgumentsNode
+N 40 CallNode
+S 40 name max
+R 40 receiver -1
+N 41 ArgumentsNode
+N 42 IntegerNode
+I 42 value 3
+N 43 IntegerNode
+I 43 value 7
+A 41 arguments 42,43
+R 40 arguments 41
+R 40 block -1
+S 40 call_operator .
+A 39 arguments 40
+R 38 arguments 39
+R 38 block -1
+S 38 call_operator .
+N 44 CallNode
+S 44 name puts
+R 44 receiver -1
+N 45 ArgumentsNode
+N 46 CallNode
+S 46 name sign
+R 46 receiver -1
+N 47 ArgumentsNode
+N 48 IntegerNode
+I 48 value -5
+A 47 arguments 48
+R 46 arguments 47
+R 46 block -1
+S 46 call_operator .
+A 45 arguments 46
+R 44 arguments 45
+R 44 block -1
+S 44 call_operator .
+A 1 body 2,17,38,44
+R 0 statements 1

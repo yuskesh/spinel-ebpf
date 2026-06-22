@@ -1,0 +1,16 @@
+# spinel-ebpf plugin manifest.
+#
+# Declares the eBPF plugin so the driver can discover it by convention
+# (`use_plugin :ebpf` -> name "ebpf") + search path, validate its ABI, and
+# co-link its libs. The authoritative namespace resolver is partition.rb
+# (BPF_DSL_PARENT_TO_PREFIX / BPF_EVENT_LOOP_KINDS / detect_attach); the list
+# below documents the surface the plugin owns.
+name = "ebpf"
+abi_version = "1"
+entrypoint = "bin/spinel-ebpf"
+owns_namespace = ["BPF", "xdp__*", "tc__*", "kprobe__*", "kretprobe__*", "tracepoint__*", "fentry__*", "fexit__*", "uprobe__*", "usdt__*", "sk_reuseport__*", "sk_msg__*", "sk_skb__*", "sock_ops__*", "perf_event__*", "cgroup__*", "iter__*"]
+link_libs = ["bpf", "elf", "z"]
+# drive model: spinel-ebpf contributes maps/ringbufs/attachments to the host's
+# run loop but does not own it (the host main / pure-XDP path is kernel-driven).
+drive = "source"
+lifecycle = { init = "pre_main", fini = "detach", fork = "before_fork" }

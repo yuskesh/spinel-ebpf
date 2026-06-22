@@ -1,0 +1,140 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/15_times_loop.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 DefNode
+S 5 name emit_squares
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name n
+A 6 requireds 7
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+N 8 StatementsNode
+N 9 CallNode
+S 9 name times
+N 10 LocalVariableReadNode
+S 10 name n
+R 9 receiver 10
+R 9 arguments -1
+N 11 BlockNode
+N 12 BlockParametersNode
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name i
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+R 11 parameters 12
+N 15 StatementsNode
+N 16 CallNode
+S 16 name spnl_emit
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 CallNode
+S 18 name *
+N 19 LocalVariableReadNode
+S 19 name i
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name i
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 11 body 15
+R 9 block 11
+S 9 call_operator .
+A 8 body 9
+R 5 body 8
+R 5 receiver -1
+N 22 DefNode
+S 22 name emit_indices
+N 23 ParametersNode
+N 24 RequiredParameterNode
+S 24 name n
+A 23 requireds 24
+A 23 optionals 
+A 23 keywords 
+A 23 posts 
+R 22 parameters 23
+N 25 StatementsNode
+N 26 CallNode
+S 26 name times
+N 27 LocalVariableReadNode
+S 27 name n
+R 26 receiver 27
+R 26 arguments -1
+N 28 BlockNode
+N 29 BlockParametersNode
+N 30 ParametersNode
+N 31 RequiredParameterNode
+S 31 name i
+A 30 requireds 31
+A 30 optionals 
+A 30 keywords 
+A 30 posts 
+R 29 parameters 30
+R 28 parameters 29
+N 32 StatementsNode
+N 33 CallNode
+S 33 name spnl_emit
+R 33 receiver -1
+N 34 ArgumentsNode
+N 35 LocalVariableReadNode
+S 35 name i
+A 34 arguments 35
+R 33 arguments 34
+R 33 block -1
+S 33 call_operator .
+A 32 body 33
+R 28 body 32
+R 26 block 28
+S 26 call_operator .
+A 25 body 26
+R 22 body 25
+R 22 receiver -1
+N 36 CallNode
+S 36 name emit_squares
+R 36 receiver -1
+N 37 ArgumentsNode
+N 38 IntegerNode
+I 38 value 4
+A 37 arguments 38
+R 36 arguments 37
+R 36 block -1
+S 36 call_operator .
+N 39 CallNode
+S 39 name emit_indices
+R 39 receiver -1
+N 40 ArgumentsNode
+N 41 IntegerNode
+I 41 value 3
+A 40 arguments 41
+R 39 arguments 40
+R 39 block -1
+S 39 call_operator .
+A 1 body 2,5,22,36,39
+R 0 statements 1

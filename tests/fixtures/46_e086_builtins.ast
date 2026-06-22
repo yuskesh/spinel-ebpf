@@ -1,0 +1,80 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/46_e086_builtins.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name hist_observe_linear
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 CallNode
+S 9 name divu
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 CallNode
+S 11 name ktime_ns
+R 11 receiver -1
+R 11 arguments -1
+R 11 block -1
+S 11 call_operator .
+N 12 IntegerNode
+I 12 value 1000
+A 10 arguments 11,12
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+N 13 CallNode
+S 13 name emit_comm
+R 13 receiver -1
+R 13 arguments -1
+R 13 block -1
+S 13 call_operator .
+A 6 body 7,13
+R 2 body 6
+R 2 receiver -1
+N 14 DefNode
+S 14 name kretprobe__do_sys_openat2
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name ret
+A 15 requireds 16
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+N 17 StatementsNode
+N 18 CallNode
+S 18 name spnl_emit
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 CallNode
+S 20 name comm_hash
+R 20 receiver -1
+R 20 arguments -1
+R 20 block -1
+S 20 call_operator .
+A 19 arguments 20
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+A 17 body 18
+R 14 body 17
+R 14 receiver -1
+A 1 body 2,14
+R 0 statements 1

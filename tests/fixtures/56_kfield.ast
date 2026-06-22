@@ -1,0 +1,93 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/56_kfield.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @calls
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @sndbuf
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @rcvbuf
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 DefNode
+S 8 name kprobe__tcp_sendmsg
+N 9 ParametersNode
+N 10 RequiredParameterNode
+S 10 name sk
+A 9 requireds 10
+A 9 optionals 
+A 9 keywords 
+A 9 posts 
+R 8 parameters 9
+N 11 StatementsNode
+N 12 InstanceVariableWriteNode
+S 12 name @calls
+N 13 CallNode
+S 13 name +
+N 14 InstanceVariableReadNode
+S 14 name @calls
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 1
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 17 InstanceVariableWriteNode
+S 17 name @sndbuf
+N 18 CallNode
+S 18 name kfield
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name sk
+N 21 StringNode
+S 21 content sock
+N 22 StringNode
+S 22 content sk_sndbuf
+A 19 arguments 20,21,22
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+N 23 LocalVariableWriteNode
+S 23 name s
+N 24 CallNode
+S 24 name kptr
+R 24 receiver -1
+N 25 ArgumentsNode
+N 26 LocalVariableReadNode
+S 26 name sk
+N 27 StringNode
+S 27 content sock
+A 25 arguments 26,27
+R 24 arguments 25
+R 24 block -1
+S 24 call_operator .
+R 23 value 24
+N 28 InstanceVariableWriteNode
+S 28 name @rcvbuf
+N 29 CallNode
+S 29 name sk_rcvbuf
+N 30 LocalVariableReadNode
+S 30 name s
+R 29 receiver 30
+R 29 arguments -1
+R 29 block -1
+S 29 call_operator .
+R 28 value 29
+A 11 body 12,17,23,28
+R 8 body 11
+R 8 receiver -1
+A 1 body 2,4,6,8
+R 0 statements 1

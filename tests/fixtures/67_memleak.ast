@@ -1,0 +1,78 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/67_memleak.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__kmem__kmalloc
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name call_site
+N 5 RequiredParameterNode
+S 5 name ptr
+N 6 RequiredParameterNode
+S 6 name bytes_req
+N 7 RequiredParameterNode
+S 7 name bytes_alloc
+N 8 RequiredParameterNode
+S 8 name gfp_flags
+N 9 RequiredParameterNode
+S 9 name node
+A 3 requireds 4,5,6,7,8,9
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 10 StatementsNode
+N 11 CallNode
+S 11 name leak_record
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 LocalVariableReadNode
+S 13 name ptr
+N 14 LocalVariableReadNode
+S 14 name bytes_alloc
+N 15 CallNode
+S 15 name stack_id
+R 15 receiver -1
+R 15 arguments -1
+R 15 block -1
+S 15 call_operator .
+A 12 arguments 13,14,15
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+N 16 IntegerNode
+I 16 value 0
+A 10 body 11,16
+R 2 body 10
+R 2 receiver -1
+N 17 DefNode
+S 17 name tracepoint__kmem__kfree
+N 18 ParametersNode
+N 19 RequiredParameterNode
+S 19 name call_site
+N 20 RequiredParameterNode
+S 20 name ptr
+A 18 requireds 19,20
+A 18 optionals 
+A 18 keywords 
+A 18 posts 
+R 17 parameters 18
+N 21 StatementsNode
+N 22 CallNode
+S 22 name leak_forget
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 LocalVariableReadNode
+S 24 name ptr
+A 23 arguments 24
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+N 25 IntegerNode
+I 25 value 0
+A 21 body 22,25
+R 17 body 21
+R 17 receiver -1
+A 1 body 2,17
+R 0 statements 1

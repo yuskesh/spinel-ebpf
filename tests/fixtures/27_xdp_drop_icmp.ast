@@ -1,0 +1,128 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/27_xdp_drop_icmp.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name XDP_DROP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name IPPROTO_ICMP
+N 7 IntegerNode
+I 7 value 1
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @icmp_dropped
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 InstanceVariableWriteNode
+S 10 name @other_passed
+N 11 IntegerNode
+I 11 value 0
+R 10 value 11
+N 12 DefNode
+S 12 name xdp__main
+R 12 parameters -1
+N 13 StatementsNode
+N 14 IfNode
+N 15 CallNode
+S 15 name ==
+N 16 CallNode
+S 16 name pkt_l4_proto
+R 16 receiver -1
+R 16 arguments -1
+R 16 block -1
+S 16 call_operator .
+R 15 receiver 16
+N 17 ArgumentsNode
+N 18 ConstantReadNode
+S 18 name IPPROTO_ICMP
+A 17 arguments 18
+R 15 arguments 17
+R 15 block -1
+S 15 call_operator .
+R 14 predicate 15
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @icmp_dropped
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @icmp_dropped
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 ConstantReadNode
+S 25 name XDP_DROP
+A 19 body 20,25
+R 14 statements 19
+N 26 ElseNode
+N 27 StatementsNode
+N 28 InstanceVariableWriteNode
+S 28 name @other_passed
+N 29 CallNode
+S 29 name +
+N 30 InstanceVariableReadNode
+S 30 name @other_passed
+R 29 receiver 30
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 1
+A 31 arguments 32
+R 29 arguments 31
+R 29 block -1
+S 29 call_operator .
+R 28 value 29
+N 33 ConstantReadNode
+S 33 name XDP_PASS
+A 27 body 28,33
+R 26 statements 27
+R 14 subsequent 26
+A 13 body 14
+R 12 body 13
+R 12 receiver -1
+N 34 CallNode
+S 34 name puts
+R 34 receiver -1
+N 35 ArgumentsNode
+N 36 StringNode
+S 36 content [demo]%20XDP%20ICMP%20drop%20attached.%20ping%20will%20time%20out;%20counters%20via%20bpftool.
+A 35 arguments 36
+R 34 arguments 35
+R 34 block -1
+S 34 call_operator .
+N 37 CallNode
+S 37 name sleep
+R 37 receiver -1
+N 38 ArgumentsNode
+N 39 IntegerNode
+I 39 value 15
+A 38 arguments 39
+R 37 arguments 38
+R 37 block -1
+S 37 call_operator .
+N 40 CallNode
+S 40 name puts
+R 40 receiver -1
+N 41 ArgumentsNode
+N 42 StringNode
+S 42 content [demo]%20exiting;%20ping%20should%20work%20again%20after%20destructor%20detaches.
+A 41 arguments 42
+R 40 arguments 41
+R 40 block -1
+S 40 call_operator .
+A 1 body 2,4,6,8,10,12,34,37,40
+R 0 statements 1

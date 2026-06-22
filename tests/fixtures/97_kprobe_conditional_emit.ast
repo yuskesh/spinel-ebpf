@@ -1,0 +1,52 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/97_kprobe_conditional_emit.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name size
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name >
+N 10 LocalVariableReadNode
+S 10 name size
+R 9 receiver 10
+N 11 ArgumentsNode
+N 12 IntegerNode
+I 12 value 256
+A 11 arguments 12
+R 9 arguments 11
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 13 StatementsNode
+N 14 CallNode
+S 14 name spnl_emit
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 LocalVariableReadNode
+S 16 name size
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+A 13 body 14
+R 8 statements 13
+R 8 subsequent -1
+A 7 body 8
+R 2 body 7
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

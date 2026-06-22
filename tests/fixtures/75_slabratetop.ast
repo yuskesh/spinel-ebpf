@@ -1,0 +1,43 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/75_slabratetop.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @allocs
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tracepoint__kmem__kmem_cache_alloc
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name bytes_alloc
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 InstanceVariableOperatorWriteNode
+S 8 name @allocs
+S 8 binary_operator +
+N 9 IntegerNode
+I 9 value 1
+R 8 value 9
+N 10 CallNode
+S 10 name hist_observe
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name bytes_alloc
+A 11 arguments 12
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+N 13 IntegerNode
+I 13 value 0
+A 7 body 8,10,13
+R 4 body 7
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

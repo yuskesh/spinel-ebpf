@@ -1,0 +1,94 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/34_sk_msg.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name SK_PASS
+N 3 IntegerNode
+I 3 value 1
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name SK_DROP
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @msg_count
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @skb_count
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 DefNode
+S 10 name sk_msg__pass_all
+R 10 parameters -1
+N 11 StatementsNode
+N 12 InstanceVariableWriteNode
+S 12 name @msg_count
+N 13 CallNode
+S 13 name +
+N 14 InstanceVariableReadNode
+S 14 name @msg_count
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 1
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 17 ConstantReadNode
+S 17 name SK_PASS
+A 11 body 12,17
+R 10 body 11
+R 10 receiver -1
+N 18 DefNode
+S 18 name sk_skb__verdict__pass_all
+R 18 parameters -1
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @skb_count
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @skb_count
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 ConstantReadNode
+S 25 name SK_PASS
+A 19 body 20,25
+R 18 body 19
+R 18 receiver -1
+N 26 CallNode
+S 26 name puts
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 StringNode
+S 28 content [demo]%20sk_msg%20+%20sk_skb%20programs%20loaded%20(attach%20happens%20separately)
+A 27 arguments 28
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+N 29 CallNode
+S 29 name sleep
+R 29 receiver -1
+N 30 ArgumentsNode
+N 31 IntegerNode
+I 31 value 5
+A 30 arguments 31
+R 29 arguments 30
+R 29 block -1
+S 29 call_operator .
+A 1 body 2,4,6,8,10,18,26,29
+R 0 statements 1

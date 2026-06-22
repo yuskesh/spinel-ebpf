@@ -1,0 +1,68 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/74_kfield_dotted.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 LocalVariableWriteNode
+S 6 name daddr
+N 7 CallNode
+S 7 name kfield
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name sk
+N 10 StringNode
+S 10 content sock
+N 11 StringNode
+S 11 content __sk_common.skc_daddr
+A 8 arguments 9,10,11
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 12 LocalVariableWriteNode
+S 12 name dport
+N 13 CallNode
+S 13 name kfield
+R 13 receiver -1
+N 14 ArgumentsNode
+N 15 LocalVariableReadNode
+S 15 name sk
+N 16 StringNode
+S 16 content sock
+N 17 StringNode
+S 17 content __sk_common.skc_dport
+A 14 arguments 15,16,17
+R 13 arguments 14
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 18 CallNode
+S 18 name spnl_emit_pair
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name daddr
+N 21 LocalVariableReadNode
+S 21 name dport
+A 19 arguments 20,21
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+N 22 IntegerNode
+I 22 value 0
+A 5 body 6,12,18,22
+R 2 body 5
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

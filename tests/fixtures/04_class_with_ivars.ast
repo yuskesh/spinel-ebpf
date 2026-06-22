@@ -1,0 +1,95 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/04_class_with_ivars.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name Counter
+R 2 constant_path 3
+R 2 superclass -1
+N 4 StatementsNode
+N 5 DefNode
+S 5 name initialize
+R 5 parameters -1
+N 6 StatementsNode
+N 7 InstanceVariableWriteNode
+S 7 name @count
+N 8 IntegerNode
+I 8 value 0
+R 7 value 8
+A 6 body 7
+R 5 body 6
+R 5 receiver -1
+N 9 DefNode
+S 9 name incr
+R 9 parameters -1
+N 10 StatementsNode
+N 11 InstanceVariableOperatorWriteNode
+S 11 name @count
+S 11 binary_operator +
+N 12 IntegerNode
+I 12 value 1
+R 11 value 12
+A 10 body 11
+R 9 body 10
+R 9 receiver -1
+N 13 DefNode
+S 13 name value
+R 13 parameters -1
+N 14 StatementsNode
+N 15 InstanceVariableReadNode
+S 15 name @count
+A 14 body 15
+R 13 body 14
+R 13 receiver -1
+A 4 body 5,9,13
+R 2 body 4
+N 16 LocalVariableWriteNode
+S 16 name c
+N 17 CallNode
+S 17 name new
+N 18 ConstantReadNode
+S 18 name Counter
+R 17 receiver 18
+R 17 arguments -1
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+N 19 CallNode
+S 19 name times
+N 20 IntegerNode
+I 20 value 5
+R 19 receiver 20
+R 19 arguments -1
+N 21 BlockNode
+N 22 StatementsNode
+N 23 CallNode
+S 23 name incr
+N 24 LocalVariableReadNode
+S 24 name c
+R 23 receiver 24
+R 23 arguments -1
+R 23 block -1
+S 23 call_operator .
+A 22 body 23
+R 21 body 22
+R 19 block 21
+S 19 call_operator .
+N 25 CallNode
+S 25 name puts
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 CallNode
+S 27 name value
+N 28 LocalVariableReadNode
+S 28 name c
+R 27 receiver 28
+R 27 arguments -1
+R 27 block -1
+S 27 call_operator .
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 1 body 2,16,19,25
+R 0 statements 1

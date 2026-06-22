@@ -1,0 +1,144 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/57_cidr_blocklist.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name TC_ACT_OK
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name TC_ACT_SHOT
+N 5 IntegerNode
+I 5 value 2
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @blocked_hits
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @passed_hits
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 DefNode
+S 10 name tc__ingress__cidr_filter
+R 10 parameters -1
+N 11 StatementsNode
+N 12 IfNode
+N 13 CallNode
+S 13 name ==
+N 14 CallNode
+S 14 name cidr_blocklist_match
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 CallNode
+S 16 name pkt_ip4_src
+R 16 receiver -1
+R 16 arguments -1
+R 16 block -1
+S 16 call_operator .
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+R 13 receiver 14
+N 17 ArgumentsNode
+N 18 IntegerNode
+I 18 value 1
+A 17 arguments 18
+R 13 arguments 17
+R 13 block -1
+S 13 call_operator .
+R 12 predicate 13
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @blocked_hits
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @blocked_hits
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 ConstantReadNode
+S 25 name TC_ACT_SHOT
+A 19 body 20,25
+R 12 statements 19
+N 26 ElseNode
+N 27 StatementsNode
+N 28 InstanceVariableWriteNode
+S 28 name @passed_hits
+N 29 CallNode
+S 29 name +
+N 30 InstanceVariableReadNode
+S 30 name @passed_hits
+R 29 receiver 30
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 1
+A 31 arguments 32
+R 29 arguments 31
+R 29 block -1
+S 29 call_operator .
+R 28 value 29
+N 33 ConstantReadNode
+S 33 name TC_ACT_OK
+A 27 body 28,33
+R 26 statements 27
+R 12 subsequent 26
+A 11 body 12
+R 10 body 11
+R 10 receiver -1
+N 34 ModuleNode
+N 35 ConstantReadNode
+S 35 name CidrBlocklist
+R 34 constant_path 35
+N 36 StatementsNode
+N 37 CallNode
+S 37 name ffi_func
+R 37 receiver -1
+N 38 ArgumentsNode
+N 39 SymbolNode
+S 39 value sp_bpf_cidr_blocklist_add
+N 40 ArrayNode
+N 41 SymbolNode
+S 41 value uint32
+N 42 SymbolNode
+S 42 value uint32
+A 40 elements 41,42
+N 43 SymbolNode
+S 43 value int
+A 38 arguments 39,40,43
+R 37 arguments 38
+R 37 block -1
+S 37 call_operator .
+N 44 CallNode
+S 44 name ffi_func
+R 44 receiver -1
+N 45 ArgumentsNode
+N 46 SymbolNode
+S 46 value sp_bpf_cidr_blocklist_del
+N 47 ArrayNode
+N 48 SymbolNode
+S 48 value uint32
+N 49 SymbolNode
+S 49 value uint32
+A 47 elements 48,49
+N 50 SymbolNode
+S 50 value int
+A 45 arguments 46,47,50
+R 44 arguments 45
+R 44 block -1
+S 44 call_operator .
+A 36 body 37,44
+R 34 body 36
+A 1 body 2,4,6,8,10,34
+R 0 statements 1

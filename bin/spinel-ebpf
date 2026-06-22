@@ -1,0 +1,2003 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# spinel-ebpf — wrapper around matz/spinel that adds eBPF partition codegen.
+#
+# Usage:
+#   spinel-ebpf compile foo.rb                  # eBPF-mixed (default)
+#   spinel-ebpf compile foo.rb --native-only    # equivalent to plain spinel
+#   spinel-ebpf compile foo.rb --ebpf-mixed     # explicit (same as default)
+#   spinel-ebpf compile foo.rb -o build_dir     # custom output directory
+#
+# Status: MVP. The current implementation:
+#   1. Invokes deps/spinel binaries to produce .ast and .ir
+#   2. In --native-only mode: passes through to ./spinel, produces native binary
+#   3. In --ebpf-mixed mode: runs the partition analysis and prints a
+#      per-method tag table, then emits .bpf.c for the :ebpf methods.
+
+$LOAD_PATH.unshift(File.expand_path("../src", __dir__))
+
+require "optparse"
+require "fileutils"
+require "tmpdir"
+require "spinel_ebpf/parse_spinel_ir"
+require "spinel_ebpf/parse_spinel_ast"
+require "spinel_ebpf/partition"
+require "spinel_ebpf/codegen_bpf"
+require "spinel_ebpf/dispatch_shim"
+require "spinel_ebpf/plugin"
+require "spinel_ebpf/consumer"
+require "spinel_ebpf/introspect"
+require "spinel_ebpf/instrument"
+
+VERSION = "0.0.1"
+PROJECT_ROOT = File.expand_path("..", __dir__)
+SPINEL_DIR   = ENV["SPINEL_DIR"] || File.join(PROJECT_ROOT, "deps/spinel")
+
+# Resolve mode from CLI flags + environment, applying this precedence:
+# explicit --native-only > explicit --ebpf-mixed > SPINEL_EBPF_MODE env > default eBPF.
+# Conflicting explicit flags (both --native-only and --ebpf-mixed) are an error.
+def resolve_mode(opts)
+  if opts[:native_only] && opts[:ebpf_mixed]
+    abort "error: --native-only and --ebpf-mixed are mutually exclusive"
+  end
+  return :native_only if opts[:native_only]
+  return :ebpf_mixed  if opts[:ebpf_mixed]
+  env = ENV["SPINEL_EBPF_MODE"]
+  case env
+  when nil, "" then :ebpf_mixed
+  when "native-only" then :native_only
+  when "ebpf-mixed"  then :ebpf_mixed
+  else abort "error: unknown SPINEL_EBPF_MODE=#{env.inspect} (expected 'native-only' or 'ebpf-mixed')"
+  end
+end
+
+def spinel_bin(name)
+  path = File.join(SPINEL_DIR, name)
+  unless File.executable?(path)
+    abort "error: #{path} not found or not executable. Build spinel first: " \
+          "make -C #{SPINEL_DIR} deps && make -C #{SPINEL_DIR}"
+  end
+  path
+end
+
+def run!(cmd, env = {})
+  system(env, *cmd) or abort "error: command failed: #{cmd.inspect}"
+end
+
+# The upstream compiler is now the single C `spinel` binary (the Ruby
+# spinel_parse/analyze/codegen moved to legacy/). Prefer it when present; the
+# co-process reads the same .ast/.ir it always did (C emits the legacy format
+# via --dump-ast --no-line-map / --emit-ir). Falls back to the legacy 3-binary
+# pipeline for an un-migrated tree.
+def c_spinel
+  # Prefer the current upstream target `bin/spinel` ($(SPINEL), built by
+  # `make`) over the legacy `build/spinel` path. The latter is a stale fossil on
+  # current upstream (no Makefile rule builds it) and lagged real fixes (e.g. the
+  # FFI `:binstr` return lowering), which made spinel-ebpf emit wrong C while the
+  # upstream test harness — which uses bin/spinel — passed. SPINEL_C_BIN overrides.
+  cands = [ENV["SPINEL_C_BIN"],
+           File.join(SPINEL_DIR, "bin", "spinel"),
+           File.join(SPINEL_DIR, "build", "spinel")].compact
+  cands.find { |p| File.executable?(p) }
+end
+
+# The in-process eBPF codegen binary. Built from the upstream
+# compiler objects (minus main.o) + tools/spinel_ebpf_inproc.c (which #includes
+# the codegen TU with -DSPNL_INPROCESS). It reads the analyzed Compiler struct
+# directly and emits both the SPINEL-IR (.ir, via cc_build_ir_text) and the
+# .bpf.c (via the ported codegen) with NO `--emit-ir`. Returns the path, or nil
+# when it can't be built (objects absent / non-Linux host — compile is Linux-only
+# anyway), in which case callers fall back to the legacy --emit-ir + Ruby codegen.
+def inproc_codegen_bin
+  return @inproc_bin if defined?(@inproc_bin)
+  out      = File.join(PROJECT_ROOT, "build/codegen_c/spinel-ebpf-cc")
+  src      = File.join(PROJECT_ROOT, "tools/spinel_ebpf_inproc.c")
+  tu       = File.join(PROJECT_ROOT, "src/codegen_c/spinel_ebpf_cc.c")
+  objs     = Dir[File.join(SPINEL_DIR, "build/csrc/*.o")].reject { |o| File.basename(o) == "main.o" }
+  libprism = File.join(SPINEL_DIR, "build/libprism.a")
+  return @inproc_bin = nil unless File.exist?(src) && File.exist?(tu) && !objs.empty? && File.exist?(libprism)
+  inputs = [src, tu, *objs, libprism]
+  if !File.exist?(out) || inputs.map { |f| File.mtime(f) }.max > File.mtime(out)
+    FileUtils.mkdir_p(File.dirname(out))
+    cc  = ENV["CC"] || which("cc") || "cc"
+    cmd = [cc, "-O2", "-I", File.join(SPINEL_DIR, "src"), src, *objs, libprism, "-lm", "-o", out]
+    return @inproc_bin = nil unless system(*cmd)
+  end
+  @inproc_bin = out
+end
+
+# Run the frontend, leaving .ast and .ir in build_dir.
+def run_spinel_to_ir(input_rb, build_dir)
+  base = File.basename(input_rb, ".rb")
+  ast = File.join(build_dir, "#{base}.ast")
+  ir  = File.join(build_dir, "#{base}.ir")
+  if (cs = c_spinel)
+    # --no-line-map: drop source-position records so the AST is byte-identical
+    # to the legacy spinel_parse output the co-process expects. (--dump-ast is
+    # upstream, not a patch.)
+    File.write(ast, IO.popen([cs, "--dump-ast", "--no-line-map", input_rb], &:read))
+    abort "error: spinel --dump-ast failed" unless $?.success?
+    # Produce the .ir in-process (cc_build_ir_text, no --emit-ir;
+    # Patch A was removed upstream). The in-process binary is built from the
+    # spinel compiler objects, so it's available wherever build/spinel is.
+    icc = inproc_codegen_bin or
+      abort "error: in-process codegen binary unavailable (build spinel first: " \
+            "make -C #{SPINEL_DIR}); --emit-ir is no longer available"
+    File.write(ir, IO.popen([icc, input_rb, base, "--ir"], &:read))
+    abort "error: in-process IR emit failed for #{input_rb}" unless $?.success?
+  else
+    run! [spinel_bin("spinel_parse"),   input_rb, ast]
+    run! [spinel_bin("spinel_analyze"), ast,      ir]
+  end
+  [ast, ir, base]
+end
+
+def run_spinel_to_c(input_rb, build_dir, ast, ir, extern_methods: nil)
+  base = File.basename(input_rb, ".rb")
+  c_out = File.join(build_dir, "#{base}.c")
+  if (cs = c_spinel)
+    # The C compiler emits native C directly from the .rb (-c). Its native
+    # codegen already tolerates eBPF-only builtins / unresolved receiver forms,
+    # so the legacy SPINEL_EBPF_SOFT_FAIL hook is unnecessary. Transparent
+    # dispatch is ported as Patch 1: SPINEL_EXTERN_METHODS makes the C
+    # codegen emit `extern <rt> sp_<name>(...)` decls for the listed methods so
+    # the linker resolves them to the dispatch shim.
+    env = {}
+    env["SPINEL_EXTERN_METHODS"] = extern_methods.join(",") if extern_methods && !extern_methods.empty?
+    run! [cs, input_rb, "-c", "-o", c_out], env
+  else
+    env = {}
+    env["SPINEL_EXTERN_METHODS"] = extern_methods.join(",") if extern_methods && !extern_methods.empty?
+    env["SPINEL_EBPF_SOFT_FAIL"] = "1"
+    run! [spinel_bin("spinel_codegen"), ast, ir, c_out], env
+  end
+  c_out
+end
+
+# --- subcommand: compile ---
+
+def cmd_compile(argv)
+  opts = {
+    native_only: false, ebpf_mixed: false, output_dir: "build",
+    build: false,  # full build (.bpf.c -> .bpf.o -> skeleton -> link) into binary
+    ebpf_dispatch: false,  # transparent native -> eBPF dispatch via SPINEL_EXTERN_METHODS
+  }
+  parser = OptionParser.new do |op|
+    op.banner = "Usage: spinel-ebpf compile <file.rb> [options]"
+    op.on("--native-only",
+          "Skip eBPF partition. Output is identical to plain spinel.") { opts[:native_only] = true }
+    op.on("--ebpf-mixed",
+          "Partition Ruby into (native C + eBPF C). [default]") { opts[:ebpf_mixed] = true }
+    op.on("--build",
+          "also compile/link into single binary (requires Linux + clang + libbpf-dev + bpftool)") { opts[:build] = true }
+    op.on("--ebpf-dispatch",
+          "route :ebpf method calls from main through bpf_prog_test_run (requires --build)") {
+      opts[:ebpf_dispatch] = true
+    }
+    op.on("--instrument",
+          "auto-instrument the target — build it (noinline) + a sidecar uprobe agent (rate)") {
+      opts[:instrument] = true
+    }
+    op.on("--instrument-only LIST", "comma-separated method names to instrument") { |l|
+      opts[:instrument_only] = l.split(",").map(&:strip).reject(&:empty?)
+    }
+    op.on("--instrument-skip LIST", "comma-separated method names to exclude") { |l|
+      opts[:instrument_skip] = l.split(",").map(&:strip).reject(&:empty?)
+    }
+    op.on("--instrument-duration N", Integer,
+          "dump-mode observation window in seconds (default 10)") { |n|
+      opts[:instrument_duration] = n
+    }
+    op.on("--instrument-dump",
+          "one-shot mode — observe then dump per-method hist to stderr (default: /metrics server)") {
+      opts[:instrument_dump] = true
+    }
+    op.on("--instrument-port N", Integer,
+          "Prometheus /metrics port (default 9100; env SPINEL_HTTP_PORT overrides at run)") { |n|
+      opts[:instrument_port] = n
+    }
+    op.on("--instrument-self",
+          "single self-attaching binary (workload + agent in one; no sidecar)") {
+      opts[:instrument_self] = true
+    }
+    op.on("--instrument-depth-collapse",
+          "recursive methods count only the outermost call (per-(tid,method) depth)") {
+      opts[:instrument_depth_collapse] = true
+    }
+    op.on("--self-targets LIST",
+          "(internal): force these top-level methods :native (self-instrument workload methods)") { |l|
+      opts[:self_targets] = l.split(",").map(&:strip).reject(&:empty?)
+    }
+    op.on("--noinline-symbols LIST",
+          "(internal): inject __attribute__((noinline)) on these C symbols (the uprobe targets)") { |l|
+      opts[:noinline_symbols] = l.split(",").map(&:strip).reject(&:empty?)
+    }
+    op.on("--int-overflow MODE",
+          "int +/-/* overflow handling raise|wrap|promote (default: raise; auto wrap with --ebpf-dispatch to match eBPF __s64)") { |m|
+      abort "error: --int-overflow expects raise|wrap|promote (got #{m.inspect})" unless %w[raise wrap promote].include?(m)
+      opts[:int_overflow] = m
+    }
+    op.on("-o DIR", "--output DIR",
+          "Output directory (default: build/)") { |d| opts[:output_dir] = d }
+    op.on("-v", "--verbose", "Verbose output") { opts[:verbose] = true }
+    op.on("-h", "--help", "Show this message") { puts op; exit 0 }
+  end
+  files = parser.parse!(argv)
+
+  abort parser.help if files.length != 1
+  input = files[0]
+  abort "error: #{input} not found" unless File.exist?(input)
+
+  # --instrument operates on the original target program (a plain native
+  # workload). It enumerates the target's methods, builds it with noinline so
+  # the sp_<name> symbols survive, then generates + builds a sidecar uprobe
+  # agent. Handle it before the plugin/consumer source transforms (which apply
+  # to the *agent*, re-entered via cmd_compile).
+  return cmd_instrument(input, opts) if opts[:instrument]
+
+  # `use_plugin :ebpf` plugin declaration. Detect on the
+  # original source; validate any declared plugin early (discover + ABI); then
+  # hand spinel a sanitized copy (a top-level `use_plugin` aborts spinel's -c).
+  src_text = File.read(input, encoding: "UTF-8") # locale may default to US-ASCII
+  declared = SpinelEbpf::Plugin.detect_declarations(src_text)
+  manifests = declared.map do |name|
+    m = SpinelEbpf::Plugin.discover(name)
+    abort "error: plugin '#{name}' not installed (declared via `use_plugin :#{name}`; " \
+          "set SPINEL_PLUGIN_PATH or install the plugin)" if m.nil?
+    begin
+      SpinelEbpf::Plugin.validate!(m)
+    rescue SpinelEbpf::Plugin::LoadError => e
+      abort "error: #{e.message}"
+    end
+    warn "[spinel-ebpf] use_plugin :#{name} -> #{m.root}/plugin.toml (abi #{m.abi_version})" if opts[:verbose]
+    m
+  end
+  # Build-time arbiter — declared plugins must not conflict
+  # (namespace exclusivity). No-op for a single plugin.
+  begin
+    SpinelEbpf::Plugin.arbitrate!(manifests)
+  rescue SpinelEbpf::Plugin::ArbitrationError => e
+    abort "error: #{e.message}"
+  end
+  if opts[:verbose] && !manifests.empty?
+    plan = SpinelEbpf::Plugin.lifecycle_order(manifests)
+    warn "[spinel-ebpf] lifecycle: " +
+         plan.map { |phase, plug, hook| "#{phase}(#{plug}.#{hook})" }.join(" -> ")
+  end
+  # Source sanitize/transform for spinel (which rejects DSL keywords in -c):
+  #  - strip `use_plugin` directives (Plugin)
+  #  - lower `on_emit`/`consume_events` consumer DSL to plain Ruby (Consumer)
+  transformed = src_text
+  transformed = SpinelEbpf::Plugin.strip_declarations(transformed) unless declared.empty?
+  transformed = SpinelEbpf::Consumer.transform(transformed)
+  if transformed != src_text
+    base0 = File.basename(input, ".rb")
+    san = File.join(Dir.mktmpdir("spnl-src"), "#{base0}.rb")
+    File.write(san, transformed)
+    input = san # spinel/in-process calls read the sanitized copy
+  end
+
+  mode = resolve_mode(opts)
+  FileUtils.mkdir_p(opts[:output_dir])
+  warn "[spinel-ebpf] mode=#{mode}  input=#{input}  build_dir=#{opts[:output_dir]}" if opts[:verbose]
+
+  ast_path, ir_path, base = run_spinel_to_ir(input, opts[:output_dir])
+
+  if mode == :native_only
+    c_path = run_spinel_to_c(input, opts[:output_dir], ast_path, ir_path)
+    puts "[spinel-ebpf] native-only: wrote #{c_path}"
+    if opts[:build]
+      bin_path = build_binary(base, opts[:output_dir], false, verbose: opts[:verbose],
+                              int_overflow: opts[:int_overflow])
+      puts "[spinel-ebpf] build: wrote #{bin_path}"
+    end
+    return 0
+  end
+
+  # ebpf_mixed: parse IR + AST, run partition, print tag table.
+  ir  = SpinelEbpf::ParseSpinelIR.parse_file(ir_path)
+  ast = SpinelEbpf::ParseSpinelAst.parse_file(ast_path)
+  result = SpinelEbpf::Partition.classify(ir, ast, force_native: opts[:self_targets])
+
+  print_partition_table(result, base)
+
+  # Using the BPF namespace requires `use_plugin :ebpf`
+  # (no silent native fallback). Strict (SPNL_STRICT_PLUGINS=1)
+  # makes it a hard error; default warns so the existing example corpus keeps
+  # building during migration.
+  if SpinelEbpf::Plugin.uses_bpf_namespace?(result) && !declared.include?(:ebpf)
+    n = result.methods.count { |m| m.tag == :ebpf }
+    msg = "BPF namespace used without `use_plugin :ebpf` (#{n} eBPF method(s)); " \
+          "add `use_plugin :ebpf` to #{files[0]}"
+    if SpinelEbpf::Plugin.strict?
+      abort "error: #{msg}"
+    else
+      warn "[spinel-ebpf] warning: #{msg} (set SPNL_STRICT_PLUGINS=1 to enforce)"
+    end
+  end
+
+  # With --ebpf-dispatch, collect the :ebpf top-level methods eligible for
+  # transparent dispatch and ask spinel to emit them as extern declarations.
+  # Without --ebpf-dispatch, spinel keeps its default (static inline body) and
+  # main calls the native version locally — no BPF round-trip.
+  extern_methods = opts[:ebpf_dispatch] ? SpinelEbpf::DispatchShim.eligible_method_names(result) : nil
+  if opts[:ebpf_dispatch] && (extern_methods.nil? || extern_methods.empty?)
+    warn "[spinel-ebpf] --ebpf-dispatch: no eligible :ebpf methods (need top-level + non-attach + non-builtin)"
+  end
+
+  # Always emit native C (the host side runs the :native methods + loads :ebpf skeletons).
+  c_path = run_spinel_to_c(input, opts[:output_dir], ast_path, ir_path, extern_methods: extern_methods)
+  # Self-instrument keeps the workload methods native (--self-targets)
+  # and needs their real C symbols (--noinline-symbols, from --emit-symbol-map) to
+  # survive -O2 so the self-uprobe can attach.
+  if opts[:noinline_symbols] && !opts[:noinline_symbols].empty?
+    File.write(c_path, SpinelEbpf::Instrument.inject_noinline(File.read(c_path), opts[:noinline_symbols]))
+  end
+  puts "[spinel-ebpf] ebpf-mixed: wrote #{c_path}"
+
+  # Emit .bpf.c for ebpf-tagged methods (if any).
+  ebpf_count = result.methods.count { |m| m.tag == :ebpf }
+  if ebpf_count > 0
+    bpf_path = File.join(opts[:output_dir], "#{base}.bpf.c")
+    # Emit .bpf.c via the in-process C codegen (byte-identical
+    # to the Ruby CodegenBpf, which is now retained as the regression oracle).
+    if (icc = inproc_codegen_bin)
+      # --self-targets excludes the workload methods from the eBPF IR
+      # (cc_is_consumer_fn reads SPNL_EBPF_EXCLUDE), so a self-instrument unit
+      # keeps them native while still emitting the uprobe progs.
+      icc_env = {}
+      icc_env["SPNL_EBPF_EXCLUDE"] = opts[:self_targets].join(",") if opts[:self_targets] && !opts[:self_targets].empty?
+      File.write(bpf_path, IO.popen(icc_env, [icc, input, base], &:read))
+      abort "error: in-process eBPF codegen failed for #{input}\n" \
+            "       (re-run with --native-only to skip eBPF emission)" unless $?.success?
+      puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs, in-process)"
+    else
+      begin
+        bpf_text = SpinelEbpf::CodegenBpf.emit(ir, ast, result, base_name: base)
+        File.write(bpf_path, bpf_text)
+        puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs)"
+      rescue SpinelEbpf::CodegenBpf::UnsupportedNode => e
+        abort "error: eBPF codegen failed: #{e.message}\n" \
+              "       (re-run with --native-only to skip eBPF emission)"
+      end
+    end
+  else
+    warn "[spinel-ebpf] ebpf-mixed: no eBPF programs to emit (all methods are :native)"
+  end
+
+  # Emit the dispatch shim file alongside .bpf.c. It only takes effect at
+  # link time (build_binary picks it up when both --ebpf-dispatch and --build).
+  dispatch_path = nil
+  if opts[:ebpf_dispatch] && extern_methods && !extern_methods.empty?
+    dispatch_path = File.join(opts[:output_dir], "#{base}_dispatch.c")
+    File.write(dispatch_path, SpinelEbpf::DispatchShim.emit(ir, ast, result, base_name: base))
+    puts "[spinel-ebpf] ebpf-dispatch: wrote #{dispatch_path} (#{extern_methods.length} shims)"
+  end
+
+  # --build does the full toolchain. Native-only short-circuits to plain
+  # spinel build; eBPF-mixed runs the full Ruby -> binary pipeline.
+  if opts[:build]
+    # With --ebpf-dispatch the native side calls into eBPF (__s64 wrap), so
+    # default the native overflow mode to wrap for consistency unless overridden.
+    eff_overflow = opts[:int_overflow] || (opts[:ebpf_dispatch] ? "wrap" : nil)
+    warn "[spinel-ebpf] --ebpf-dispatch: native int overflow -> wrap (match eBPF; override with --int-overflow=raise)" if eff_overflow == "wrap" && opts[:int_overflow].nil?
+    bin_path = build_binary(base, opts[:output_dir], ebpf_count > 0,
+                            dispatch_path: dispatch_path, verbose: opts[:verbose],
+                            partition_result: result, int_overflow: eff_overflow)
+    puts "[spinel-ebpf] build: wrote #{bin_path}"
+  end
+  0
+end
+
+# --- subcommand: compile --instrument ---
+#
+# Auto-instrument a target program for per-method call rate:
+#   1. enumerate the target's instrumentable top-level methods,
+#   2. build the target native, injecting noinline so sp_<name> stays uprobe-able,
+#   3. generate a sidecar uprobe agent (Instrument.generate_agent) and build
+#      it through the normal compile pipeline (consumer DSL + uprobe codegen).
+# Output is two binaries; the agent attaches to the target via SPNL_UPROBE_BINARY
+# (sidecar model — single-binary self-attach is --instrument-self). Default agent
+# is a long-lived Prometheus /metrics server; --instrument-dump gives a one-shot dump.
+# Authoritative method -> C symbol map via upstream `--emit-symbol-map`.
+def instrument_symbol_map(target_input, build_dir)
+  cs = c_spinel or abort "error: --instrument needs the C spinel binary (build/spinel)"
+  base = File.basename(target_input, ".rb")
+  out  = File.join(build_dir, "#{base}.symmap.json")
+  run! [cs, target_input, "--emit-symbol-map", "-o", out]
+  SpinelEbpf::Instrument.parse_symbol_map(File.read(out))
+end
+
+def cmd_instrument(target_input, opts)
+  build_dir = opts[:output_dir]
+  FileUtils.mkdir_p(build_dir)
+  base = File.basename(target_input, ".rb")
+
+  # 1. authoritative method -> C symbol map, filtered to instrumentable
+  #    (drops builtins/attach; applies --instrument-only/-skip). Records carry the
+  #    real C symbol, Ruby name, kind (toplevel/imeth/cmeth), file, line.
+  records = SpinelEbpf::Instrument.instrumentable(
+              instrument_symbol_map(target_input, build_dir),
+              only: opts[:instrument_only], skip: opts[:instrument_skip])
+  abort "error: --instrument: no instrumentable methods in #{target_input}" if records.empty?
+  puts "[spinel-ebpf] instrument: #{records.length} method(s): #{records.map { |r| r[:ruby] }.join(', ')}"
+
+  # Single self-attaching binary (workload + agent in one).
+  return cmd_instrument_self(target_input, base, records, opts) if opts[:instrument_self]
+
+  csyms = records.map { |r| r[:c] }
+  # 2. build the instrumented target (native + noinline on the real symbols).
+  ast_path, ir_path, _ = run_spinel_to_ir(target_input, build_dir)
+  c_path = run_spinel_to_c(target_input, build_dir, ast_path, ir_path)
+  File.write(c_path, SpinelEbpf::Instrument.inject_noinline(File.read(c_path), csyms))
+  target_bin = File.expand_path(build_binary(base, build_dir, false, verbose: opts[:verbose],
+                                             int_overflow: opts[:int_overflow]))
+  puts "[spinel-ebpf] instrument: target -> #{target_bin}"
+
+  # 3. generate + build the sidecar agent through the normal pipeline.
+  mode = opts[:instrument_dump] ? :dump : :metrics
+  port = opts[:instrument_port] || 9100
+  wait = opts[:instrument_duration] || 10
+  agent_rb = File.join(build_dir, "#{base}_agent.rb")
+  File.write(agent_rb, SpinelEbpf::Instrument.generate_agent(records, target_bin: target_bin,
+                                                             mode: mode, wait_seconds: wait, port: port,
+                                                             depth_collapse: opts[:instrument_depth_collapse]))
+  puts "[spinel-ebpf] instrument: agent source -> #{agent_rb} (mode=#{mode})"
+  agent_argv = [agent_rb, "--build", "--ebpf-dispatch", "-o", build_dir]
+  agent_argv << "-v" if opts[:verbose]
+  rc = cmd_compile(agent_argv)
+  return rc unless rc.zero?
+  agent_bin = File.expand_path(File.join(build_dir, "#{base}_agent"))
+  puts "[spinel-ebpf] instrument: agent -> #{agent_bin}"
+  puts
+  puts "Run (sidecar — start the agent first so the uprobes attach before the target runs):"
+  if mode == :metrics
+    puts "  SPNL_UPROBE_BINARY=#{target_bin} SPINEL_HTTP_PORT=#{port} #{agent_bin} &"
+    puts "  #{target_bin}                 # exercise the target"
+    puts "  curl -s localhost:#{port}/metrics"
+  else
+    puts "  SPNL_UPROBE_BINARY=#{target_bin} #{agent_bin} &   # observes #{wait}s then dumps"
+    puts "  #{target_bin}"
+  end
+  0
+end
+
+# Single self-attaching binary — the workload + the agent compiled into
+# one unit. The workload methods are forced native + noinline (--self-targets) so
+# their sp_<name> symbols survive; the uprobes self-attach to /proc/self/exe at
+# the own pid. The workload runs in-process (firing the self-uprobes), then the
+# agent serves /metrics. No sidecar, no multi-attach double-count.
+def cmd_instrument_self(target_input, base, records, opts)
+  build_dir = opts[:output_dir]
+  port = opts[:instrument_port] || 9100
+  target_source = File.read(target_input, encoding: "UTF-8")
+  combined = SpinelEbpf::Instrument.generate_self_agent(records, target_source, port: port,
+                                                        depth_collapse: opts[:instrument_depth_collapse])
+  combined_rb = File.join(build_dir, "#{base}_self.rb")
+  File.write(combined_rb, combined)
+  puts "[spinel-ebpf] instrument-self: combined source -> #{combined_rb}"
+
+  # --self-targets (top-level Ruby names) forces those native + excludes them from
+  # the eBPF IR; --noinline-symbols (all real C symbols) protects them from -O2.
+  self_targets  = SpinelEbpf::Instrument.self_target_names(records)
+  noinline_syms = records.map { |r| r[:c] }
+  argv = [combined_rb, "--build", "-o", build_dir]
+  argv += ["--self-targets", self_targets.join(",")] unless self_targets.empty?
+  argv += ["--noinline-symbols", noinline_syms.join(",")] unless noinline_syms.empty?
+  argv << "-v" if opts[:verbose]
+  rc = cmd_compile(argv)
+  return rc unless rc.zero?
+  bin = File.expand_path(File.join(build_dir, "#{base}_self"))
+  puts "[spinel-ebpf] instrument-self: #{bin}"
+  puts
+  puts "Run (single self-instrumenting binary; workload runs then /metrics serves):"
+  puts "  SPINEL_HTTP_PORT=#{port} #{bin}"
+  puts "  curl -s localhost:#{port}/metrics"
+  0
+end
+
+# ---------- full build helpers ----------
+
+def which(name)
+  ENV["PATH"].split(":").each do |dir|
+    p = File.join(dir, name)
+    return p if File.executable?(p)
+  end
+  nil
+end
+
+def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false, partition_result: nil, int_overflow: nil)
+  abort "error: --build only supported on Linux (got #{RbConfig::CONFIG["host_os"]})" unless RbConfig::CONFIG["host_os"] =~ /linux/i
+  clang   = which("clang")   || abort("error: clang not found in PATH")
+  bpftool = with_ebpf ? (which("bpftool") || abort("error: bpftool not found")) : nil
+  # Int overflow mode is a compile-time define in spinel's runtime
+  # (sp_runtime.h). spinel-ebpf compiles the native .c itself, so we pass the
+  # -D here (raise = no define = default; wrap matches the eBPF __s64 side).
+  ov_flag = case int_overflow
+            when "wrap"    then ["-DSP_INT_OVERFLOW_MODE_WRAP"]
+            when "promote" then ["-DSP_INT_OVERFLOW_MODE_PROMOTE"]
+            else []
+            end
+
+  c_file  = File.join(build_dir, "#{base}.c")
+  out_bin = File.join(build_dir, base)
+
+  # Link against the runtime that MATCHES the compiler in use. The C
+  # `spinel` emits native C referencing its (newer) runtime (sp_runtime.h +
+  # libspinel_rt.a), so when it drives codegen we must use its sibling lib/ dir,
+  # not the legacy pin's.
+  spinel_lib =
+    if (cs = c_spinel)
+      File.expand_path("../lib", File.dirname(cs))
+    else
+      File.join(SPINEL_DIR, "lib")
+    end
+  abort "error: spinel lib not found at #{spinel_lib}" unless File.directory?(spinel_lib)
+
+  # Link libspinel_rt.a (sp_net / sp_crypto / sp_bigint runtime).
+  spinel_rt = File.join(spinel_lib, "libspinel_rt.a")
+  rt_link   = File.exist?(spinel_rt) ? [spinel_rt] : []
+
+  include_args = ["-I", spinel_lib, "-I", File.join(PROJECT_ROOT, "include")]
+  # -lutil: forkpty(3) for the PTY/WebSocket interactive terminal (sp_pty_* / sp_ws_*).
+  link_args    = rt_link + ["-lm", "-lutil"]
+
+  if with_ebpf
+    # The skeleton's struct name comes from the bpf.o file's base name; if the
+    # Ruby unit starts with a digit, that's an invalid C identifier. Use the
+    # same sanitized name as codegen_bpf uses for the unit (e.g. u_17_kprobe).
+    skel_name = SpinelEbpf::CodegenBpf.sanitize_identifier(base)
+    bpf_c   = File.join(build_dir, "#{base}.bpf.c")
+    bpf_o   = File.join(build_dir, "#{base}.bpf.o")
+    skel_h  = File.join(build_dir, "#{base}.skel.h")
+    glue_c  = File.join(build_dir, "#{base}_glue.c")
+    vmlinux = File.join(build_dir, "vmlinux.h")
+
+    unless File.exist?(vmlinux)
+      warn "[spinel-ebpf] generating vmlinux.h via bpftool" if verbose
+      File.write(vmlinux, `#{bpftool} btf dump file /sys/kernel/btf/vmlinux format c`)
+      abort "error: vmlinux.h generation failed" if File.empty?(vmlinux)
+    end
+
+    arch_macro = RbConfig::CONFIG["host_cpu"] =~ /aarch64|arm64/ ? "-D__TARGET_ARCH_arm64" : "-D__TARGET_ARCH_x86"
+    # <bpf/usdt.bpf.h> transitively pulls in <linux/errno.h> -> <asm/errno.h>,
+    # which lives under /usr/include/<triplet>/asm/ on debian-style toolchains.
+    # Include that triplet path when present so USDT compiles work; harmless
+    # otherwise.
+    arch_inc_paths = Dir.glob("/usr/include/*-linux-gnu").reject(&:empty?)
+    arch_inc_flags = arch_inc_paths.flat_map { |p| ["-I", p] }
+    # bpf_arena uses the address-space cast, which the BPF backend only
+    # emits at ISA v3+. Add -mcpu=v3 only when the program references the arena
+    # address space, so non-arena programs keep their existing default codegen.
+    cpu_flags = File.read(bpf_c).include?("address_space(1)") ? ["-mcpu=v3"] : []
+    run! [clang, "-O2", "-g", "-target", "bpf", arch_macro, *cpu_flags,
+          *arch_inc_flags,
+          "-I", build_dir, "-I", File.join(PROJECT_ROOT, "include"),
+          "-c", bpf_c, "-o", bpf_o]
+    # `name <sanitized>` overrides the struct prefix in the generated skel.h.
+    File.write(skel_h, `#{bpftool} gen skeleton #{bpf_o} name #{skel_name}`)
+    abort "error: bpftool gen skeleton failed" if File.empty?(skel_h)
+    # Collect reactor uprobe/USDT targets from MethodInfo so glue.c
+    # can emit a per-prog target table.
+    # Also collect reactor perf_event progs with their Hz frequency.
+    reactor_uprobes     = []
+    reactor_usdts       = []
+    reactor_perf_events = []
+    if partition_result
+      partition_result.methods.each do |mi|
+        next unless mi.scope == :top_level && mi.tag == :ebpf
+        if mi.respond_to?(:dsl_uprobe_binary) && mi.dsl_uprobe_binary
+          # Prefer per-handler `pid:` kw arg, fall through to -1
+          # (= libbpf's "all processes"). glue.c also lets env override
+          # -1 entries via $SPNL_*_PID.
+          pid = (mi.respond_to?(:dsl_attach_pid) && mi.dsl_attach_pid) ? mi.dsl_attach_pid : -1
+          if mi.dsl_usdt_provider
+            reactor_usdts << {
+              prog_name: SpinelEbpf::CodegenBpf.method_func_name(mi),
+              binary:    mi.dsl_uprobe_binary,
+              provider:  mi.dsl_usdt_provider,
+              probe:     mi.dsl_usdt_name,
+              pid:       pid,
+            }
+          elsif mi.dsl_uprobe_func
+            reactor_uprobes << {
+              prog_name: SpinelEbpf::CodegenBpf.method_func_name(mi),
+              binary:    mi.dsl_uprobe_binary,
+              func:      mi.dsl_uprobe_func,
+              retprobe:  mi.dsl_uprobe_retprobe ? 1 : 0,
+              pid:       pid,
+            }
+          end
+        end
+        # Reactor perf_event progs carry the sampling frequency in
+        # dsl_perf_event_hz. Hz <= 0 means "use env / default". Flat-form
+        # `def perf_event__<name>` doesn't set this field; glue.c picks up
+        # those programs by SEC name and uses env / default Hz.
+        if mi.respond_to?(:dsl_perf_event_hz) && mi.dsl_perf_event_hz
+          reactor_perf_events << {
+            prog_name: SpinelEbpf::CodegenBpf.method_func_name(mi),
+            hz:        mi.dsl_perf_event_hz,
+          }
+        end
+      end
+    end
+    # Declared kernel_cache paths (declaration order = XDP slots),
+    # read back from the .ast we produced, so the sp_kc_set glue can resolve
+    # path -> slot.
+    kc_ast_file = File.join(build_dir, "#{base}.ast")
+    kc_paths = File.exist?(kc_ast_file) ?
+      SpinelEbpf::KernelCache.declarations(SpinelEbpf::ParseSpinelAst.parse_file(kc_ast_file)).map(&:path) : []
+    File.write(glue_c, build_glue_c(base, skel_name,
+                                    with_dispatch: !dispatch_path.nil?,
+                                    reactor_uprobes: reactor_uprobes,
+                                    reactor_usdts: reactor_usdts,
+                                    reactor_perf_events: reactor_perf_events,
+                                    kernel_cache_paths: kc_paths))
+
+    include_args.concat(["-I", build_dir, "-I", File.join(PROJECT_ROOT, "src/runtime")])
+    extra_sources = [glue_c, File.join(PROJECT_ROOT, "src/runtime/spnl_runtime.c")]
+    # Dispatch shim file (sp_<name> implementations that call bpf_prog_test_run).
+    extra_sources << dispatch_path if dispatch_path
+    link_args = ["-lbpf", "-lelf", "-lz"] + link_args
+  else
+    extra_sources = []
+  end
+
+  # spinel-ebpf's own sp_net extensions (read_line / sendfile /
+  # epoll / pty / ws / reap + read_line-aware rl_close/rl_recv_some) live HERE,
+  # not patched into upstream lib/sp_net.c. Linked into every binary; references
+  # to upstream sp_net_close/recv_some/shutdown_requested resolve from
+  # libspinel_rt.a, -lutil (already in link_args) provides forkpty.
+  extra_sources << File.join(PROJECT_ROOT, "src/runtime/sp_net_ext.c")
+
+  # SPNL_STATIC=1: fully static binary (libbpf/elf/z/c statically linked). The
+  # eBPF .bpf.o is CO-RE so it relocates against the *target* kernel's BTF at
+  # load — a static build therefore runs on another arm64 host (e.g. a board)
+  # without matching its glibc/libbpf. Used for cross-deploy benchmarking.
+  static_flag = ENV["SPNL_STATIC"] == "1" ? ["-static"] : []
+  # static libbpf.a pulls in ZSTD (compressed BTF) — add it explicitly (after
+  # -lbpf so the static linker resolves the reference). Harmless when dynamic.
+  static_libs = ENV["SPNL_STATIC"] == "1" ? ["-lzstd"] : []
+  cmd = [clang, "-O2", *ov_flag, *static_flag, *include_args, c_file, *extra_sources, *link_args, *static_libs, "-o", out_bin]
+  warn "[spinel-ebpf] linking: #{cmd.join(" ")}" if verbose
+  run! cmd
+  out_bin
+end
+
+# Generated _glue.c — auto-loads/attaches BPF in a constructor, cleans up in destructor.
+# `base` is the user-facing unit name (used only for the .skel.h include path);
+# `skel_name` is the sanitized C identifier prefix produced by bpftool gen skeleton.
+# `with_dispatch`: when true, the skeleton pointer is given external
+# linkage so the generated <base>_dispatch.c TU can reach it.
+def build_glue_c(base, skel_name, with_dispatch: false,
+                 reactor_uprobes: [], reactor_usdts: [], reactor_perf_events: [],
+                 kernel_cache_paths: [])
+  storage = with_dispatch ? "" : "static "
+
+  # kernel_cache path->slot table (declaration order matches the
+  # XDP match_route() slots). sp_kc_set(path, body) resolves the path to its slot.
+  kc_paths_decl =
+    if kernel_cache_paths.empty?
+      "static const char *const _spnl_kc_paths[1] = {0};\n" \
+      "    static const int _spnl_kc_npaths = 0;"
+    else
+      list = kernel_cache_paths.map { |p| p.inspect }.join(", ")
+      "static const char *const _spnl_kc_paths[] = { #{list} };\n" \
+      "    static const int _spnl_kc_npaths = #{kernel_cache_paths.length};"
+    end
+
+  # Emit a const array of reactor uprobe/USDT targets. _spnl_uprobe_attach_all
+  # and _spnl_usdt_attach_all consult it (by program name) and fall back to env
+  # vars when the prog name isn't in the table (legacy flat-form attach).
+  uprobe_table = reactor_uprobes.map do |t|
+    "    { \"#{t[:prog_name]}\", \"#{t[:binary]}\", \"#{t[:func]}\", #{t[:retprobe]}, #{t[:pid] || -1} },"
+  end.join("\n")
+  uprobe_table_decl =
+    if reactor_uprobes.empty?
+      "static const struct spnl_reactor_uprobe _spnl_reactor_uprobes[1] = {};\n" \
+      "static const int _spnl_reactor_uprobes_count = 0;"
+    else
+      "static const struct spnl_reactor_uprobe _spnl_reactor_uprobes[] = {\n" \
+      "#{uprobe_table}\n" \
+      "};\n" \
+      "static const int _spnl_reactor_uprobes_count = #{reactor_uprobes.length};"
+    end
+
+  usdt_table = reactor_usdts.map do |t|
+    "    { \"#{t[:prog_name]}\", \"#{t[:binary]}\", \"#{t[:provider]}\", \"#{t[:probe]}\", #{t[:pid] || -1} },"
+  end.join("\n")
+  usdt_table_decl =
+    if reactor_usdts.empty?
+      "static const struct spnl_reactor_usdt _spnl_reactor_usdts[1] = {};\n" \
+      "static const int _spnl_reactor_usdts_count = 0;"
+    else
+      "static const struct spnl_reactor_usdt _spnl_reactor_usdts[] = {\n" \
+      "#{usdt_table}\n" \
+      "};\n" \
+      "static const int _spnl_reactor_usdts_count = #{reactor_usdts.length};"
+    end
+
+  # Per-prog Hz table for reactor perf_event programs.
+  pe_table = reactor_perf_events.map do |t|
+    "    { \"#{t[:prog_name]}\", #{t[:hz]} },"
+  end.join("\n")
+  pe_table_decl =
+    if reactor_perf_events.empty?
+      "static const struct spnl_reactor_perf_event _spnl_reactor_perf_events[1] = {};\n" \
+      "static const int _spnl_reactor_perf_events_count = 0;"
+    else
+      "static const struct spnl_reactor_perf_event _spnl_reactor_perf_events[] = {\n" \
+      "#{pe_table}\n" \
+      "};\n" \
+      "static const int _spnl_reactor_perf_events_count = #{reactor_perf_events.length};"
+    end
+
+  <<~GLUE
+    /* SPDX-License-Identifier: MIT OR Apache-2.0
+     * GENERATED by spinel-ebpf. Auto-loads, attaches kprobe/
+     * tracepoint programs via libbpf-skeleton, plus an explicit XDP attach
+     * pass that reads $SPNL_XDP_IFACE for the target interface.
+     */
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <errno.h>
+    #include <fcntl.h>          /* open() for cgroup attach */
+    #include <unistd.h>         /* close() */
+    #include <net/if.h>
+    #include <sys/socket.h>     /* setsockopt for SO_ATTACH_REUSEPORT_EBPF */
+    #include <sys/syscall.h>    /* __NR_perf_event_open */
+    #include <linux/bpf.h>      /* BPF_CGROUP_SOCK_OPS attach type */
+    #include <linux/perf_event.h>  /* struct perf_event_attr */
+    #include <bpf/libbpf.h>
+    #include <bpf/bpf.h>
+    #include "spnl_runtime.h"   /* histogram dump FFI shims */
+    #include "#{base}.skel.h"
+
+    #{storage}struct #{skel_name} *_spnl_skel;
+
+    /* Track XDP-attached interfaces so the destructor can detach. */
+    static int  _spnl_xdp_ifindex = 0;
+    static int  _spnl_xdp_attached = 0;
+
+    /* uprobe / uretprobe / USDT links (bpf_link*). */
+    #define SPNL_UPROBE_MAX 32
+    static struct bpf_link *_spnl_uprobe_links[SPNL_UPROBE_MAX];
+    static int              _spnl_uprobe_link_count = 0;
+
+    /* reactor-form target tables. Each entry maps a BPF program name
+     * (synthesized by partition, e.g. "uprobe__react0") to the original
+     * binary path / func / provider / probe carried in MethodInfo. The
+     * attach passes look up by prog name and use the table entry when
+     * present; otherwise they fall back to env-based legacy flat form. */
+    struct spnl_reactor_uprobe {
+        const char *prog_name;
+        const char *binary;
+        const char *func;
+        int retprobe;
+        int pid;          /* -1 = system-wide */
+    };
+    struct spnl_reactor_usdt {
+        const char *prog_name;
+        const char *binary;
+        const char *provider;
+        const char *probe;
+        int pid;          /* -1 = system-wide */
+    };
+    /* reactor perf_event handler — Hz frequency carried inline so
+     * each handler can sample at its own rate. */
+    struct spnl_reactor_perf_event {
+        const char *prog_name;
+        int hz;
+    };
+    #{uprobe_table_decl}
+    #{usdt_table_decl}
+    #{pe_table_decl}
+
+    static const struct spnl_reactor_uprobe *_spnl_lookup_reactor_uprobe(const char *name)
+    {
+        for (int i = 0; i < _spnl_reactor_uprobes_count; i++) {
+            if (strcmp(_spnl_reactor_uprobes[i].prog_name, name) == 0)
+                return &_spnl_reactor_uprobes[i];
+        }
+        return NULL;
+    }
+    static const struct spnl_reactor_usdt *_spnl_lookup_reactor_usdt(const char *name)
+    {
+        for (int i = 0; i < _spnl_reactor_usdts_count; i++) {
+            if (strcmp(_spnl_reactor_usdts[i].prog_name, name) == 0)
+                return &_spnl_reactor_usdts[i];
+        }
+        return NULL;
+    }
+    static const struct spnl_reactor_perf_event *_spnl_lookup_reactor_pe(const char *name)
+    {
+        for (int i = 0; i < _spnl_reactor_perf_events_count; i++) {
+            if (strcmp(_spnl_reactor_perf_events[i].prog_name, name) == 0)
+                return &_spnl_reactor_perf_events[i];
+        }
+        return NULL;
+    }
+
+    /* TCX attach links are kept here so the destructor can release them.
+     * libbpf manages link lifecycle: bpf_link__destroy() detaches + frees. */
+    #define SPNL_TCX_MAX_LINKS 8
+    static struct bpf_link *_spnl_tcx_links[SPNL_TCX_MAX_LINKS];
+    static int              _spnl_tcx_link_count = 0;
+
+    /* SOCK_OPS attach state. cgroup attach uses bpf_prog_attach (no
+     * bpf_link in the older API) — so the destructor detaches via
+     * bpf_prog_detach2. */
+    #define SPNL_SOCKOPS_MAX 4
+    static int _spnl_sockops_cgroup_fd = -1;
+    static int _spnl_sockops_prog_fds[SPNL_SOCKOPS_MAX];
+    static int _spnl_sockops_count = 0;
+
+    static int _spnl_is_tcx_prog(struct bpf_program *prog)
+    {
+        if (bpf_program__type(prog) != BPF_PROG_TYPE_SCHED_CLS) return 0;
+        /* Both tcx/ingress and tcx/egress use BPF_PROG_TYPE_SCHED_CLS;
+         * the expected_attach_type distinguishes them but for our purposes
+         * libbpf's bpf_program__attach_tcx() handles either based on SEC. */
+        return 1;
+    }
+
+    static void _spnl_xdp_attach_all(void)
+    {
+        const char *iface = getenv("SPNL_XDP_IFACE");
+        struct bpf_program *prog;
+        int xdp_count = 0;
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) == BPF_PROG_TYPE_XDP)
+                xdp_count++;
+        }
+        if (xdp_count == 0)
+            return;
+
+        if (!iface || !*iface) {
+            fprintf(stderr, "[spinel-ebpf] XDP program(s) loaded but $SPNL_XDP_IFACE is unset; "
+                            "set it to attach (e.g. SPNL_XDP_IFACE=lo)\\n");
+            return;
+        }
+
+        int ifindex = (int)if_nametoindex(iface);
+        if (!ifindex) {
+            fprintf(stderr, "[spinel-ebpf] if_nametoindex(%s): %s\\n", iface, strerror(errno));
+            return;
+        }
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) != BPF_PROG_TYPE_XDP) continue;
+            int fd = bpf_program__fd(prog);
+            int err = bpf_xdp_attach(ifindex, fd, 0, NULL);
+            if (err) {
+                fprintf(stderr, "[spinel-ebpf] bpf_xdp_attach(%s, %s): %s\\n",
+                        iface, bpf_program__name(prog), strerror(-err));
+                continue;
+            }
+            _spnl_xdp_ifindex = ifindex;
+            _spnl_xdp_attached = 1;
+            fprintf(stderr, "[spinel-ebpf] XDP attached: %s -> %s\\n",
+                    bpf_program__name(prog), iface);
+        }
+    }
+
+    static void _spnl_tcx_attach_all(void)
+    {
+        const char *iface = getenv("SPNL_TCX_IFACE");
+        struct bpf_program *prog;
+        int tcx_count = 0;
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (_spnl_is_tcx_prog(prog)) tcx_count++;
+        }
+        if (tcx_count == 0)
+            return;
+
+        if (!iface || !*iface) {
+            fprintf(stderr, "[spinel-ebpf] TCX program(s) loaded but $SPNL_TCX_IFACE is unset; "
+                            "set it to attach (e.g. SPNL_TCX_IFACE=lo)\\n");
+            return;
+        }
+
+        int ifindex = (int)if_nametoindex(iface);
+        if (!ifindex) {
+            fprintf(stderr, "[spinel-ebpf] if_nametoindex(%s): %s\\n", iface, strerror(errno));
+            return;
+        }
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (!_spnl_is_tcx_prog(prog)) continue;
+            if (_spnl_tcx_link_count >= SPNL_TCX_MAX_LINKS) {
+                fprintf(stderr, "[spinel-ebpf] too many TCX programs (>%d)\\n",
+                        SPNL_TCX_MAX_LINKS);
+                break;
+            }
+            /* libbpf reads SEC name ("tcx/ingress" / "tcx/egress") and picks
+             * the right hook automatically. opts=NULL means default options. */
+            LIBBPF_OPTS(bpf_tcx_opts, tcx_opts);
+            struct bpf_link *link = bpf_program__attach_tcx(prog, ifindex, &tcx_opts);
+            if (!link) {
+                fprintf(stderr, "[spinel-ebpf] bpf_program__attach_tcx(%s, %s): %s\\n",
+                        iface, bpf_program__name(prog), strerror(errno));
+                continue;
+            }
+            _spnl_tcx_links[_spnl_tcx_link_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] TCX attached: %s -> %s (%s)\\n",
+                    bpf_program__name(prog), iface, bpf_program__section_name(prog));
+        }
+    }
+
+    /* SOCK_OPS auto cgroup attach. SEC("sockops") programs require
+     * cgroup-scoped attach via bpf_prog_attach(BPF_CGROUP_SOCK_OPS).
+     * Reads $SPNL_CGROUP_PATH (default /sys/fs/cgroup). */
+    static void _spnl_sockops_attach_all(void)
+    {
+        struct bpf_program *prog;
+        int sockops_count = 0;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) == BPF_PROG_TYPE_SOCK_OPS)
+                sockops_count++;
+        }
+        if (sockops_count == 0) return;
+
+        const char *cg_path = getenv("SPNL_CGROUP_PATH");
+        if (!cg_path || !*cg_path) cg_path = "/sys/fs/cgroup";
+
+        int cg_fd = open(cg_path, O_RDONLY | O_DIRECTORY);
+        if (cg_fd < 0) {
+            fprintf(stderr, "[spinel-ebpf] sockops: open(%s): %s — sockops programs not attached\\n",
+                    cg_path, strerror(errno));
+            return;
+        }
+        _spnl_sockops_cgroup_fd = cg_fd;
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) != BPF_PROG_TYPE_SOCK_OPS) continue;
+            if (_spnl_sockops_count >= SPNL_SOCKOPS_MAX) {
+                fprintf(stderr, "[spinel-ebpf] too many sockops programs (>%d)\\n",
+                        SPNL_SOCKOPS_MAX);
+                break;
+            }
+            int fd = bpf_program__fd(prog);
+            int err = bpf_prog_attach(fd, cg_fd, BPF_CGROUP_SOCK_OPS, BPF_F_ALLOW_MULTI);
+            if (err) {
+                fprintf(stderr, "[spinel-ebpf] bpf_prog_attach(sockops %s -> %s): %s\\n",
+                        bpf_program__name(prog), cg_path, strerror(-err));
+                continue;
+            }
+            _spnl_sockops_prog_fds[_spnl_sockops_count++] = fd;
+            fprintf(stderr, "[spinel-ebpf] sockops attached: %s -> cgroup %s\\n",
+                    bpf_program__name(prog), cg_path);
+        }
+    }
+
+    /* PROG_ARRAY auto-populate. Looks up `spnl_prog_array` (emitted
+     * by codegen when `def xdp_tail__<name>` is used) and writes each
+     * xdp_tail__* prog's fd into a slot. Slots are assigned in
+     * bpf_object__for_each_program iteration order, which matches the
+     * source/declaration order (libbpf preserves ELF section order). */
+    static void _spnl_prog_array_populate(void)
+    {
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "spnl_prog_array");
+        if (!map) return;
+        int map_fd = bpf_map__fd(map);
+        if (map_fd < 0) return;
+
+        __u32 slot = 0;
+        struct bpf_program *prog;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *name = bpf_program__name(prog);
+            if (!name || strncmp(name, "xdp_tail__", 10) != 0) continue;
+            int prog_fd = bpf_program__fd(prog);
+            int err = bpf_map_update_elem(map_fd, &slot, &prog_fd, BPF_ANY);
+            if (err) {
+                fprintf(stderr, "[spinel-ebpf] prog_array[%u] = %s: %s\\n",
+                        slot, name, strerror(-err));
+            } else {
+                fprintf(stderr, "[spinel-ebpf] prog_array[%u] = %s\\n", slot, name);
+            }
+            slot++;
+        }
+    }
+
+    /* parse `<pid_int>` from env, return -1 if unset/invalid. -1 means
+     * "all processes" to libbpf's uprobe/USDT attach. */
+    static int _spnl_env_pid(const char *var)
+    {
+        const char *v = getenv(var);
+        if (!v || !*v) return -1;
+        char *end = NULL;
+        long p = strtol(v, &end, 10);
+        if (end == v || (p < 0)) return -1;
+        return (int)p;
+    }
+
+    /* uprobe / uretprobe auto attach.
+     * Reactor form: prog name matches _spnl_reactor_uprobes[].prog_name,
+     *   use that entry's binary + func.
+     * Flat form: fall back to $SPNL_UPROBE_BINARY + the prog name
+     *   suffix as the function name.
+     * pid for both: $SPNL_UPROBE_PID (default -1). */
+    static void _spnl_uprobe_attach_all(void)
+    {
+        struct bpf_program *prog;
+        int uprobe_count = 0;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec = bpf_program__section_name(prog);
+            if (sec && (strcmp(sec, "uprobe") == 0 || strcmp(sec, "uretprobe") == 0))
+                uprobe_count++;
+        }
+        if (uprobe_count == 0) return;
+
+        const char *env_binary = getenv("SPNL_UPROBE_BINARY");
+        int env_pid = _spnl_env_pid("SPNL_UPROBE_PID");
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec  = bpf_program__section_name(prog);
+            const char *name = bpf_program__name(prog);
+            if (!sec || !name) continue;
+            int retprobe;
+            int pid;
+            const char *binary;
+            const char *func;
+            const struct spnl_reactor_uprobe *rt = _spnl_lookup_reactor_uprobe(name);
+            if (rt) {
+                binary   = rt->binary;
+                func     = rt->func;
+                retprobe = rt->retprobe;
+                /* per-handler pid wins; if unset, fall back to env. */
+                pid      = (rt->pid >= 0) ? rt->pid : env_pid;
+            } else if (strcmp(sec, "uprobe") == 0 && strncmp(name, "uprobe__", 8) == 0) {
+                retprobe = 0;
+                func     = name + 8;
+                if (!env_binary || !*env_binary) {
+                    /* no target binary -> self-attach. The sp_<name> symbol
+                     * lives in *this* binary; attach to /proc/self/exe scoped to
+                     * our own pid (the workload runs in this process). */
+                    binary = "/proc/self/exe";
+                    pid    = (int)getpid();
+                } else {
+                    binary = env_binary;
+                    pid    = env_pid;
+                }
+            } else if (strcmp(sec, "uretprobe") == 0 && strncmp(name, "uretprobe__", 11) == 0) {
+                retprobe = 1;
+                func     = name + 11;
+                if (!env_binary || !*env_binary) {
+                    binary = "/proc/self/exe";
+                    pid    = (int)getpid();
+                } else {
+                    binary = env_binary;
+                    pid    = env_pid;
+                }
+            } else {
+                continue;
+            }
+            if (_spnl_uprobe_link_count >= SPNL_UPROBE_MAX) {
+                fprintf(stderr, "[spinel-ebpf] too many uprobe programs (>%d)\\n", SPNL_UPROBE_MAX);
+                break;
+            }
+            LIBBPF_OPTS(bpf_uprobe_opts, opts,
+                        .retprobe   = retprobe,
+                        .func_name  = func);
+            struct bpf_link *link = bpf_program__attach_uprobe_opts(
+                prog, pid, binary, 0 /* func_offset resolved by func_name */, &opts);
+            if (!link) {
+                fprintf(stderr, "[spinel-ebpf] bpf_program__attach_uprobe(%s, %s:%s, pid=%d): %s\\n",
+                        retprobe ? "retprobe" : "probe", binary, func, pid, strerror(errno));
+                continue;
+            }
+            _spnl_uprobe_links[_spnl_uprobe_link_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] uprobe attached: %s -> %s:%s (pid=%d)\\n",
+                    name, binary, func, pid);
+        }
+    }
+
+    /* USDT auto attach.
+     * Reactor form: prog name matches _spnl_reactor_usdts[].prog_name,
+     *   use that entry's binary + provider + probe.
+     * Flat form: parse provider/probe from prog name (`usdt__<P>__<N>`)
+     *   + binary from $SPNL_USDT_BINARY. */
+    static void _spnl_usdt_attach_all(void)
+    {
+        struct bpf_program *prog;
+        int usdt_count = 0;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec = bpf_program__section_name(prog);
+            if (sec && strcmp(sec, "usdt") == 0)
+                usdt_count++;
+        }
+        if (usdt_count == 0) return;
+
+        const char *env_binary = getenv("SPNL_USDT_BINARY");
+        int env_pid = _spnl_env_pid("SPNL_USDT_PID");
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec  = bpf_program__section_name(prog);
+            const char *name = bpf_program__name(prog);
+            if (!sec || !name) continue;
+            if (strcmp(sec, "usdt") != 0) continue;
+            if (strncmp(name, "usdt__", 6) != 0) continue;
+
+            int pid;
+            const char *binary;
+            const char *provider;
+            const char *probe;
+            char provider_buf[64];
+            const struct spnl_reactor_usdt *rt = _spnl_lookup_reactor_usdt(name);
+            if (rt) {
+                binary   = rt->binary;
+                provider = rt->provider;
+                probe    = rt->probe;
+                /* per-handler pid wins; if unset, fall back to env. */
+                pid      = (rt->pid >= 0) ? rt->pid : env_pid;
+            } else {
+                if (!env_binary || !*env_binary) {
+                    fprintf(stderr, "[spinel-ebpf] %s loaded but $SPNL_USDT_BINARY is unset\\n", name);
+                    continue;
+                }
+                const char *rest = name + 6;
+                const char *sep  = strstr(rest, "__");
+                if (!sep) {
+                    fprintf(stderr, "[spinel-ebpf] malformed USDT prog name %s\\n", name);
+                    continue;
+                }
+                size_t plen = (size_t)(sep - rest);
+                if (plen == 0 || plen >= sizeof(provider_buf)) {
+                    fprintf(stderr, "[spinel-ebpf] USDT provider too long in %s\\n", name);
+                    continue;
+                }
+                memcpy(provider_buf, rest, plen);
+                provider_buf[plen] = '\\0';
+                binary   = env_binary;
+                provider = provider_buf;
+                probe    = sep + 2;
+                pid      = env_pid;
+            }
+
+            if (_spnl_uprobe_link_count >= SPNL_UPROBE_MAX) {
+                fprintf(stderr, "[spinel-ebpf] too many uprobe/USDT programs (>%d)\\n", SPNL_UPROBE_MAX);
+                break;
+            }
+            struct bpf_link *link = bpf_program__attach_usdt(
+                prog, pid, binary, provider, probe, NULL);
+            if (!link) {
+                fprintf(stderr, "[spinel-ebpf] bpf_program__attach_usdt(%s:%s:%s, pid=%d): %s\\n",
+                        binary, provider, probe, pid, strerror(errno));
+                continue;
+            }
+            _spnl_uprobe_links[_spnl_uprobe_link_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] usdt attached: %s -> %s:%s:%s (pid=%d)\\n",
+                    name, binary, provider, probe, pid);
+        }
+    }
+
+    /* per-CPU perf event fds + their bpf_link*. We open one event
+     * per online CPU per perf_event BPF program and attach the program to
+     * each. */
+    #define SPNL_PERF_MAX_CPUS 64
+    static struct {
+        struct bpf_link *link;
+        int               pfd;
+    } _spnl_perf_links[SPNL_PERF_MAX_CPUS * 4];   /* up to 4 perf progs */
+    static int _spnl_perf_link_count = 0;
+
+    /* perf_event_open() wrapper — kernel doesn't expose this as a libc
+     * function, so call via syscall(). */
+    static int _spnl_perf_event_open(struct perf_event_attr *attr,
+                                     pid_t pid, int cpu, int group_fd,
+                                     unsigned long flags)
+    {
+        return (int)syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
+    }
+
+    /* attach SEC("perf_event") programs. Per-handler Hz comes from
+     * the reactor table; flat-form (no table entry) falls back to
+     * $SPNL_PERF_HZ (default 49 — bcc convention, picked to avoid
+     * alignment with 50/60 Hz tick rates). One perf event per online CPU. */
+    static void _spnl_perf_event_attach_all(void)
+    {
+        struct bpf_program *prog;
+        int pe_count = 0;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec = bpf_program__section_name(prog);
+            if (sec && strcmp(sec, "perf_event") == 0)
+                pe_count++;
+        }
+        if (pe_count == 0) return;
+
+        int env_hz = 0;
+        const char *env_hz_s = getenv("SPNL_PERF_HZ");
+        if (env_hz_s && *env_hz_s) env_hz = atoi(env_hz_s);
+        if (env_hz <= 0) env_hz = 49;
+
+        int n_cpus = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        if (n_cpus <= 0) n_cpus = 1;
+        if (n_cpus > SPNL_PERF_MAX_CPUS) n_cpus = SPNL_PERF_MAX_CPUS;
+
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *sec  = bpf_program__section_name(prog);
+            const char *name = bpf_program__name(prog);
+            if (!sec || !name || strcmp(sec, "perf_event") != 0) continue;
+
+            int hz = env_hz;
+            const struct spnl_reactor_perf_event *rt = _spnl_lookup_reactor_pe(name);
+            if (rt && rt->hz > 0) hz = rt->hz;
+
+            struct perf_event_attr attr;
+            memset(&attr, 0, sizeof(attr));
+            attr.type     = PERF_TYPE_SOFTWARE;
+            attr.config   = PERF_COUNT_SW_CPU_CLOCK;
+            attr.size     = sizeof(attr);
+            attr.sample_period = 0;
+            attr.sample_freq   = hz;
+            attr.freq          = 1;
+            attr.inherit       = 0;
+            attr.disabled      = 0;
+
+            int attached_cpus = 0;
+            for (int cpu = 0; cpu < n_cpus; cpu++) {
+                int pfd = _spnl_perf_event_open(&attr, -1, cpu, -1, 0);
+                if (pfd < 0) {
+                    /* Offline CPU is fine; skip silently. EACCES = no
+                     * perf_event_paranoid permission. */
+                    continue;
+                }
+                struct bpf_link *link = bpf_program__attach_perf_event(prog, pfd);
+                if (!link) {
+                    fprintf(stderr, "[spinel-ebpf] bpf_program__attach_perf_event(%s, cpu %d): %s\\n",
+                            name, cpu, strerror(errno));
+                    close(pfd);
+                    continue;
+                }
+                if (_spnl_perf_link_count < (int)(sizeof(_spnl_perf_links)/sizeof(_spnl_perf_links[0]))) {
+                    _spnl_perf_links[_spnl_perf_link_count].link = link;
+                    _spnl_perf_links[_spnl_perf_link_count].pfd  = pfd;
+                    _spnl_perf_link_count++;
+                }
+                attached_cpus++;
+            }
+            fprintf(stderr, "[spinel-ebpf] perf_event attached: %s @ %d Hz across %d CPU(s)\\n",
+                    name, hz, attached_cpus);
+        }
+    }
+
+    /* fire all `SEC("syscall") int spnl_timer_arm_*(void *ctx)` progs
+     * once via bpf_prog_test_run so the in-kernel bpf_timer starts ticking.
+     * Each arm prog initializes its timer slot and calls bpf_timer_start;
+     * the callback re-arms itself for periodic behavior. */
+    static void _spnl_timer_arm_all(void)
+    {
+        struct bpf_program *prog;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *name = bpf_program__name(prog);
+            if (!name || strncmp(name, "spnl_timer_arm_", 15) != 0) continue;
+            int prog_fd = bpf_program__fd(prog);
+            if (prog_fd < 0) continue;
+            LIBBPF_OPTS(bpf_test_run_opts, opts);
+            int err = bpf_prog_test_run_opts(prog_fd, &opts);
+            if (err) {
+                fprintf(stderr, "[spinel-ebpf] timer arm %s: %s\\n",
+                        name, strerror(-err));
+            } else {
+                fprintf(stderr, "[spinel-ebpf] timer armed: %s\\n", name);
+            }
+        }
+    }
+
+    /* cgroup_sock_addr (connect4/bind4) attach. cgroup-scoped;
+     * bpf_program__attach_cgroup picks the attach type from the SEC. Links
+     * auto-detach when this process exits. $SPNL_CGROUP_PATH (default
+     * /sys/fs/cgroup). */
+    #define SPNL_CGROUP_MAX 32
+    static struct bpf_link *_spnl_cgroup_links[SPNL_CGROUP_MAX];
+    static int _spnl_cgroup_count = 0;
+    static void _spnl_cgroup_attach_all(void)
+    {
+        struct bpf_program *prog;
+        int n = 0;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) == BPF_PROG_TYPE_CGROUP_SOCK_ADDR) n++;
+        }
+        if (n == 0) return;
+        const char *cg_path = getenv("SPNL_CGROUP_PATH");
+        if (!cg_path || !*cg_path) cg_path = "/sys/fs/cgroup";
+        int cg_fd = open(cg_path, O_RDONLY | O_DIRECTORY);
+        if (cg_fd < 0) {
+            fprintf(stderr, "[spinel-ebpf] cgroup: open(%s): %s — cgroup_sock_addr not attached\\n",
+                    cg_path, strerror(errno));
+            return;
+        }
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) != BPF_PROG_TYPE_CGROUP_SOCK_ADDR) continue;
+            if (_spnl_cgroup_count >= SPNL_CGROUP_MAX) break;
+            struct bpf_link *link = bpf_program__attach_cgroup(prog, cg_fd);
+            if (!link) {
+                fprintf(stderr, "[spinel-ebpf] attach_cgroup(%s) failed\\n", bpf_program__name(prog));
+                continue;
+            }
+            _spnl_cgroup_links[_spnl_cgroup_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] cgroup attached: %s -> %s\\n",
+                    bpf_program__name(prog), cg_path);
+        }
+        close(cg_fd);
+    }
+
+    /* BPF_ITER. iter programs aren't auto-attached; create an iterator
+     * link and read it to drive one pass over all tasks (a snapshot at load
+     * time). The program runs once per task; its body aggregates into maps. */
+    static void _spnl_iter_run_all(void)
+    {
+        struct bpf_program *prog;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            if (bpf_program__type(prog) != BPF_PROG_TYPE_TRACING) continue;
+            if (bpf_program__expected_attach_type(prog) != BPF_TRACE_ITER) continue;
+            struct bpf_link *link = bpf_program__attach_iter(prog, NULL);
+            if (!link) {
+                fprintf(stderr, "[spinel-ebpf] attach_iter(%s) failed\\n", bpf_program__name(prog));
+                continue;
+            }
+            int it_fd = bpf_iter_create(bpf_link__fd(link));
+            if (it_fd < 0) {
+                fprintf(stderr, "[spinel-ebpf] bpf_iter_create(%s) failed\\n", bpf_program__name(prog));
+                bpf_link__destroy(link);
+                continue;
+            }
+            char buf[4096];
+            while (read(it_fd, buf, sizeof(buf)) > 0) { /* drain: runs prog per task */ }
+            close(it_fd);
+            bpf_link__destroy(link);
+            fprintf(stderr, "[spinel-ebpf] iter ran: %s\\n", bpf_program__name(prog));
+        }
+    }
+
+    __attribute__((constructor))
+    static void _spnl_init(void)
+    {
+        /* optional custom BTF for cross-kernel CO-RE. When $SPNL_BTF_PATH
+         * is set, open with btf_custom_path so CO-RE relocations resolve against a
+         * supplied BTF even on a kernel that lacks /sys/kernel/btf/vmlinux. The
+         * supplied BTF only needs the (layout-stable) types the program touches
+         * (xdp_md / bpf_timer / net headers), so a recent kernel's BTF works as a
+         * stand-in on an older BTF-less kernel. */
+        const char *_spnl_btf_path = getenv("SPNL_BTF_PATH");
+        if (_spnl_btf_path && _spnl_btf_path[0]) {
+            LIBBPF_OPTS(bpf_object_open_opts, _spnl_oo, .btf_custom_path = _spnl_btf_path);
+            _spnl_skel = #{skel_name}__open_opts(&_spnl_oo);
+            if (_spnl_skel && #{skel_name}__load(_spnl_skel)) {
+                fprintf(stderr, "[spinel-ebpf] BPF load failed (custom BTF %s)\\n", _spnl_btf_path);
+                #{skel_name}__destroy(_spnl_skel);
+                _spnl_skel = NULL;
+            } else if (_spnl_skel) {
+                fprintf(stderr, "[spinel-ebpf] BPF loaded with custom BTF %s\\n", _spnl_btf_path);
+            }
+        } else {
+            _spnl_skel = #{skel_name}__open_and_load();
+        }
+        if (!_spnl_skel) {
+            fprintf(stderr, "[spinel-ebpf] BPF open/load failed\\n");
+            return;
+        }
+        if (#{skel_name}__attach(_spnl_skel)) {
+            fprintf(stderr, "[spinel-ebpf] BPF attach failed (some attach points may be missing)\\n");
+        } else {
+            fprintf(stderr, "[spinel-ebpf] BPF loaded and attached\\n");
+        }
+        /* populate PROG_ARRAY *before* attaching the XDP dispatcher so
+         * a tail_call right out of the gate doesn't hit an empty slot. */
+        _spnl_prog_array_populate();
+        _spnl_xdp_attach_all();
+        _spnl_tcx_attach_all();
+        _spnl_sockops_attach_all();
+        _spnl_cgroup_attach_all();
+        _spnl_iter_run_all();
+        _spnl_uprobe_attach_all();
+        _spnl_usdt_attach_all();
+        _spnl_perf_event_attach_all();
+        _spnl_timer_arm_all();
+    }
+
+    /* dynamic blocklist FFI exposed to spinel-emitted main.
+     * Map is looked up by name at runtime so glue.c stays valid even when
+     * the user's .bpf.c didn't request the blocklist (bpf_object__find_map_by_name
+     * returns NULL → these calls return -2). The Ruby side declares e.g.
+     *   module Blocklist
+     *     ffi_func :sp_bpf_blocklist_add, [:uint32], :int
+     *     ffi_func :sp_bpf_blocklist_del, [:uint32], :int
+     *   end
+     */
+    static int _spnl_blocklist_fd(void)
+    {
+        if (!_spnl_skel) return -1;
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_blocklist");
+        if (!map) return -2;
+        return bpf_map__fd(map);
+    }
+    int sp_bpf_blocklist_add(unsigned int ip_host_order)
+    {
+        int fd = _spnl_blocklist_fd();
+        if (fd < 0) return fd;
+        __u32 k = ip_host_order;
+        __u8  v = 1;
+        return bpf_map_update_elem(fd, &k, &v, BPF_ANY);
+    }
+    int sp_bpf_blocklist_del(unsigned int ip_host_order)
+    {
+        int fd = _spnl_blocklist_fd();
+        if (fd < 0) return fd;
+        __u32 k = ip_host_order;
+        return bpf_map_delete_elem(fd, &k);
+    }
+
+    /* kernel_cache response populate (multi-route). Ruby side:
+     *   module KCache
+     *     ffi_func :sp_kc_set, [:str, :str], :int
+     *   end
+     * and the kernel_cache directive calls sp_kc_set(path, body) at startup. We
+     * resolve `path` to its slot (declaration order = XDP match_route slots),
+     * build the full HTTP/1.0 response (framing the body), zero-pad to 256 bytes —
+     * the bpf_kc_resp[slot] map value — so the XDP slice serves it. Returns -2 when
+     * the program has no kernel_cache (map absent), -4 for an undeclared path,
+     * <0 on overflow / errors. */
+    #{kc_paths_decl}
+    int sp_kc_set(const char *path, const char *body)
+    {
+        if (!_spnl_skel) return -1;
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp");
+        if (!map) return -2;
+        int slot = -1;
+        for (int i = 0; i < _spnl_kc_npaths; i++) {
+            if (path && _spnl_kc_paths[i] && strcmp(path, _spnl_kc_paths[i]) == 0) { slot = i; break; }
+        }
+        if (slot < 0) return -4;          /* path was not declared with kernel_cache */
+        int fd = bpf_map__fd(map);
+        unsigned char buf[256];           /* must match KERNEL_CACHE_RESP_CAP */
+        memset(buf, 0, sizeof(buf));
+        int blen = body ? (int)strlen(body) : 0;
+        int n = snprintf((char *)buf, sizeof(buf),
+                         "HTTP/1.0 200 OK\\r\\nContent-Length: %d\\r\\n\\r\\n%s", blen, body ? body : "");
+        if (n < 0 || n >= (int)sizeof(buf)) return -3;   /* response too large for the cache slot */
+        __u32 k = slot;
+        /* record actual length so the XDP slice sizes the frame to 54+n
+         * (a SHRINK for real clients => native XDP_TX works on NICs that drop
+         * adjust_tail-GROWN frames, e.g. nxp_enetc4), and precompute the payload's
+         * partial TCP checksum (sum of 16-bit words in the kernel's native/LE order,
+         * see below) so the slice can checksum the variable-length payload via a FIXED 20-byte header
+         * bpf_csum_diff seeded with this — no variable-length bpf_csum_diff (which
+         * the verifier rejects). Both maps are optional (older .bpf.o => CAP path). */
+        struct bpf_map *lmap = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp_len");
+        if (lmap) { __u32 _ln = (__u32)n; bpf_map_update_elem(bpf_map__fd(lmap), &k, &_ln, BPF_ANY); }
+        struct bpf_map *cmap = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp_csum");
+        if (cmap) {
+            /* Match the kernel's csum_partial word order (native/LE on arm64):
+             * 16-bit words read little-endian, trailing odd byte = low byte. */
+            __u32 pc = 0;
+            for (int i = 0; i + 1 < n; i += 2) pc += (__u32)buf[i] | ((__u32)buf[i + 1] << 8);
+            if (n & 1) pc += (__u32)buf[n - 1];
+            while (pc >> 16) pc = (pc & 0xffff) + (pc >> 16);   /* fold to 16-bit partial */
+            bpf_map_update_elem(bpf_map__fd(cmap), &k, &pc, BPF_ANY);
+        }
+        return bpf_map_update_elem(fd, &k, buf, BPF_ANY);
+    }
+
+    /* CIDR blocklist FFI (LPM_TRIE). Same lookup-by-name pattern as the
+     * exact-match blocklist; the key carries a prefix length so the
+     * kernel does longest-prefix matching. Ruby side:
+     *   module CidrBlocklist
+     *     ffi_func :sp_bpf_cidr_blocklist_add, [:uint32, :uint32], :int
+     *     ffi_func :sp_bpf_cidr_blocklist_del, [:uint32, :uint32], :int
+     *   end
+     * data[] is big-endian (network order) to match the BPF-side key. */
+    struct _spnl_cidr_key { __u32 prefixlen; __u8 data[4]; };
+    static void _spnl_cidr_key_fill(struct _spnl_cidr_key *k, unsigned int ip_host_order, unsigned int prefixlen)
+    {
+        k->prefixlen = prefixlen;
+        k->data[0] = (ip_host_order >> 24) & 0xff;
+        k->data[1] = (ip_host_order >> 16) & 0xff;
+        k->data[2] = (ip_host_order >> 8) & 0xff;
+        k->data[3] = ip_host_order & 0xff;
+    }
+    static int _spnl_cidr_blocklist_fd(void)
+    {
+        if (!_spnl_skel) return -1;
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_cidr_block");
+        if (!map) return -2;
+        return bpf_map__fd(map);
+    }
+    int sp_bpf_cidr_blocklist_add(unsigned int ip_host_order, unsigned int prefixlen)
+    {
+        int fd = _spnl_cidr_blocklist_fd();
+        if (fd < 0) return fd;
+        struct _spnl_cidr_key k;
+        _spnl_cidr_key_fill(&k, ip_host_order, prefixlen);
+        __u8 v = 1;
+        return bpf_map_update_elem(fd, &k, &v, BPF_ANY);
+    }
+    int sp_bpf_cidr_blocklist_del(unsigned int ip_host_order, unsigned int prefixlen)
+    {
+        int fd = _spnl_cidr_blocklist_fd();
+        if (fd < 0) return fd;
+        struct _spnl_cidr_key k;
+        _spnl_cidr_key_fill(&k, ip_host_order, prefixlen);
+        return bpf_map_delete_elem(fd, &k);
+    }
+
+    /* SO_REUSEPORT sockarray management. Each worker process calls
+     * sp_bpf_reuseport_register(listen_fd, my_idx) to put its own listening
+     * socket into the SOCKARRAY at index `my_idx`. Then one worker (idx 0
+     * by convention) calls sp_bpf_reuseport_attach(listen_fd, prog_name) to
+     * attach the BPF program to the reuseport group via setsockopt. */
+    static int _spnl_reuseport_map_fd(void)
+    {
+        if (!_spnl_skel) return -1;
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_worker_socks");
+        if (!map) return -2;
+        return bpf_map__fd(map);
+    }
+    int sp_bpf_reuseport_register(int listen_fd, int idx)
+    {
+        int map_fd = _spnl_reuseport_map_fd();
+        if (map_fd < 0) return map_fd;
+        __u32 k = (__u32)idx;
+        __u64 v = (__u64)listen_fd;   /* kernel reads as fd, stores socket ptr */
+        return bpf_map_update_elem(map_fd, &k, &v, BPF_ANY);
+    }
+    /* histogram dump FFI shims. The spinel-emitted main can declare
+     *   module HistDump
+     *     ffi_func :spnl_dump_log2_hist,   [:str, :str], :int
+     *     ffi_func :spnl_dump_linear_hist, [:str, :str], :int
+     *     ffi_func :spnl_log2_p,           [:str, :double, :pointer], :int
+     *   end
+     * and dump bcc-style ASCII histograms from inside the binary. */
+    int spnl_dump_log2_hist(const char *map_name, const char *label)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        return spnl_print_log2_hist_obj(_spnl_skel->obj, map_name, label, stderr);
+    }
+    int spnl_dump_linear_hist(const char *map_name, const char *slot_fmt)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        return spnl_print_linear_hist_obj(_spnl_skel->obj, map_name, slot_fmt, stderr);
+    }
+    int spnl_log2_p(const char *map_name, double percentile, unsigned long long *out)
+    {
+        if (!_spnl_skel || !map_name || !out) return -1;
+        __u64 v = 0;
+        int rc = spnl_log2_hist_percentile_obj(_spnl_skel->obj, map_name, percentile, &v);
+        *out = (unsigned long long)v;
+        return rc;
+    }
+    /* keyed-hist variants (bpf_hist_keyed[key]) for --instrument
+     * per-method duration. key selects the per-method 64-slot log2 hist.
+     * count/percentile return the value directly (spinel FFI is pointer-averse). */
+    int spnl_dump_log2_hist_keyed(const char *map_name, long long key, const char *label)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        return spnl_print_log2_hist_keyed_obj(_spnl_skel->obj, map_name,
+                                              (unsigned long long)key, label, stderr);
+    }
+    long long spnl_hist_count_keyed(const char *map_name, long long key)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        __u64 c = 0;
+        if (spnl_log2_hist_count_keyed_obj(_spnl_skel->obj, map_name,
+                                           (unsigned long long)key, &c)) return -1;
+        return (long long)c;
+    }
+    long long spnl_p_keyed(const char *map_name, long long key, double percentile)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        __u64 v = 0;
+        if (spnl_log2_hist_percentile_keyed_obj(_spnl_skel->obj, map_name,
+                                                (unsigned long long)key, percentile, &v)) return -1;
+        return (long long)v;
+    }
+
+    /* dump a stack trace (kallsyms-symbolized if symbolize_kernel != 0)
+     * to stderr. Spinel-emitted main can declare:
+     *   module Stack
+     *     ffi_func :spnl_dump_stack, [:string, :uint32, :int], :int
+     *   end
+     *   Stack.spnl_dump_stack("bpf_stack_traces", 7, 1)  # stack_id=7, symbolize=1 */
+    int spnl_dump_stack(const char *map_name, unsigned int stack_id, int symbolize_kernel)
+    {
+        if (!_spnl_skel || !map_name) return -1;
+        return spnl_print_stack_trace_obj(_spnl_skel->obj, map_name,
+                                          (__u32)stack_id, symbolize_kernel, stderr);
+    }
+
+    /* resolve a user-space PC in process `pid` to "<sym>+0xoff [binary]"
+     * via /proc/<pid>/maps + the mapped ELF symtab. Returns a static buffer
+     * (single-threaded host model). Ruby:
+     *   module Sym
+     *     ffi_func :spnl_sym_user_str, [:int, :uint64], :str
+     *   end
+     *   Sym.spnl_sym_user_str(pid, pc) */
+    const char *spnl_sym_user_str(int pid, unsigned long pc)
+    {
+        static char _spnl_user_symbuf[320];
+        spnl_sym_user(pid, pc, _spnl_user_symbuf, sizeof(_spnl_user_symbuf));
+        return _spnl_user_symbuf;
+    }
+
+    /* streaming event output. Drains every emit ringbuf
+     * (<unit>_events / _str_events / _pair_events) and prints each event as it
+     * arrives — the foundation for bcc-style snoop/trace tools. The Ruby main
+     * declares it and calls it instead of sleep:
+     *   module Stream
+     *     ffi_func :spnl_stream, [:int], :int   # arg = seconds (0 = forever)
+     *   end
+     *   Stream.spnl_stream(0) */
+    struct _spnl_evt_hdr { unsigned short type, version; unsigned int reserved; unsigned long long timestamp; };
+    static int _spnl_stream_int_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 8) return 0;
+        struct _spnl_evt_hdr *h = d;
+        long long v = *(long long *)((char *)d + sizeof(*h));
+        printf("%-20llu %lld\\n", (unsigned long long)h->timestamp, v); fflush(stdout); return 0;
+    }
+    static int _spnl_stream_str_cb(void *c, void *d, size_t n) {
+        (void)c; if (n <= sizeof(struct _spnl_evt_hdr)) return 0;
+        struct _spnl_evt_hdr *h = d;
+        printf("%-20llu %s\\n", (unsigned long long)h->timestamp, (const char *)d + sizeof(*h)); fflush(stdout); return 0;
+    }
+    static int _spnl_stream_pair_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 16) return 0;
+        struct _spnl_evt_hdr *h = d;
+        long long *p = (long long *)((char *)d + sizeof(*h));
+        printf("%-20llu %lld %lld\\n", (unsigned long long)h->timestamp, p[0], p[1]); fflush(stdout); return 0;
+    }
+    static int _spnl_stream_emit3_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 24) return 0;
+        struct _spnl_evt_hdr *h = d;
+        long long *p = (long long *)((char *)d + sizeof(*h));
+        printf("%-20llu %lld %lld %lld\\n", (unsigned long long)h->timestamp, p[0], p[1], p[2]); fflush(stdout); return 0;
+    }
+    static int _spnl_stream_emit4_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 32) return 0;
+        struct _spnl_evt_hdr *h = d;
+        long long *p = (long long *)((char *)d + sizeof(*h));
+        printf("%-20llu %lld %lld %lld %lld\\n", (unsigned long long)h->timestamp, p[0], p[1], p[2], p[3]); fflush(stdout); return 0;
+    }
+    int spnl_stream(int duration_secs)
+    {
+        if (!_spnl_skel) return -1;
+        struct ring_buffer *rb = NULL;
+        struct bpf_map *map;
+        bpf_object__for_each_map(map, _spnl_skel->obj) {
+            if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
+            const char *nm = bpf_map__name(map);
+            ring_buffer_sample_fn cb;
+            if      (strstr(nm, "_str_events"))   cb = _spnl_stream_str_cb;
+            else if (strstr(nm, "_pair_events"))  cb = _spnl_stream_pair_cb;
+            else if (strstr(nm, "_emit3_events")) cb = _spnl_stream_emit3_cb;
+            else if (strstr(nm, "_emit4_events")) cb = _spnl_stream_emit4_cb;
+            else if (strstr(nm, "_events"))       cb = _spnl_stream_int_cb;
+            else continue;
+            int fd = bpf_map__fd(map);
+            if (!rb) rb = ring_buffer__new(fd, cb, NULL, NULL);
+            else     ring_buffer__add(rb, fd, cb, NULL);
+        }
+        if (!rb) { fprintf(stderr, "[spinel-ebpf] spnl_stream: no emit ringbuf found\\n"); return -1; }
+        int polls = duration_secs > 0 ? duration_secs * 5 : -1;   /* 200ms polls */
+        while (polls != 0) {
+            int n = ring_buffer__poll(rb, 200);
+            if (n < 0 && n != -EINTR) break;
+            if (polls > 0) polls--;
+        }
+        ring_buffer__free(rb);
+        return 0;
+    }
+
+    /* userspace consumer drain. Collects int emit events from the
+     * <unit>_events ringbuf into a static buffer so the spinel-Ruby side can
+     * iterate them (spnl_cget) and process each in Ruby. spinel->glue FFI
+     * direction (the consumer method itself is a normal static spinel function
+     * called from Ruby; glue only provides the raw drain). Ruby:
+     *   module Consume
+     *     ffi_func :spnl_cdrain, [:int], :int   # drain, returns event count
+     *     ffi_func :spnl_cget,   [:int], :int   # value of buffered event i
+     *   end */
+    static long long _spnl_cbuf[4096], _spnl_cbuf_ts[4096]; static int _spnl_ccount;
+    static int _spnl_collect_int_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 8) return 0;
+        if (_spnl_ccount < 4096) {
+            _spnl_cbuf_ts[_spnl_ccount] = (long long)((struct _spnl_evt_hdr *)d)->timestamp;
+            _spnl_cbuf[_spnl_ccount] = *(long long *)((char *)d + sizeof(struct _spnl_evt_hdr));
+            _spnl_ccount++;
+        }
+        return 0;
+    }
+    int spnl_cdrain(int timeout_ms) {
+        if (!_spnl_skel) return -1;
+        _spnl_ccount = 0;
+        struct ring_buffer *rb = NULL;
+        struct bpf_map *map;
+        bpf_object__for_each_map(map, _spnl_skel->obj) {
+            if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
+            const char *nm = bpf_map__name(map);
+            if (!strstr(nm, "_events") || strstr(nm, "_str_events") ||
+                strstr(nm, "_pair_events") || strstr(nm, "_emit3_events") ||
+                strstr(nm, "_emit4_events")) continue;
+            int fd = bpf_map__fd(map);
+            if (!rb) rb = ring_buffer__new(fd, _spnl_collect_int_cb, NULL, NULL);
+            else     ring_buffer__add(rb, fd, _spnl_collect_int_cb, NULL);
+        }
+        if (!rb) return 0;
+        ring_buffer__poll(rb, timeout_ms);
+        ring_buffer__free(rb);
+        return _spnl_ccount;
+    }
+    int spnl_cget(int i) { return (i >= 0 && i < _spnl_ccount) ? (int)_spnl_cbuf[i] : 0; }
+    long spnl_cget_ts(int i) { return (i >= 0 && i < _spnl_ccount) ? (long)_spnl_cbuf_ts[i] : 0; }  /* 64-bit ktime */
+
+    /* pair-emit consumer drain (spnl_emit_pair -> <unit>_pair_events:
+     * hdr + __s64 a, b). Two getters since FFI returns one value. */
+    static long long _spnl_cbuf_pa[4096], _spnl_cbuf_pb[4096], _spnl_cbuf_pts[4096]; static int _spnl_ccount_pair;
+    static int _spnl_collect_pair_cb(void *c, void *d, size_t n) {
+        (void)c; if (n < sizeof(struct _spnl_evt_hdr) + 16) return 0;
+        if (_spnl_ccount_pair < 4096) {
+            long long *p = (long long *)((char *)d + sizeof(struct _spnl_evt_hdr));
+            _spnl_cbuf_pts[_spnl_ccount_pair] = (long long)((struct _spnl_evt_hdr *)d)->timestamp;
+            _spnl_cbuf_pa[_spnl_ccount_pair] = p[0];
+            _spnl_cbuf_pb[_spnl_ccount_pair] = p[1];
+            _spnl_ccount_pair++;
+        }
+        return 0;
+    }
+    int spnl_cdrain_pair(int timeout_ms) {
+        if (!_spnl_skel) return -1;
+        _spnl_ccount_pair = 0;
+        struct ring_buffer *rb = NULL;
+        struct bpf_map *map;
+        bpf_object__for_each_map(map, _spnl_skel->obj) {
+            if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
+            if (!strstr(bpf_map__name(map), "_pair_events")) continue;
+            int fd = bpf_map__fd(map);
+            if (!rb) rb = ring_buffer__new(fd, _spnl_collect_pair_cb, NULL, NULL);
+            else     ring_buffer__add(rb, fd, _spnl_collect_pair_cb, NULL);
+        }
+        if (!rb) return 0;
+        ring_buffer__poll(rb, timeout_ms);
+        ring_buffer__free(rb);
+        return _spnl_ccount_pair;
+    }
+    int spnl_cget_pair_a(int i) { return (i >= 0 && i < _spnl_ccount_pair) ? (int)_spnl_cbuf_pa[i] : 0; }
+    int spnl_cget_pair_b(int i) { return (i >= 0 && i < _spnl_ccount_pair) ? (int)_spnl_cbuf_pb[i] : 0; }
+    long spnl_cget_pair_ts(int i) { return (i >= 0 && i < _spnl_ccount_pair) ? (long)_spnl_cbuf_pts[i] : 0; }
+
+    /* persistent consumer ring_buffer for epoll-multiplexed draining.
+     * Created once over all emit ringbufs; its epoll fd joins the program's
+     * run loop (source-contributing), so events drain as they arrive
+     * (not only on scrape -> no overflow between scrapes). spnl_consume_poll
+     * fills the same static buffers as spnl_cdrain*; getters/counts read them. */
+    static struct ring_buffer *_spnl_consumer_rb;
+    static struct ring_buffer *_spnl_consumer_rb_get(void) {
+        if (_spnl_consumer_rb || !_spnl_skel) return _spnl_consumer_rb;
+        struct bpf_map *map;
+        bpf_object__for_each_map(map, _spnl_skel->obj) {
+            if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
+            const char *nm = bpf_map__name(map);
+            ring_buffer_sample_fn cb;
+            if (strstr(nm, "_pair_events")) cb = _spnl_collect_pair_cb;
+            else if (strstr(nm, "_events") && !strstr(nm, "_str_events") &&
+                     !strstr(nm, "_emit3_events") && !strstr(nm, "_emit4_events"))
+                cb = _spnl_collect_int_cb;
+            else continue;
+            int fd = bpf_map__fd(map);
+            if (!_spnl_consumer_rb) _spnl_consumer_rb = ring_buffer__new(fd, cb, NULL, NULL);
+            else                    ring_buffer__add(_spnl_consumer_rb, fd, cb, NULL);
+        }
+        return _spnl_consumer_rb;
+    }
+    int spnl_consumer_epoll_fd(void) {
+        struct ring_buffer *rb = _spnl_consumer_rb_get();
+        return rb ? ring_buffer__epoll_fd(rb) : -1;
+    }
+    int spnl_consume_poll(int timeout_ms) {
+        struct ring_buffer *rb = _spnl_consumer_rb_get();
+        if (!rb) return 0;
+        _spnl_ccount = 0; _spnl_ccount_pair = 0;
+        ring_buffer__poll(rb, timeout_ms);
+        return _spnl_ccount + _spnl_ccount_pair;
+    }
+    int spnl_consume_count_int(void)  { return _spnl_ccount; }
+    int spnl_consume_count_pair(void) { return _spnl_ccount_pair; }
+
+    /* dump folded stacks (Brendan Gregg flamegraph.pl input format)
+     * to stderr. Pipe stderr to a file, then run
+     *   flamegraph.pl < folded.txt > flame.svg
+     * to render as an interactive SVG. Ruby:
+     *   module FG
+     *     ffi_func :spnl_dump_folded, [:string, :string], :int
+     *   end
+     *   FG.spnl_dump_folded("bpf_hist_keyed", "bpf_stacks") */
+    int spnl_dump_folded(const char *hist_map_name, const char *stacks_map_name)
+    {
+        if (!_spnl_skel || !hist_map_name || !stacks_map_name) return -1;
+        return spnl_print_folded_stacks_obj(_spnl_skel->obj, hist_map_name,
+                                            stacks_map_name, stderr);
+    }
+
+    /* memleak report — group the outstanding-allocation HASH by stack id
+     * and print the top `top_n` leaking stacks (symbolized). */
+    int spnl_dump_leaks(const char *allocs_map_name, const char *stacks_map_name, int top_n)
+    {
+        if (!_spnl_skel || !allocs_map_name || !stacks_map_name) return -1;
+        return spnl_dump_leaks_obj(_spnl_skel->obj, allocs_map_name,
+                                   stacks_map_name, top_n, stdout);
+    }
+
+    /* deadlock report — flag lock-order inversions (a->b AND b->a). */
+    int spnl_dump_deadlocks(const char *edges_map_name, int top_n)
+    {
+        if (!_spnl_skel || !edges_map_name) return -1;
+        return spnl_dump_deadlocks_obj(_spnl_skel->obj, edges_map_name, top_n, stdout);
+    }
+
+    /* stream folded-stacks output directly to a file descriptor
+     * (typically an accepted TCP socket from spinel's net FFI). The
+     * fd is dup'd so the caller's lifecycle isn't disturbed by fclose. */
+    int spnl_dump_folded_to_fd(const char *hist_map_name,
+                                const char *stacks_map_name,
+                                int fd)
+    {
+        if (!_spnl_skel || !hist_map_name || !stacks_map_name || fd < 0) return -1;
+        int dup_fd = dup(fd);
+        if (dup_fd < 0) return -1;
+        FILE *fp = fdopen(dup_fd, "w");
+        if (!fp) { close(dup_fd); return -1; }
+        int rc = spnl_print_folded_stacks_obj(_spnl_skel->obj, hist_map_name,
+                                              stacks_map_name, fp);
+        fflush(fp);
+        fclose(fp);
+        return rc;
+    }
+
+    /* folded USER stacks (user_stack_id, key = (tgid<<32)|stack_id) to
+     * stderr. Symbolizes via spnl_sym_user (+ build-id debug fallback). `pid`
+     * >= 0 symbolizes every stack against that namespace-local pid (needed
+     * inside a container, where the kernel-recorded init-ns pid differs from
+     * /proc); pass -1 for system-wide (uses the packed per-stack pid).
+     *   module FG
+     *     ffi_func :spnl_dump_folded_user, [:string, :string, :int], :int
+     *   end
+     *   FG.spnl_dump_folded_user("bpf_hist_keyed", "bpf_stacks", target_pid) */
+    int spnl_dump_folded_user(const char *hist_map_name, const char *stacks_map_name, int pid)
+    {
+        if (!_spnl_skel || !hist_map_name || !stacks_map_name) return -1;
+        return spnl_print_folded_user_stacks_obj(_spnl_skel->obj, hist_map_name,
+                                                 stacks_map_name, pid, stderr);
+    }
+
+    /* stream folded USER stacks to a file descriptor (e.g. a live HTTP
+     * /folded endpoint). The fd is dup'd so fclose doesn't disturb the caller. */
+    int spnl_dump_folded_user_to_fd(const char *hist_map_name,
+                                    const char *stacks_map_name,
+                                    int pid,
+                                    int fd)
+    {
+        if (!_spnl_skel || !hist_map_name || !stacks_map_name || fd < 0) return -1;
+        int dup_fd = dup(fd);
+        if (dup_fd < 0) return -1;
+        FILE *fp = fdopen(dup_fd, "w");
+        if (!fp) { close(dup_fd); return -1; }
+        int rc = spnl_print_folded_user_stacks_obj(_spnl_skel->obj, hist_map_name,
+                                                   stacks_map_name, pid, fp);
+        fflush(fp);
+        fclose(fp);
+        return rc;
+    }
+
+    int sp_bpf_reuseport_attach(int listen_fd, const char *prog_name)
+    {
+        if (!_spnl_skel || !prog_name) return -1;
+        struct bpf_program *prog = bpf_object__find_program_by_name(_spnl_skel->obj, prog_name);
+        if (!prog) {
+            fprintf(stderr, "[spinel-ebpf] sp_bpf_reuseport_attach: prog '%s' not found\\n", prog_name);
+            return -2;
+        }
+        int prog_fd = bpf_program__fd(prog);
+        if (prog_fd < 0) return -3;
+        if (setsockopt(listen_fd, SOL_SOCKET, SO_ATTACH_REUSEPORT_EBPF,
+                       &prog_fd, sizeof(prog_fd)) < 0) {
+            fprintf(stderr, "[spinel-ebpf] setsockopt(SO_ATTACH_REUSEPORT_EBPF): %s\\n", strerror(errno));
+            return -4;
+        }
+        return 0;
+    }
+
+    __attribute__((destructor))
+    static void _spnl_close(void)
+    {
+        /* detach sockops first (cgroup-scoped, no bpf_link). */
+        for (int i = 0; i < _spnl_sockops_count; i++) {
+            if (_spnl_sockops_cgroup_fd >= 0 && _spnl_sockops_prog_fds[i] >= 0) {
+                bpf_prog_detach2(_spnl_sockops_prog_fds[i],
+                                 _spnl_sockops_cgroup_fd,
+                                 BPF_CGROUP_SOCK_OPS);
+            }
+        }
+        if (_spnl_sockops_cgroup_fd >= 0) close(_spnl_sockops_cgroup_fd);
+        /* detach uprobe / uretprobe / USDT links. */
+        for (int i = 0; i < _spnl_uprobe_link_count; i++) {
+            if (_spnl_uprobe_links[i]) bpf_link__destroy(_spnl_uprobe_links[i]);
+        }
+        /* detach perf_event links + close per-CPU fds. */
+        for (int i = 0; i < _spnl_perf_link_count; i++) {
+            if (_spnl_perf_links[i].link) bpf_link__destroy(_spnl_perf_links[i].link);
+            if (_spnl_perf_links[i].pfd >= 0) close(_spnl_perf_links[i].pfd);
+        }
+        for (int i = 0; i < _spnl_tcx_link_count; i++) {
+            if (_spnl_tcx_links[i]) bpf_link__destroy(_spnl_tcx_links[i]);
+        }
+        if (_spnl_xdp_attached) {
+            bpf_xdp_detach(_spnl_xdp_ifindex, 0, NULL);
+        }
+        if (_spnl_skel) #{skel_name}__destroy(_spnl_skel);
+    }
+  GLUE
+end
+
+def print_partition_table(result, base)
+  ebpf   = result.methods.count { |m| m.tag == :ebpf }
+  native = result.methods.count { |m| m.tag == :native }
+  puts "## spinel-ebpf partition for #{base}.rb"
+  puts "   #{result.methods.length} methods  →  #{ebpf} eBPF / #{native} native"
+
+  unless result.program_warnings.empty?
+    puts ""
+    puts "Program-wide warnings:"
+    result.program_warnings.each { |w| puts "  - #{w}" }
+  end
+
+  puts ""
+  fmt = "  %-7s  %-40s  %s"
+  puts (fmt % ["tag", "method", "reasons (when native)"])
+  puts (fmt % ["-" * 7, "-" * 40, "-" * 30])
+  result.methods.each do |m|
+    reasons = m.flags.reasons.join("; ")
+    puts (fmt % [m.tag, m.qualified_name, m.tag == :native ? reasons : ""])
+  end
+end
+
+# --- entry ---
+
+def cmd_describe(argv)
+  file = argv[0]
+  abort "usage: spinel-ebpf describe <file.rb>" unless file
+  abort "error: #{file} not found" unless File.exist?(file)
+  print SpinelEbpf::Introspect.report(File.read(file, encoding: "UTF-8"), file)
+  0
+end
+
+argv = ARGV.dup
+case argv.shift
+when "compile"
+  exit cmd_compile(argv)
+when "describe"
+  exit cmd_describe(argv)
+when "--version", "-V"
+  puts "spinel-ebpf #{VERSION}"
+  exit 0
+when "--help", "-h", nil
+  puts <<~HELP
+    spinel-ebpf #{VERSION}  —  Ruby AOT + eBPF partition compiler wrapper
+
+    Usage:
+      spinel-ebpf compile <file.rb> [--ebpf-mixed | --native-only] [-o DIR]
+
+    Subcommands:
+      compile     Compile a Ruby source file
+      describe    Show emit sites <-> on_emit consumers binding
+      --version   Show version
+
+    Environment:
+      SPINEL_DIR        Path to deps/spinel (default: $project/deps/spinel)
+      SPINEL_EBPF_MODE  Override default mode: "ebpf-mixed" or "native-only"
+  HELP
+  exit 0
+else
+  abort "unknown subcommand. Run `spinel-ebpf --help`."
+end

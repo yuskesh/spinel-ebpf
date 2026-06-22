@@ -1,0 +1,63 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/59_task_storage.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @max
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name kprobe__do_sys_openat2
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name dfd
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 LocalVariableWriteNode
+S 8 name n
+N 9 CallNode
+S 9 name task_incr
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 IntegerNode
+I 11 value 1
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+N 12 IfNode
+N 13 CallNode
+S 13 name >
+N 14 LocalVariableReadNode
+S 14 name n
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 InstanceVariableReadNode
+S 16 name @max
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 predicate 13
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @max
+N 19 LocalVariableReadNode
+S 19 name n
+R 18 value 19
+A 17 body 18
+R 12 statements 17
+R 12 subsequent -1
+N 20 LocalVariableReadNode
+S 20 name n
+A 7 body 8,12,20
+R 4 body 7
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

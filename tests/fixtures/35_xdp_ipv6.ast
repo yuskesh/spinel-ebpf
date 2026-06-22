@@ -1,0 +1,67 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/35_xdp_ipv6.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @v6_pkts
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @last_src_hi
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name xdp__main
+R 6 parameters -1
+N 7 StatementsNode
+N 8 LocalVariableWriteNode
+S 8 name proto
+N 9 CallNode
+S 9 name pkt_l4_proto
+R 9 receiver -1
+R 9 arguments -1
+R 9 block -1
+S 9 call_operator .
+R 8 value 9
+N 10 IfNode
+N 11 CallNode
+S 11 name ==
+N 12 LocalVariableReadNode
+S 12 name proto
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 58
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 InstanceVariableOperatorWriteNode
+S 16 name @v6_pkts
+S 16 binary_operator +
+N 17 IntegerNode
+I 17 value 1
+R 16 value 17
+N 18 InstanceVariableWriteNode
+S 18 name @last_src_hi
+N 19 CallNode
+S 19 name pkt_ip6_src_hi
+R 19 receiver -1
+R 19 arguments -1
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 15 body 16,18
+R 10 statements 15
+R 10 subsequent -1
+N 20 IntegerNode
+I 20 value 2
+A 7 body 8,10,20
+R 6 body 7
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

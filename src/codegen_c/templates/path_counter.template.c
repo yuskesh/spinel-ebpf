@@ -1,0 +1,22 @@
+/* per-unit path hit counter map.
+ * Populated from :ebpf method via path_counter_inc(key); read from
+ * userspace with bpftool map dump or via a future spnl_runtime API. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, __s64);
+    __uint(max_entries, 128);
+} bpf_path_counts SEC(".maps");
+
+static __noinline __s64 spnl_path_counter_inc(__s64 key)
+{
+    __u32 k = (__u32)key;
+    __s64 *v = bpf_map_lookup_elem(&bpf_path_counts, &k);
+    if (v) {
+        __sync_fetch_and_add(v, 1);
+    } else {
+        __s64 init = 1;
+        bpf_map_update_elem(&bpf_path_counts, &k, &init, BPF_NOEXIST);
+    }
+    return 0;
+}

@@ -1,0 +1,59 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/89_arena_list.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @sum
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name tc__ingress__listdemo
+R 4 parameters -1
+N 5 StatementsNode
+N 6 CallNode
+S 6 name arena_list_push
+R 6 receiver -1
+N 7 ArgumentsNode
+N 8 IntegerNode
+I 8 value 10
+A 7 arguments 8
+R 6 arguments 7
+R 6 block -1
+S 6 call_operator .
+N 9 CallNode
+S 9 name arena_list_push
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 IntegerNode
+I 11 value 20
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+N 12 CallNode
+S 12 name arena_list_push
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 30
+A 13 arguments 14
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+N 15 InstanceVariableWriteNode
+S 15 name @sum
+N 16 CallNode
+S 16 name arena_list_sum
+R 16 receiver -1
+R 16 arguments -1
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+N 17 ConstantReadNode
+S 17 name TC_ACT_OK
+A 5 body 6,9,12,15,17
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1
