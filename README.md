@@ -181,16 +181,30 @@ docs/                    architecture and design notes
 
 ## Testing
 
+Testing has two tiers. Tier 1 is kernel-independent and runs in CI; tier 2
+needs a real eBPF-capable kernel and runs on a host (or container) booted on
+one.
+
 ```sh
+# --- tier 1: kernel-independent (also the GitHub CI) ---
+
 # host unit tests (pure Ruby: parsing, partition, codegen)
 for t in tests/spinel_ebpf/*_test.rb; do ruby -Isrc -Itests "$t" || break; done
 
 # codegen regression gate: emitted .bpf.c must match the committed golden files
 ruby tools/golden.rb            # use --update to regenerate after intended changes
+
+# --- tier 2: needs an eBPF-capable kernel ---
+
+# compile representative programs (XDP, kprobe, TC, struct_ops), then load +
+# verify each in the running kernel. Run as root on a host booted on the
+# custom kernel, after scripts/setup.sh has built the compiler.
+sudo scripts/kernel-test.sh
 ```
 
-Compile/load is exercised end-to-end by building the examples with
-`bin/spinel-ebpf … --build` inside the build container.
+CI stops at tier 1 because hosted runners can't boot the custom kernel.
+Compile/load is exercised end-to-end by `scripts/kernel-test.sh` and by
+building the examples with `bin/spinel-ebpf … --build`.
 
 ## License
 
