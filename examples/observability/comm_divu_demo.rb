@@ -3,10 +3,10 @@
 # self-dumps a bcc-style histogram on exit.
 #
 # Build:
-#   bin/spinel-ebpf compile examples/observability/e086_comm_divu_demo.rb \
-#                   -o build/e086 --build
+#   bin/spinel-ebpf compile examples/observability/comm_divu_demo.rb \
+#                   -o build/comm_divu --build
 # Run:
-#   ./build/e086/e086_comm_divu_demo &
+#   ./build/comm_divu/comm_divu_demo &
 #   for i in $(seq 1 100); do cat /etc/hostname > /dev/null; done
 #   # bpftool map dump name bpf_hist        — log2 latency
 #   # bpftool map dump name bpf_hist_lin    — divu'd µs slot
@@ -23,5 +23,5 @@ def kretprobe__do_sys_openat2(ret)
   hist_observe_linear(divu(d, 1000))    # linear µs hist (unsigned div)
 end
 
-puts "e086_comm_divu_demo loaded — bpftool map dump name bpf_hist / bpf_hist_lin"
+puts "comm_divu_demo loaded — bpftool map dump name bpf_hist / bpf_hist_lin"
 sleep 3600

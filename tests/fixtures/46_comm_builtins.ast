@@ -1,5 +1,5 @@
 ROOT 0
-SOURCE_FILE tests/fixtures/46_e086_builtins.rb
+SOURCE_FILE tests/fixtures/46_comm_builtins.rb
 N 0 ProgramNode
 N 1 StatementsNode
 N 2 DefNode

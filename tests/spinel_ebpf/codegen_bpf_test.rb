@@ -2283,13 +2283,13 @@ end
   # ---------- divu / comm_hash / emit_comm ----------
 
   def test_divu_lowers_to_unsigned_division
-    c = emit_for("46_e086_builtins")
+    c = emit_for("46_comm_builtins")
     # The pattern is `((__s64)((__u64)(<a>) / (__u64)(<b>)))`.
     assert_match(/\(\(__s64\)\(\(__u64\)\(.*?\) \/ \(__u64\)\(.*?\)\)\)/, c)
   end
 
   def test_comm_hash_inlines_bpf_get_current_comm
-    c = emit_for("46_e086_builtins")
+    c = emit_for("46_comm_builtins")
     inner = c[/kretprobe__do_sys_openat2_inner\(.*?\n\}/m]
     refute_nil inner
     assert_match(/char _ch\d+\[16\] = \{0\};/, inner)
@@ -2298,12 +2298,12 @@ end
   end
 
   def test_emit_comm_uses_str_ringbuf
-    c = emit_for("46_e086_builtins")
+    c = emit_for("46_comm_builtins")
     # emit_comm uses the per-unit <unit>_str_events ringbuf.
     assert_includes c, "_str_events SEC(\".maps\");"
     inner = c[/kprobe__do_sys_openat2_inner\(.*?\n\}/m]
     refute_nil inner
-    assert_match(/bpf_ringbuf_reserve\(&u_46_e086_builtins_str_events/, inner)
+    assert_match(/bpf_ringbuf_reserve\(&u_46_comm_builtins_str_events/, inner)
     assert_match(/bpf_get_current_comm\(_se\d+->str/, inner)
   end
 
