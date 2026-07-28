@@ -12,10 +12,11 @@ cd "$REPO_ROOT"
 
 CC="${CC:-clang}"
 PROTOC="${PROTOC:-protoc}"
-NANOPB="$REPO_ROOT/third_party/nanopb"
+NANOPB="$REPO_ROOT/src/runtime/otlp/nanopb"
 PB="$REPO_ROOT/src/runtime/otlp/pb"
 OTLP="$REPO_ROOT/src/runtime/otlp"
-PROTO_ROOT="$REPO_ROOT/third_party/opentelemetry-proto"
+PROTO_ROOT="${PROTO_ROOT:-$REPO_ROOT/deps/opentelemetry-proto}"
+. "$REPO_ROOT/tests/runtime/proto_guard.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

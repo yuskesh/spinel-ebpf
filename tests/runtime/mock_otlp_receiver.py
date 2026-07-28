@@ -11,8 +11,15 @@ mock is not needed there.
 """
 import argparse
 import http.server
+import os
 import subprocess
 import sys
+
+# Where the OTLP .proto schemas live. They are a separate upstream checkout, not
+# part of this repository -- `SPNL_WITH_PROTO=1 scripts/setup.sh` fetches them
+# into deps/, and PROTO_ROOT overrides that. Interpreted relative to --repo-root,
+# which is the working directory protoc runs in.
+PROTO_ROOT = os.environ.get("PROTO_ROOT", "deps/opentelemetry-proto")
 
 DECODE_MSG = {
     "/v1/metrics": "opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest",
@@ -62,7 +69,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 r = subprocess.run(
                     [ARGS.protoc, f"--decode={msg}", "-I",
-                     "third_party/opentelemetry-proto", SERVICE_PROTO[path]],
+                     PROTO_ROOT, SERVICE_PROTO[path]],
                     input=body, capture_output=True, cwd=ARGS.repo_root, check=True)
                 decoded = r.stdout.decode()
             except subprocess.CalledProcessError as e:

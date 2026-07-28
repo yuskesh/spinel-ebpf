@@ -21,7 +21,7 @@ cd "$REPO_ROOT"
 
 CC="${CC:-clang}"
 OTLP="$REPO_ROOT/src/runtime/otlp"
-NANOPB="$REPO_ROOT/third_party/nanopb"
+NANOPB="$REPO_ROOT/src/runtime/otlp/nanopb"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

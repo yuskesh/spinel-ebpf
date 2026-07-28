@@ -40,7 +40,7 @@
 #   buckets or a top-N, or move it to events (logs). This example stays with the
 #   L3/L4 proto and tcp_state only.
 #
-# build: SPINEL_C_BIN=third_party/spinel/bin/spinel \
+# build: SPINEL_C_BIN=deps/spinel/bin/spinel \
 #        ruby bin/spinel-ebpf compile examples/observability/otlp/access_classifier.rb --build -o build
 # run:   SPNL_XDP_IFACE=lo OTLP_ENDPOINT=http://127.0.0.1:4318 PROBE_SECONDS=3 ./build/access_classifier
 module Otlp

@@ -15,7 +15,7 @@ cd "$REPO_ROOT"
 
 CC="${CC:-clang}"
 PY="${PYTHON:-python3}"
-MBED="$REPO_ROOT/third_party/mbedtls"
+MBED="$REPO_ROOT/deps/mbedtls"
 OTLP="$REPO_ROOT/src/runtime/otlp"
 PORT="${OTLP_TLS_PORT:-18443}"
 TMP="$(mktemp -d)"

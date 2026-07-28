@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 CC="${CC:-clang}"
-SPINEL_DIR="${SPINEL_DIR:-$REPO_ROOT/third_party/spinel}"
+SPINEL_DIR="${SPINEL_DIR:-$REPO_ROOT/deps/spinel}"
 ICC="$REPO_ROOT/build/codegen_c/spinel-ebpf-cc"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

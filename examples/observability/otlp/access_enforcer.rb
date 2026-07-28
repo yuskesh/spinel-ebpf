@@ -59,7 +59,7 @@
 #                                          data, ACK, FIN, RST
 #   key 5 = other           (action=pass)  not IPv4, or not ICMP/TCP/UDP
 #
-# build: SPINEL_C_BIN=third_party/spinel/bin/spinel \
+# build: SPINEL_C_BIN=deps/spinel/bin/spinel \
 #        ruby bin/spinel-ebpf compile examples/observability/otlp/access_enforcer.rb --build -o build_enforcer
 # run:   SPNL_XDP_IFACE=lo OTLP_ENDPOINT=http://127.0.0.1:4318 PROBE_SECONDS=3 ./build_enforcer/access_enforcer
 module Otlp

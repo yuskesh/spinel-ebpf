@@ -11,9 +11,9 @@
  * parsers/main drop out and the Compiler-direct entry compiles in), then links
  * the upstream compiler objects (minus main.o) + the parse lib:
  *
- *   cc -DSPNL_INPROCESS -I third_party/spinel/src \
+ *   cc -DSPNL_INPROCESS -I deps/spinel/src \
  *      tools/spinel_ebpf_inproc.c <spinel objs minus main.o> \
- *      third_party/spinel/build/libprism.a -lm -o build/codegen_c/spinel-ebpf-cc
+ *      deps/spinel/build/libprism.a -lm -o build/codegen_c/spinel-ebpf-cc
  */
 #define SPNL_INPROCESS
 #include "../src/codegen_c/spinel_ebpf_cc.c"

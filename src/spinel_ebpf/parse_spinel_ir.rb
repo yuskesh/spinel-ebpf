@@ -3,7 +3,7 @@
 # SPINEL-IR v1 parser (read + dump, byte-equivalent round-trip).
 #
 # Implements the format documented in
-# third_party/spinel/docs/ANALYZE-IR.md
+# deps/spinel/docs/ANALYZE-IR.md
 #
 # The parser is intentionally schema-light: it reads any well-formed
 # SPINEL-IR v1 file into a plain Hash of records, without re-deriving

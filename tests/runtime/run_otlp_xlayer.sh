@@ -8,12 +8,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PROTO_ROOT="${PROTO_ROOT:-$REPO_ROOT/deps/opentelemetry-proto}"
+. "$REPO_ROOT/tests/runtime/proto_guard.sh"
 cd "$REPO_ROOT"
 . "$REPO_ROOT/tests/runtime/otlp_common.sh"
 
 CC="${CC:-clang}"
 PY="${PYTHON:-python3}"
-NANOPB="$REPO_ROOT/third_party/nanopb"
+NANOPB="$REPO_ROOT/src/runtime/otlp/nanopb"
 PB="$REPO_ROOT/src/runtime/otlp/pb"
 OTLP="$REPO_ROOT/src/runtime/otlp"
 PORT="${OTLP_XLAYER_PORT:-18491}"

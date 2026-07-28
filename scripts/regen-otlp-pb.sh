@@ -12,7 +12,10 @@
 # bundles a matched protoc and protobuf pair, and runs the vendored nanopb
 # generator through it. Your own Python environment is left untouched.
 #
-# pin: nanopb 0.4.9.1 / opentelemetry-proto v1.10.0 (third_party submodule)
+# Needs two upstream checkouts that normal use does not: the nanopb generator
+# and the OTLP .proto schemas. Get both with `SPNL_WITH_PROTO=1 scripts/setup.sh`,
+# which pins nanopb 0.4.9.1 and opentelemetry-proto v1.10.0 -- the versions these
+# committed encoders were generated from.
 #
 # Usage: sh scripts/regen-otlp-pb.sh
 set -euo pipefail
@@ -21,8 +24,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 VENV="$REPO_ROOT/.venv-otlp"
-PROTO_ROOT="$REPO_ROOT/third_party/opentelemetry-proto"
-NANOPB="$REPO_ROOT/third_party/nanopb"
+PROTO_ROOT="${PROTO_DIR:-$REPO_ROOT/deps/opentelemetry-proto}"
+NANOPB="${NANOPB_DIR:-$REPO_ROOT/deps/nanopb}"
 GENERATOR="$NANOPB/generator/nanopb_generator.py"
 OUT="$REPO_ROOT/src/runtime/otlp/pb"
 
@@ -39,9 +42,18 @@ opentelemetry/proto/collector/trace/v1/trace_service.proto
 opentelemetry/proto/collector/logs/v1/logs_service.proto
 "
 
+# Fail loud, and say the thing that actually fixes it. This repository has no
+# submodules: both checkouts come from setup.sh, on demand.
 if [ ! -f "$GENERATOR" ]; then
   echo "error: no nanopb generator at $GENERATOR" >&2
-  echo "       git submodule update --init third_party/nanopb third_party/opentelemetry-proto" >&2
+  echo "       fix:  SPNL_WITH_PROTO=1 scripts/setup.sh" >&2
+  echo "       or:   NANOPB_DIR=<path to a nanopb checkout> sh scripts/regen-otlp-pb.sh" >&2
+  exit 1
+fi
+if [ ! -d "$PROTO_ROOT/opentelemetry" ]; then
+  echo "error: no OTLP schemas at $PROTO_ROOT" >&2
+  echo "       fix:  SPNL_WITH_PROTO=1 scripts/setup.sh" >&2
+  echo "       or:   PROTO_DIR=<path to an opentelemetry-proto checkout> sh scripts/regen-otlp-pb.sh" >&2
   exit 1
 fi
 

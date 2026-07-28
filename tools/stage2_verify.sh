@@ -11,7 +11,7 @@
 #  tools/golden.rb / tools/cgen_oracle.rb.)
 set -eu
 cd "$(dirname "$0")/.."
-SP=third_party/spinel
+SP=deps/spinel
 mkdir -p build/codegen_c
 
 make -C "$SP" >/dev/null 2>&1 || { echo "spinel build failed"; exit 1; }

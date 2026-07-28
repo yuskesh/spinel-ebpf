@@ -2,7 +2,7 @@
 #
 # SPINEL AST text-format parser (read + dump, byte-identical round-trip).
 #
-# Implements the format documented in third_party/spinel/docs/AST.md
+# Implements the format documented in deps/spinel/docs/AST.md
 #
 # Format recap:
 #   ROOT <int>
