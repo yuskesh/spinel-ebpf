@@ -1,0 +1,359 @@
+/*
+ * otlp_json.c — OTLP/HTTP+JSON エンコーダ (proto3 JSON mapping)。詳細は otlp_json.h。
+ * protobuf 版 (otlp_metrics/traces/logs.c) のデータ選択と一致させる。
+ */
+#include "otlp_json.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int otlp_want_json(void) {
+    const char *p = getenv("OTEL_EXPORTER_OTLP_PROTOCOL");
+    return p && strcmp(p, "http/json") == 0;
+}
+
+int otlp_endpoint_is_grpc(const char *e) {
+    return e && (strncmp(e, "grpc://", 7) == 0 || strncmp(e, "grpcs://", 8) == 0);
+}
+
+/* ---- 最小 JSON ライタ (固定バッファ、overflow で ok=0) ---- */
+typedef struct { char *p; size_t cap; size_t n; int ok; } jw_t;
+
+static void jw_ch(jw_t *w, char c) { if (w->n < w->cap) w->p[w->n] = c; else w->ok = 0; w->n++; }
+static void jw_raw(jw_t *w, const char *s) { for (; *s; s++) jw_ch(w, *s); }
+
+/* JSON 文字列 (引用符 + エスケープ) */
+static void jw_jstr(jw_t *w, const char *s) {
+    jw_ch(w, '"');
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { jw_ch(w, '\\'); jw_ch(w, (char)c); }
+        else if (c == '\n') jw_raw(w, "\\n");
+        else if (c == '\r') jw_raw(w, "\\r");
+        else if (c == '\t') jw_raw(w, "\\t");
+        else if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); jw_raw(w, b); }
+        else jw_ch(w, (char)c);
+    }
+    jw_ch(w, '"');
+}
+/* proto3 JSON: 64bit 整数は文字列 */
+static void jw_u64q(jw_t *w, uint64_t v) { char b[24]; snprintf(b, sizeof b, "\"%llu\"", (unsigned long long)v); jw_raw(w, b); }
+static void jw_i64q(jw_t *w, int64_t v)  { char b[24]; snprintf(b, sizeof b, "\"%lld\"", (long long)v); jw_raw(w, b); }
+static void jw_int(jw_t *w, long v)       { char b[24]; snprintf(b, sizeof b, "%ld", v); jw_raw(w, b); }
+static void jw_dbl(jw_t *w, double v)     { char b[32]; snprintf(b, sizeof b, "%g", v); jw_raw(w, b); }
+static void jw_hex(jw_t *w, const uint8_t *b, size_t n) {
+    static const char *h = "0123456789abcdef";
+    jw_ch(w, '"');
+    for (size_t i = 0; i < n; i++) { jw_ch(w, h[b[i] >> 4]); jw_ch(w, h[b[i] & 0xf]); }
+    jw_ch(w, '"');
+}
+
+/* 1 個の {"key":k,"value":{"stringValue":v}} を first フラグ付きで書く */
+static void jw_res_kv(jw_t *w, int *first, const char *k, const char *v) {
+    if (!v || !v[0]) return;
+    if (!*first) jw_ch(w, ','); *first = 0;
+    jw_raw(w, "{\"key\":"); jw_jstr(w, k);
+    jw_raw(w, ",\"value\":{\"stringValue\":"); jw_jstr(w, v); jw_raw(w, "}}");
+}
+/* "resource":{"attributes":[...]} (protobuf 版 otlp_enc_resource_attrs と一致、E272)。
+ * service.name (+ service.version) + service.instance.id + telemetry.sdk.{name,language,version}。 */
+static void jw_resource(jw_t *w, const char *name, const char *ver) {
+    jw_raw(w, "\"resource\":{\"attributes\":[");
+    int first = 1;
+    jw_res_kv(w, &first, "service.name", name);
+    jw_res_kv(w, &first, "service.version", ver);
+    jw_res_kv(w, &first, "service.instance.id", otlp_service_instance_id());
+    jw_res_kv(w, &first, "telemetry.sdk.name", "spinel-ebpf");
+    jw_res_kv(w, &first, "telemetry.sdk.language", "ruby");
+    jw_res_kv(w, &first, "telemetry.sdk.version", "0");
+    jw_raw(w, "]}");
+}
+static void jw_scope(jw_t *w, const char *scope) {
+    jw_raw(w, "\"scope\":{\"name\":"); jw_jstr(w, scope ? scope : "spinel-ebpf"); jw_raw(w, "}");
+}
+/* code.function/filepath/lineno 属性配列 ("attributes":[...]) */
+static void jw_code_attrs(jw_t *w, const char *fn, const char *file, int32_t line) {
+    jw_raw(w, "\"attributes\":[");
+    jw_raw(w, "{\"key\":\"code.function\",\"value\":{\"stringValue\":"); jw_jstr(w, fn ? fn : ""); jw_raw(w, "}}");
+    if (file && file[0]) { jw_raw(w, ",{\"key\":\"code.filepath\",\"value\":{\"stringValue\":"); jw_jstr(w, file); jw_raw(w, "}}"); }
+    if (line > 0) { jw_raw(w, ",{\"key\":\"code.lineno\",\"value\":{\"intValue\":"); jw_i64q(w, line); jw_raw(w, "}}"); }
+    jw_raw(w, "]");
+}
+
+/* slot s の代表値 ~ 1.5*2^s (protobuf 版 slot_midpoint と一致) */
+static double slot_midpoint(int s) { return s <= 0 ? 1.0 : 1.5 * (double)((uint64_t)1 << s); }
+
+long otlp_json_metrics_build(char *buf, size_t cap,
+                             const char *svc, const char *ver, const char *scope,
+                             uint64_t t, uint64_t start,
+                             const otlp_method_metric_t *methods, size_t n) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceMetrics\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeMetrics\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"metrics\":[");
+
+    /* spnl_method_calls_total (Sum) */
+    jw_raw(&w, "{\"name\":\"spnl_method_calls_total\",\"sum\":{\"dataPoints\":[");
+    int first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_method_metric_t *m = &methods[i];
+        if (m->calls == 0) continue;
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)m->calls);
+        jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
+
+    /* spnl_method_latency_ns (ExponentialHistogram) */
+    jw_raw(&w, ",{\"name\":\"spnl_method_latency_ns\",\"unit\":\"ns\",\"exponentialHistogram\":{\"dataPoints\":[");
+    first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_method_metric_t *m = &methods[i];
+        if (m->calls == 0) continue;
+        int fs = -1, ls = -1; uint64_t total = 0; double sum = 0.0;
+        for (int s = 0; s < OTLP_HIST_SLOTS; s++) {
+            uint64_t cnt = m->buckets[s];
+            if (cnt == 0) continue;
+            if (fs < 0) fs = s;
+            ls = s; total += cnt; sum += (double)cnt * slot_midpoint(s);
+        }
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"count\":"); jw_u64q(&w, total);
+        jw_raw(&w, ",\"sum\":"); jw_dbl(&w, sum);
+        jw_raw(&w, ",\"scale\":0,\"zeroCount\":\"0\"");
+        if (fs >= 0) {
+            jw_raw(&w, ",\"positive\":{\"offset\":"); jw_int(&w, fs);
+            jw_raw(&w, ",\"bucketCounts\":[");
+            for (int s = fs; s <= ls; s++) { if (s > fs) jw_ch(&w, ','); jw_u64q(&w, m->buckets[s]); }
+            jw_raw(&w, "]}");
+        }
+        jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2}}");
+
+    jw_raw(&w, "]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
+
+long otlp_json_traces_build(char *buf, size_t cap,
+                            const char *svc, const char *ver, const char *scope,
+                            const otlp_span_t *spans, size_t nspans,
+                            const otlp_method_meta_t *metas, size_t nmetas) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceSpans\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeSpans\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"spans\":[");
+    for (size_t i = 0; i < nspans; i++) {
+        const otlp_span_t *s = &spans[i];
+        const otlp_method_meta_t *m = NULL;
+        for (size_t k = 0; k < nmetas; k++) if (metas[k].idx == s->method_idx) { m = &metas[k]; break; }
+        if (i) jw_ch(&w, ',');
+        jw_raw(&w, "{\"traceId\":"); jw_hex(&w, s->trace_id, 16);
+        jw_raw(&w, ",\"spanId\":"); jw_hex(&w, s->span_id, 8);
+        if (s->has_parent) { jw_raw(&w, ",\"parentSpanId\":"); jw_hex(&w, s->parent_span_id, 8); }
+        jw_raw(&w, ",\"name\":"); jw_jstr(&w, (m && m->method) ? m->method : "?");
+        jw_raw(&w, ",\"kind\":1");  /* SPAN_KIND_INTERNAL */
+        jw_raw(&w, ",\"startTimeUnixNano\":"); jw_u64q(&w, s->start_unix_ns);
+        jw_raw(&w, ",\"endTimeUnixNano\":"); jw_u64q(&w, s->end_unix_ns);
+        if (m) { jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line); }
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
+
+long otlp_json_http_span_build(char *buf, size_t cap,
+                               const char *svc, const char *ver, const char *scope,
+                               const otlp_http_span_t *s) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceSpans\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeSpans\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"spans\":[{");
+    jw_raw(&w, "\"traceId\":"); jw_hex(&w, s->trace_id, 16);
+    jw_raw(&w, ",\"spanId\":"); jw_hex(&w, s->span_id, 8);
+    if (s->has_parent) { jw_raw(&w, ",\"parentSpanId\":"); jw_hex(&w, s->parent_span_id, 8); }
+    jw_raw(&w, ",\"name\":"); jw_jstr(&w, s->name ? s->name : "");
+    jw_raw(&w, ",\"kind\":2");  /* SPAN_KIND_SERVER */
+    jw_raw(&w, ",\"startTimeUnixNano\":"); jw_u64q(&w, s->start_unix_ns);
+    jw_raw(&w, ",\"endTimeUnixNano\":"); jw_u64q(&w, s->end_unix_ns);
+    jw_raw(&w, ",\"attributes\":[");
+    int first = 1;
+    jw_res_kv(&w, &first, "http.request.method", s->http_method);
+    jw_res_kv(&w, &first, "url.path", s->url_path);
+    if (s->status_code > 0) {
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"key\":\"http.response.status_code\",\"value\":{\"intValue\":"); jw_i64q(&w, s->status_code); jw_raw(&w, "}}");
+    }
+    /* OBI/semconv v1.41.0 互換の追加属性 */
+    jw_res_kv(&w, &first, "server.address", s->server_address);
+    if (s->server_port > 0) {
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"key\":\"server.port\",\"value\":{\"intValue\":"); jw_i64q(&w, s->server_port); jw_raw(&w, "}}");
+    }
+    jw_res_kv(&w, &first, "client.address", s->client_address);
+    jw_res_kv(&w, &first, "url.scheme", s->url_scheme);
+    jw_res_kv(&w, &first, "http.route", s->route);
+    /* L2–L8 横断相関の追加属性 (L8 tenant + L3/L4 4-tuple keyed メトリクス) */
+    jw_res_kv(&w, &first, "tenant", s->tenant);
+    if (s->tcp_established >= 0) {
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"key\":\"net.tcp.established\",\"value\":{\"intValue\":"); jw_i64q(&w, s->tcp_established); jw_raw(&w, "}}");
+    }
+    if (s->tcp_state_changes >= 0) {
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"key\":\"net.tcp.state_changes\",\"value\":{\"intValue\":"); jw_i64q(&w, s->tcp_state_changes); jw_raw(&w, "}}");
+    }
+    jw_raw(&w, "]");  /* close attributes */
+    /* status >= 500 で Span.status=ERROR (code=2)、それ以外は省略 (UNSET) */
+    if (s->status_code >= 500) jw_raw(&w, ",\"status\":{\"code\":2}");
+    /* 閉じ: span} spans] scopeSpans-obj} scopeSpans] resourceSpans-obj} resourceSpans] top} */
+    jw_raw(&w, "}]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
+
+/* 汎用ラベル配列 ("attributes":[{key,stringValue}...]) */
+static void jw_labels(jw_t *w, const otlp_kv_t *labels, int nlabels) {
+    jw_raw(w, "\"attributes\":[");
+    for (int i = 0; i < nlabels; i++) {
+        if (i) jw_ch(w, ',');
+        jw_raw(w, "{\"key\":"); jw_jstr(w, labels[i].key);
+        jw_raw(w, ",\"value\":{\"stringValue\":"); jw_jstr(w, labels[i].val); jw_raw(w, "}}");
+    }
+    jw_raw(w, "]");
+}
+static void jw_series_attrs(jw_t *w, const otlp_series_t *s) { jw_labels(w, s->labels, s->nlabels); }
+
+long otlp_json_metrics_series_build(char *buf, size_t cap,
+                                    const char *svc, const char *ver, const char *scope,
+                                    const char *name, const char *lat_name, const char *unit,
+                                    uint64_t t, uint64_t start,
+                                    const otlp_series_t *series, size_t n) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceMetrics\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeMetrics\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"metrics\":[");
+
+    jw_raw(&w, "{\"name\":"); jw_jstr(&w, name); jw_raw(&w, ",\"sum\":{\"dataPoints\":[");
+    int first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_series_t *s = &series[i];
+        if (s->count == 0) continue;
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)s->count);
+        jw_ch(&w, ','); jw_series_attrs(&w, s);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
+
+    jw_raw(&w, ",{\"name\":"); jw_jstr(&w, lat_name);
+    if (unit && unit[0]) { jw_raw(&w, ",\"unit\":"); jw_jstr(&w, unit); }
+    jw_raw(&w, ",\"exponentialHistogram\":{\"dataPoints\":[");
+    first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_series_t *s = &series[i];
+        if (s->count == 0) continue;
+        int fs = -1, ls = -1; uint64_t total = 0; double sum = 0.0;
+        for (int sl = 0; sl < OTLP_HIST_SLOTS; sl++) {
+            uint64_t cnt = s->buckets[sl];
+            if (cnt == 0) continue;
+            if (fs < 0) fs = sl;
+            ls = sl; total += cnt; sum += (double)cnt * slot_midpoint(sl);
+        }
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"count\":"); jw_u64q(&w, total);
+        jw_raw(&w, ",\"sum\":"); jw_dbl(&w, sum);
+        jw_raw(&w, ",\"scale\":0,\"zeroCount\":\"0\"");
+        if (fs >= 0) {
+            jw_raw(&w, ",\"positive\":{\"offset\":"); jw_int(&w, fs);
+            jw_raw(&w, ",\"bucketCounts\":[");
+            for (int sl = fs; sl <= ls; sl++) { if (sl > fs) jw_ch(&w, ','); jw_u64q(&w, s->buckets[sl]); }
+            jw_raw(&w, "]}");
+        }
+        jw_ch(&w, ','); jw_series_attrs(&w, s);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2}}");
+
+    jw_raw(&w, "]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
+
+long otlp_json_logs_build(char *buf, size_t cap,
+                          const char *svc, const char *ver, const char *scope,
+                          const otlp_log_record_t *recs, size_t nrecs) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceLogs\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeLogs\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"logRecords\":[");
+    for (size_t i = 0; i < nrecs; i++) {
+        const otlp_log_record_t *r = &recs[i];
+        if (i) jw_ch(&w, ',');
+        jw_raw(&w, "{\"timeUnixNano\":"); jw_u64q(&w, r->time_unix_ns);
+        jw_raw(&w, ",\"observedTimeUnixNano\":"); jw_u64q(&w, r->time_unix_ns);
+        jw_raw(&w, ",\"severityNumber\":"); jw_int(&w, r->severity ? r->severity : 9);
+        jw_raw(&w, ",\"severityText\":\"INFO\",\"body\":{");
+        if (r->body_is_str) { jw_raw(&w, "\"stringValue\":"); jw_jstr(&w, r->body_str ? r->body_str : ""); }
+        else { jw_raw(&w, "\"intValue\":"); jw_i64q(&w, r->body_int); }
+        jw_ch(&w, '}');
+        if (r->event_name && r->event_name[0]) { jw_raw(&w, ",\"eventName\":"); jw_jstr(&w, r->event_name); }
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
+
+long otlp_json_metrics_hist_build(char *buf, size_t cap,
+                                  const char *svc, const char *ver, const char *scope,
+                                  const char *name, const char *unit,
+                                  const double *bounds, int nbounds,
+                                  uint64_t t, uint64_t start,
+                                  const otlp_hseries_t *series, size_t n) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceMetrics\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeMetrics\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"metrics\":[{\"name\":"); jw_jstr(&w, name);
+    if (unit && unit[0]) { jw_raw(&w, ",\"unit\":"); jw_jstr(&w, unit); }
+    jw_raw(&w, ",\"histogram\":{\"dataPoints\":[");
+    int first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_hseries_t *s = &series[i];
+        if (s->count == 0) continue;
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"count\":"); jw_u64q(&w, s->count);
+        jw_raw(&w, ",\"sum\":"); jw_dbl(&w, s->sum);
+        jw_raw(&w, ",\"bucketCounts\":[");
+        for (int b = 0; b <= nbounds; b++) { if (b) jw_ch(&w, ','); jw_u64q(&w, s->bucket_counts[b]); }
+        jw_raw(&w, "],\"explicitBounds\":[");
+        for (int b = 0; b < nbounds; b++) { if (b) jw_ch(&w, ','); jw_dbl(&w, bounds[b]); }
+        jw_raw(&w, "],");
+        jw_labels(&w, s->labels, s->nlabels);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2}}]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
