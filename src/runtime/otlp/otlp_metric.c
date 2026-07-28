@@ -1,5 +1,6 @@
 /*
- * otlp_metric.c — 汎用 keyed メトリクスの registry + OTLP push。詳細は otlp_metric.h。
+ * otlp_metric.c -- registry and OTLP push for generic keyed metrics.
+ * See otlp_metric.h for what this is for.
  */
 #include "otlp_metric.h"
 #include "otlp_metrics.h"   /* otlp_series_t + otlp_metrics_series_build */
@@ -59,7 +60,8 @@ int spnl_otlp_metric_push_obj(struct bpf_object *obj, const char *hist_map,
         if (!g_reg[i].used) continue;
         unsigned long long key = (unsigned long long)g_reg[i].key;
         __u64 count = 0;
-        __u64 buckets[64] = {0};  /* __u64 vs uint64_t は Linux で別型なので temp + memcpy */
+        __u64 buckets[64] = {0};  /* __u64 and uint64_t are distinct types on Linux,
+                                     hence the temporary and the memcpy */
         spnl_log2_hist_count_keyed_obj(obj, hist_map, key, &count);
         spnl_hist_buckets_keyed_obj(obj, hist_map, key, buckets);
         memcpy(out[n].buckets, buckets, sizeof buckets);

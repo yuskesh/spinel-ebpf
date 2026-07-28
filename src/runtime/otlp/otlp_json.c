@@ -1,6 +1,6 @@
 /*
- * otlp_json.c — OTLP/HTTP+JSON エンコーダ (proto3 JSON mapping)。詳細は otlp_json.h。
- * protobuf 版 (otlp_metrics/traces/logs.c) のデータ選択と一致させる。
+ * otlp_json.c -- the OTLP/HTTP+JSON encoder (proto3 JSON mapping). See otlp_json.h.
+ * It selects exactly the same data as the protobuf encoders do.
  */
 #include "otlp_json.h"
 
@@ -17,13 +17,13 @@ int otlp_endpoint_is_grpc(const char *e) {
     return e && (strncmp(e, "grpc://", 7) == 0 || strncmp(e, "grpcs://", 8) == 0);
 }
 
-/* ---- 最小 JSON ライタ (固定バッファ、overflow で ok=0) ---- */
+/* ---- a minimal JSON writer over a fixed buffer; overflow clears ok ---- */
 typedef struct { char *p; size_t cap; size_t n; int ok; } jw_t;
 
 static void jw_ch(jw_t *w, char c) { if (w->n < w->cap) w->p[w->n] = c; else w->ok = 0; w->n++; }
 static void jw_raw(jw_t *w, const char *s) { for (; *s; s++) jw_ch(w, *s); }
 
-/* JSON 文字列 (引用符 + エスケープ) */
+/* A JSON string: quoted and escaped. */
 static void jw_jstr(jw_t *w, const char *s) {
     jw_ch(w, '"');
     for (; s && *s; s++) {
@@ -37,7 +37,7 @@ static void jw_jstr(jw_t *w, const char *s) {
     }
     jw_ch(w, '"');
 }
-/* proto3 JSON: 64bit 整数は文字列 */
+/* The proto3 JSON mapping writes 64-bit integers as strings. */
 static void jw_u64q(jw_t *w, uint64_t v) { char b[24]; snprintf(b, sizeof b, "\"%llu\"", (unsigned long long)v); jw_raw(w, b); }
 static void jw_i64q(jw_t *w, int64_t v)  { char b[24]; snprintf(b, sizeof b, "\"%lld\"", (long long)v); jw_raw(w, b); }
 static void jw_int(jw_t *w, long v)       { char b[24]; snprintf(b, sizeof b, "%ld", v); jw_raw(w, b); }
@@ -49,14 +49,14 @@ static void jw_hex(jw_t *w, const uint8_t *b, size_t n) {
     jw_ch(w, '"');
 }
 
-/* 1 個の {"key":k,"value":{"stringValue":v}} を first フラグ付きで書く */
+/* Write one {"key":k,"value":{"stringValue":v}}, honouring the first flag. */
 static void jw_res_kv(jw_t *w, int *first, const char *k, const char *v) {
     if (!v || !v[0]) return;
     if (!*first) jw_ch(w, ','); *first = 0;
     jw_raw(w, "{\"key\":"); jw_jstr(w, k);
     jw_raw(w, ",\"value\":{\"stringValue\":"); jw_jstr(w, v); jw_raw(w, "}}");
 }
-/* "resource":{"attributes":[...]} (protobuf 版 otlp_enc_resource_attrs と一致、E272)。
+/* "resource":{"attributes":[...]}, matching the protobuf encoder exactly.
  * service.name (+ service.version) + service.instance.id + telemetry.sdk.{name,language,version}。 */
 static void jw_resource(jw_t *w, const char *name, const char *ver) {
     jw_raw(w, "\"resource\":{\"attributes\":[");
@@ -72,7 +72,7 @@ static void jw_resource(jw_t *w, const char *name, const char *ver) {
 static void jw_scope(jw_t *w, const char *scope) {
     jw_raw(w, "\"scope\":{\"name\":"); jw_jstr(w, scope ? scope : "spinel-ebpf"); jw_raw(w, "}");
 }
-/* code.function/filepath/lineno 属性配列 ("attributes":[...]) */
+/* The code.function / code.filepath / code.lineno attribute array. */
 static void jw_code_attrs(jw_t *w, const char *fn, const char *file, int32_t line) {
     jw_raw(w, "\"attributes\":[");
     jw_raw(w, "{\"key\":\"code.function\",\"value\":{\"stringValue\":"); jw_jstr(w, fn ? fn : ""); jw_raw(w, "}}");
@@ -81,7 +81,8 @@ static void jw_code_attrs(jw_t *w, const char *fn, const char *file, int32_t lin
     jw_raw(w, "]");
 }
 
-/* slot s の代表値 ~ 1.5*2^s (protobuf 版 slot_midpoint と一致) */
+/* Representative value for slot s, about 1.5 * 2^s -- the same midpoint the
+ * protobuf encoder uses. */
 static double slot_midpoint(int s) { return s <= 0 ? 1.0 : 1.5 * (double)((uint64_t)1 << s); }
 
 long otlp_json_metrics_build(char *buf, size_t cap,
@@ -197,7 +198,7 @@ long otlp_json_http_span_build(char *buf, size_t cap,
         if (!first) jw_ch(&w, ','); first = 0;
         jw_raw(&w, "{\"key\":\"http.response.status_code\",\"value\":{\"intValue\":"); jw_i64q(&w, s->status_code); jw_raw(&w, "}}");
     }
-    /* OBI/semconv v1.41.0 互換の追加属性 */
+    /* The additional semconv attributes. */
     jw_res_kv(&w, &first, "server.address", s->server_address);
     if (s->server_port > 0) {
         if (!first) jw_ch(&w, ','); first = 0;
@@ -206,7 +207,8 @@ long otlp_json_http_span_build(char *buf, size_t cap,
     jw_res_kv(&w, &first, "client.address", s->client_address);
     jw_res_kv(&w, &first, "url.scheme", s->url_scheme);
     jw_res_kv(&w, &first, "http.route", s->route);
-    /* L2–L8 横断相関の追加属性 (L8 tenant + L3/L4 4-tuple keyed メトリクス) */
+    /* Cross-layer attributes: the application-level tenant, and the
+     * connection-keyed TCP counters. */
     jw_res_kv(&w, &first, "tenant", s->tenant);
     if (s->tcp_established >= 0) {
         if (!first) jw_ch(&w, ','); first = 0;
@@ -217,14 +219,16 @@ long otlp_json_http_span_build(char *buf, size_t cap,
         jw_raw(&w, "{\"key\":\"net.tcp.state_changes\",\"value\":{\"intValue\":"); jw_i64q(&w, s->tcp_state_changes); jw_raw(&w, "}}");
     }
     jw_raw(&w, "]");  /* close attributes */
-    /* status >= 500 で Span.status=ERROR (code=2)、それ以外は省略 (UNSET) */
+    /* A status of 500 or above sets Span.status to ERROR (code 2); otherwise the
+     * field is omitted, which means UNSET. */
     if (s->status_code >= 500) jw_raw(&w, ",\"status\":{\"code\":2}");
-    /* 閉じ: span} spans] scopeSpans-obj} scopeSpans] resourceSpans-obj} resourceSpans] top} */
+    /* Close it all out: span, spans, scopeSpans object, scopeSpans,
+     * resourceSpans object, resourceSpans, and the top-level object. */
     jw_raw(&w, "}]}]}]}");
     return w.ok ? (long)w.n : -1;
 }
 
-/* 汎用ラベル配列 ("attributes":[{key,stringValue}...]) */
+/* An arbitrary label array, "attributes":[{key,stringValue}...]. */
 static void jw_labels(jw_t *w, const otlp_kv_t *labels, int nlabels) {
     jw_raw(w, "\"attributes\":[");
     for (int i = 0; i < nlabels; i++) {

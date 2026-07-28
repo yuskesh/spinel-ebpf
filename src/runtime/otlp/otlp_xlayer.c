@@ -1,21 +1,26 @@
 /*
- * otlp_xlayer.c — E274: L2–L8 横断相関の L3/L4 ルックアップ (A 方式 = userspace 結合)。
+ * otlp_xlayer.c -- the L3/L4 half of cross-layer correlation, joined in userspace.
  *
- * eBPF 側 (Ruby DSL の inet_sock_set_state tracepoint、examples/observability/otlp/
- * xlayer_correlate.rb) は TCP 状態遷移の 4-tuple を決定的 u64 キーにハッシュして keyed-hist
- * map (bpf_hist_keyed) に per-metric で計数する。ここでは accept 済み client fd から **同一の
- * 4-tuple → 同一キー導出**でその map を引き、L3/L4 メトリクス値 (ESTABLISHED 数 / 状態遷移数)
- * を返す。
+ * On the kernel side, a probe on the inet_sock_set_state tracepoint (see
+ * examples/observability/otlp/xlayer_correlate.rb) hashes the 4-tuple of each TCP
+ * state transition into a deterministic u64 key and counts per metric into a keyed
+ * histogram map. Here, given an accepted client fd, we derive *the same key from
+ * the same 4-tuple* and read that map back, yielding the L3/L4 measurements: how
+ * many times the connection reached ESTABLISHED, and how many state transitions it
+ * made in total.
  *
- * キー導出 (xlayer_tuple_key) は DSL 側の算術と byte 一致必須。tracepoint の saddr/daddr は
- * raw be32 (getsockname/getpeername の s_addr と一致)、sport/dport は host order
- * (tracepoint が ntohs 済、E123)。よって userspace は addr は raw be、port は ntohs で合わせる:
+ * The key derivation must match the probe's arithmetic byte for byte. In the
+ * tracepoint, the addresses are raw big-endian 32-bit values -- the same form
+ * getsockname and getpeername return in s_addr -- while the ports have already
+ * been converted to host order. So userspace keeps the addresses as-is and applies
+ * ntohs to the ports:
  *   ci=client ip (raw be32 = getpeername s_addr = tracepoint daddr),
  *   si=server ip (raw be32 = getsockname s_addr = tracepoint saddr),
  *   cp=client port (host = ntohs(getpeername port) = tracepoint dport),
  *   sp=server port (host = ntohs(getsockname port) = tracepoint sport)。
  *
- * libbpf 依存 (bpf map 読取) のため eBPF ビルド経路でのみリンクされる (bin/spinel-ebpf)。
+ * Reading a bpf map means this depends on libbpf, so it is linked only on the
+ * eBPF build path.
  */
 #include <stdint.h>
 #include <string.h>
@@ -25,9 +30,10 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
-/* 4-tuple → u64 キー。DSL 側 (xlayer_correlate.rb) の算術と完全一致させること。
- * FNV-1a 64bit プライム (1099511628211) の連鎖。metric_id で per-metric 空間を分離
- * (1=retransmits, 2=server sends)。全て 64bit 二の補数で wrap するので符号は不問。 */
+/* Hash a 4-tuple into a u64 key. This must match the probe's arithmetic exactly.
+ * It chains the 64-bit FNV-1a prime (1099511628211), and separates the metrics
+ * into their own key spaces through metric_id. Everything wraps in 64-bit two's
+ * complement, so signedness does not matter. */
 static uint64_t xlayer_tuple_key(uint32_t ci_be, uint32_t si_be,
                                  uint16_t cp_host, uint16_t sp_host, uint64_t metric_id) {
     uint64_t h = (uint64_t)(ci_be & 0xFFFFFFFFu);
@@ -38,8 +44,9 @@ static uint64_t xlayer_tuple_key(uint32_t ci_be, uint32_t si_be,
     return h;
 }
 
-/* accept 済み client fd から 4-tuple を取り出す (IPv4 のみ)。addr は raw be、port は host order
- * (tracepoint の saddr/daddr=be, sport/dport=host に合わせる)。成功 1 / 非 inet・失敗 0。 */
+/* Extract the 4-tuple from an accepted client fd; IPv4 only. Addresses stay
+ * big-endian and ports are converted to host order, matching what the tracepoint
+ * hashed. Returns 1 on success, 0 for a non-inet socket or an error. */
 static int xlayer_tuple_from_fd(int fd, uint32_t *ci_be, uint32_t *si_be,
                                 uint16_t *cp_host, uint16_t *sp_host) {
     struct sockaddr_in local, peer;
@@ -56,12 +63,14 @@ static int xlayer_tuple_from_fd(int fd, uint32_t *ci_be, uint32_t *si_be,
 }
 
 /*
- * accept fd の 4-tuple で keyed-hist map (map_name = bpf_hist_keyed) を引き、64 バケットの
- * 総和 (= その 4-tuple・当該 metric_id の観測数) を返す。
- *   hit  -> >=0 (再送数 / 送信数)
- *   miss -> -1  (その 4-tuple の当該メトリクスが未計数 = kernel 側キーと不一致 or 未発火)
- * non-inet / エラーも -1。miss を区別することで「userspace が導いたキーが kernel の書いた
- * キーに実際に当たった」= 4-tuple join の成立を証明できる。
+ * Look the 4-tuple of an accepted fd up in the keyed histogram map and return the
+ * sum over its 64 buckets -- the number of observations for that tuple and metric.
+ *   hit  -> zero or more
+ *   miss -> -1, meaning nothing was counted for that tuple: either the key does not
+ *           match what the kernel wrote, or the probe never fired
+ * A non-inet socket or an error also yields -1. Keeping the miss distinguishable is
+ * what lets a test prove the join actually happened -- that the key userspace
+ * derived really is the key the kernel wrote.
  */
 long spnl_otlp_xlayer_l34_count_obj(struct bpf_object *obj, const char *map_name,
                                     int fd, unsigned long long metric_id) {
@@ -79,14 +88,15 @@ long spnl_otlp_xlayer_l34_count_obj(struct bpf_object *obj, const char *map_name
     /* value = struct spnl_hist_struct { __u64 buckets[64]; } (512B)。 */
     uint64_t buckets[64];
     memset(buckets, 0, sizeof buckets);
-    if (bpf_map_lookup_elem(mfd, &key, buckets) != 0) return -1;  /* key 不在 = miss */
+    if (bpf_map_lookup_elem(mfd, &key, buckets) != 0) return -1;  /* absent key: a miss */
     uint64_t total = 0;
     for (int i = 0; i < 64; i++) total += buckets[i];
     return (long)total;
 }
 
-/* accept fd + metric_id から lookup が実際に使う u64 キーを返す (E274 join テスト用)。
- * DSL(.bpf.c) の tracepoint が同一 4-tuple・同一算術で書き込むキーと byte 一致する。1/0。 */
+/* Return the u64 key the lookup above would use for this fd and metric, so a test
+ * can assert it equals the key the generated tracepoint writes for the same
+ * 4-tuple. Returns 1 on success, 0 on failure. */
 int spnl_otlp_xlayer_key_from_fd(int fd, unsigned long long metric_id, unsigned long long *key_out) {
     uint32_t ci = 0, si = 0;
     uint16_t cp = 0, sp = 0;

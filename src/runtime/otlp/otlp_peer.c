@@ -1,4 +1,5 @@
-/* otlp_peer.c — conn span の宛先 IP を pod/service/外部に解決。詳細は otlp_peer.h。 */
+/* otlp_peer.c -- resolve a connection's destination address to a pod, a Service,
+ * or something outside the cluster. See otlp_peer.h. */
 #include "otlp_peer.h"
 #include <stdio.h>
 #include <string.h>
@@ -7,7 +8,7 @@
 #include <netdb.h>       /* getnameinfo (best-effort reverse-DNS) */
 #include <sys/socket.h>
 
-/* ---- IP マップ (ip -> {kind, ns, name}) ---- */
+/* ---- the IP map: address -> {kind, namespace, name} ---- */
 typedef struct { char ip[46]; int kind; char ns[128]; char name[256]; } peer_ent_t;
 
 static peer_ent_t *g_map = NULL;
@@ -18,7 +19,7 @@ static int         g_have_pod_cidr = 0, g_have_svc_cidr = 0;
 static int         g_rdns = 0;
 static int         g_inited = -1;   /* -1 unknown, 0 off (no IPMAP), 1 on */
 
-/* "a.b.c.d/prefix" -> base(host order) + mask(host order)。成功で 1。 */
+/* "a.b.c.d/prefix" -> base and mask, both in host order. Returns 1 on success. */
 static int parse_cidr(const char *s, uint32_t *base, uint32_t *mask) {
     if (!s || !s[0]) return 0;
     char buf[64]; snprintf(buf, sizeof buf, "%s", s);
@@ -34,7 +35,7 @@ static int parse_cidr(const char *s, uint32_t *base, uint32_t *mask) {
     return 1;
 }
 
-/* "::ffff:1.2.3.4" -> "1.2.3.4"。それ以外は addr をそのまま out にコピー。 */
+/* "::ffff:1.2.3.4" -> "1.2.3.4"; anything else is copied through unchanged. */
 static void unwrap_v4mapped(const char *addr, char *out, size_t cap) {
     if (addr && (strncmp(addr, "::ffff:", 7) == 0 || strncmp(addr, "::FFFF:", 7) == 0)
         && strchr(addr + 7, '.')) {
@@ -51,7 +52,7 @@ static int is_loopback(const char *addr) {
     return 0;
 }
 
-/* 内部: IP マップ 1 行 "ip kind ns name" を格納。 */
+/* Store one IP map line, "ip kind ns name". */
 static void map_add(const char *ip, const char *kind, const char *ns, const char *name) {
     peer_ent_t *e = realloc(g_map, sizeof(peer_ent_t) * (g_map_n + 1));
     if (!e) return;
@@ -80,7 +81,8 @@ static void lazy_init(void) {
         }
         fclose(f);
     }
-    /* CIDR: env 指定が無ければ k3s 既定 (pod 10.42/16, svc 10.43/16)。 */
+    /* CIDRs: without an environment override, assume the k3s defaults --
+     * 10.42/16 for pods and 10.43/16 for Services. */
     const char *pc = getenv("SPNL_K8S_POD_CIDR");
     g_have_pod_cidr = parse_cidr((pc && pc[0]) ? pc : "10.42.0.0/16", &g_pod_base, &g_pod_mask);
     const char *sc = getenv("SPNL_K8S_SVC_CIDR");
@@ -90,7 +92,8 @@ static void lazy_init(void) {
     g_inited = 1;
 }
 
-/* 外部 IP の逆引き (best-effort、cache 付き)。取れなければ空文字。 */
+/* Best-effort reverse lookup of an external address, with a cache. Yields an
+ * empty string when the name cannot be resolved. */
 static const char *rdns_cached(const char *addr) {
     static struct { char ip[46]; char host[256]; } cache[256];
     static int cn = 0;
@@ -107,7 +110,7 @@ static const char *rdns_cached(const char *addr) {
         snprintf(cache[cn].host, sizeof cache[cn].host, "%s", host);
         return cache[cn++].host;
     }
-    /* cache 満杯: 一時領域に返す (次呼出で上書き) */
+    /* Cache is full: return through scratch space, overwritten on the next call. */
     static char tmp[256]; snprintf(tmp, sizeof tmp, "%s", host); return tmp;
 }
 
@@ -123,7 +126,7 @@ int spnl_peer_classify(const char *addr, spnl_peer_t *out) {
 
     if (is_loopback(a)) { out->kind = SPNL_PEER_LOOPBACK; return out->kind; }
 
-    /* IP マップ完全一致 (pod IP / service ClusterIP)。 */
+    /* Exact hit in the IP map: a pod address, or a Service ClusterIP. */
     for (int i = 0; i < g_map_n; i++) {
         if (!strcmp(g_map[i].ip, a)) {
             out->kind = g_map[i].kind;
@@ -133,13 +136,13 @@ int spnl_peer_classify(const char *addr, spnl_peer_t *out) {
         }
     }
 
-    /* CIDR 判定 (IPv4)。 */
+    /* Fall back to CIDR membership, IPv4 only. */
     struct in_addr ia;
     if (inet_pton(AF_INET, a, &ia) == 1) {
         uint32_t h = ntohl(ia.s_addr);
         if ((g_have_pod_cidr && (h & g_pod_mask) == g_pod_base) ||
             (g_have_svc_cidr && (h & g_svc_mask) == g_svc_base)) {
-            out->kind = SPNL_PEER_CLUSTER;   /* cluster 内だが名前不明 (node gw 等) */
+            out->kind = SPNL_PEER_CLUSTER;   /* inside the cluster but unnamed (a node gateway, say) */
             return out->kind;
         }
         out->kind = SPNL_PEER_EXTERNAL;
@@ -150,7 +153,7 @@ int spnl_peer_classify(const char *addr, spnl_peer_t *out) {
         return out->kind;
     }
 
-    /* IPv4 でない (真の IPv6)。マップ外なら外部扱い。 */
+    /* Not IPv4, so genuinely IPv6. Absent from the map means external. */
     out->kind = SPNL_PEER_EXTERNAL;
     return out->kind;
 }
@@ -175,7 +178,7 @@ int spnl_peer_fill_attrs(const spnl_peer_t *p, otlp_kv_t *attrs, int max) {
                        snprintf(attrs[n].val, sizeof attrs[n].val, "true"); n++; }
         PUT("peer.hostname", p->hostname);
         break;
-    default:  /* NONE / LOOPBACK / CLUSTER: identity 無し = 属性を足さない (正直に no-op) */
+    default:  /* NONE, LOOPBACK, CLUSTER: no identity, so add nothing at all */
         break;
     }
     #undef PUT

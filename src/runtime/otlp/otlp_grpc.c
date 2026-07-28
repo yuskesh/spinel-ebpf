@@ -1,11 +1,11 @@
 /*
- * otlp_grpc.c — 最小 HTTP/2 unary gRPC クライアント
- * 詳細は otlp_grpc.h を参照。HPACK は encode のみ (literal、Huffman/dynamic table なし)。
+ * otlp_grpc.c -- a minimal HTTP/2 unary gRPC client. See otlp_grpc.h.
+ * HPACK is encode-only here: literals, with no Huffman coding and no dynamic table.
  */
 #include "otlp_grpc.h"
-#include "otlp_http.h"   /* otlp_http_post / otlp_http_parse_endpoint (HTTP 経路) */
+#include "otlp_http.h"   /* otlp_http_post / otlp_http_parse_endpoint, for the HTTP path */
 #ifdef OTLP_WITH_TLS
-#include "otlp_tls.h"    /* ADR-013 T2: grpcs:// (gRPC over TLS) — gated */
+#include "otlp_tls.h"    /* grpcs://, gRPC over TLS; only in an OTLP_WITH_TLS build */
 #endif
 
 #include <errno.h>
@@ -54,7 +54,7 @@ static int read_full(int fd, void *buf, size_t len) {
     return 0;
 }
 
-/* TLS handle (tls_h) があれば TLS、無ければ raw fd で I/O (ADR-013 T2、gated)。 */
+/* Do I/O over TLS when tls_h is present, and over the raw fd otherwise. */
 static int io_write_all(void *tls_h, int fd, const void *buf, size_t len) {
 #ifdef OTLP_WITH_TLS
     if (tls_h) return otlp_tls_write((otlp_tls_t *)tls_h, buf, len);
@@ -99,7 +99,8 @@ static int send_frame(void *tls_h, int fd, uint32_t len, uint8_t type, uint8_t f
     return 0;
 }
 
-/* HPACK 7-bit-prefix 整数 (H=0) で文字列長を書く (>=127 も対応 → 長い auth token 可)。 */
+/* Write a string length as an HPACK 7-bit-prefix integer with H=0, handling
+ * lengths of 127 and above so that long authentication tokens work. */
 static int hpack_strlen(uint8_t *buf, size_t cap, size_t *off, size_t len) {
     if (len < 127) {
         if (*off + 1 > cap) return -1;
@@ -119,7 +120,8 @@ static int hpack_strlen(uint8_t *buf, size_t cap, size_t *off, size_t len) {
     return 0;
 }
 
-/* HPACK: literal header field without indexing, new name, no Huffman。任意長 (auth token 等)。 */
+/* HPACK literal header field without indexing, new name, no Huffman. Any length,
+ * which is what an authentication token needs. */
 static int hpack_lit(uint8_t *buf, size_t cap, size_t *off, const char *name, const char *val) {
     size_t nl = strlen(name), vl = strlen(val);
     if (*off + 1 > cap) return -1;
@@ -166,15 +168,15 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
     }
     if (fd < 0) return -1;
 
-    /* recv にタイムアウト (応答待ちでハングしない) */
+    /* Put a timeout on recv so waiting for a response cannot hang. */
     struct timeval tv = { 5, 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
-    /* grpcs:// は HTTP/2 preface の前に TLS handshake (gated) */
+    /* For grpcs://, the TLS handshake happens before the HTTP/2 preface. */
     void *tls_h = NULL;
     if (tls) {
 #ifdef OTLP_WITH_TLS
-        tls_h = otlp_tls_connect(fd, host, "h2" /* gRPC-over-TLS は ALPN h2 必須 */, err, errlen);
+        tls_h = otlp_tls_connect(fd, host, "h2" /* gRPC over TLS requires ALPN h2 */, err, errlen);
         if (!tls_h) { io_close(tls_h, fd); return -1; }
 #else
         set_err(err, errlen, "TLS (grpcs://) not compiled in — rebuild with mbedTLS (OTLP_WITH_TLS)");
@@ -182,18 +184,20 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
 #endif
     }
 
-    /* 1) preface + 2) 空 SETTINGS */
+    /* 1) the preface, 2) an empty SETTINGS frame */
     if (io_write_all(tls_h, fd, H2_PREFACE, sizeof H2_PREFACE - 1) || send_frame(tls_h, fd, 0, H2_SETTINGS, 0, 0, NULL)) {
         set_err(err, errlen, "send preface/settings failed"); io_close(tls_h, fd); return -1;
     }
 
-    /* gzip 有効時は body を圧縮 (grpc-encoding: gzip + compressed-flag=1) */
+    /* When gzip is enabled, compress the body: grpc-encoding: gzip, and the
+     * compressed flag set on the message. */
     static uint8_t gzbuf[1 << 18];
     const uint8_t *gb = body; size_t gl = body_len; size_t gzlen = 0;
     int gzipped = otlp_gzip_if_enabled(body, body_len, gzbuf, sizeof gzbuf, &gzlen);
     if (gzipped) { gb = gzbuf; gl = gzlen; }
 
-    /* 3) HEADERS (pseudo-headers 先 + content-type/te + 任意 grpc-encoding/auth) */
+    /* 3) HEADERS: pseudo-headers first, then content-type and te, then any
+     * grpc-encoding and authentication headers. */
     char authority[300];
     snprintf(authority, sizeof authority, "%s:%s", host, port);
     uint8_t hb[4096]; size_t ho = 0;
@@ -206,7 +210,8 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
         (gzipped && hpack_lit(hb, sizeof hb, &ho, "grpc-encoding", "gzip"))) {
         set_err(err, errlen, "hpack build failed"); io_close(tls_h, fd); return -1;
     }
-    /* OTEL_EXPORTER_OTLP_HEADERS の auth ヘッダ (HTTP/2 は小文字キー必須) */
+    /* Authentication headers from OTEL_EXPORTER_OTLP_HEADERS. HTTP/2 requires
+     * lowercase field names. */
     {
         otlp_kv_t hdrs[16];
         int nh = otlp_env_headers(hdrs, 16);
@@ -226,7 +231,8 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
         set_err(err, errlen, "send headers failed"); io_close(tls_h, fd); return -1;
     }
 
-    /* 4) DATA: gRPC length-prefixed message (END_STREAM)。gzip 時は compressed-flag=1。 */
+    /* 4) DATA: the gRPC length-prefixed message, with END_STREAM. The compressed
+     * flag is set when the body was gzipped. */
     {
         size_t mlen = 5 + gl;
         uint8_t *msg = (uint8_t *)malloc(mlen);
@@ -239,7 +245,8 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
         if (rc) { set_err(err, errlen, "send data failed"); io_close(tls_h, fd); return -1; }
     }
 
-    /* 5) 応答 frame を読む: SETTINGS は ACK、PING は ACK、stream1 の END_STREAM で完了。 */
+    /* 5) Read response frames: acknowledge SETTINGS and PING, and treat
+     * END_STREAM on stream 1 as completion. */
     uint8_t fh[9];
     static uint8_t fpayload[16384 + 1];
     int done = 0, err_seen = 0, guard = 0;
@@ -249,7 +256,7 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
         uint32_t flen = get_be24(fh);
         uint8_t ftype = fh[3], fflags = fh[4];
         uint32_t fsid = get_be32(fh + 5) & 0x7fffffff;
-        if (flen > sizeof fpayload - 1) { /* 大きすぎる: 読み飛ばし */
+        if (flen > sizeof fpayload - 1) { /* too large to hold: skip past it */
             uint32_t left = flen; char dump[1024];
             while (left) { size_t c = left > sizeof dump ? sizeof dump : left; if (io_read_full(tls_h, fd, dump, c)) { left = 0; break; } left -= (uint32_t)c; }
             continue;
@@ -272,7 +279,7 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
         case H2_DATA:
             if (fsid == 1 && (fflags & H2_FLAG_END_STREAM)) done = 1;
             break;
-        default: break; /* WINDOW_UPDATE 等は無視 */
+        default: break; /* WINDOW_UPDATE and friends are ignored */
         }
     }
     io_close(tls_h, fd);
@@ -280,8 +287,9 @@ int otlp_grpc_export(const char *host, const char *port, const char *grpc_path,
     return 0;
 }
 
-/* http_path ("/v1/traces" 等) から対応する per-signal endpoint env 名を返す。
- * OTel 標準: OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT。無ければ NULL。 */
+/* Map an http_path such as "/v1/traces" to the matching per-signal endpoint
+ * environment variable -- OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT --
+ * or NULL when there is none. */
 static const char *otlp_signal_endpoint_env(const char *http_path) {
     if (!http_path) return NULL;
     if (strstr(http_path, "traces"))  return "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
@@ -293,19 +301,21 @@ static const char *otlp_signal_endpoint_env(const char *http_path) {
 int otlp_transport_send(const char *endpoint, const char *http_path, const char *grpc_path,
                         const char *content_type,
                         const uint8_t *body, size_t body_len, int *status, char *err, size_t errlen) {
-    /* OTel per-signal endpoint override。OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT が
-     * 設定されていたら base endpoint を上書きし、その値を verbatim で使う —
-     * URL の path を honor し、/v1/<signal> を付け足さない (OTel 仕様)。
-     * 未設定なら従来どおり base endpoint + 呼び出し元の http_path (後方互換)。 */
+    /* Per-signal endpoint override. When OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT is
+     * set it replaces the base endpoint and is used verbatim: its path is honoured
+     * and /v1/<signal> is not appended, as the specification requires. Unset, the
+     * base endpoint and the caller's http_path are used as before. */
     char sig_path[512];
     const char *sig_env = otlp_signal_endpoint_env(http_path);
     const char *sig_ep  = sig_env ? getenv(sig_env) : NULL;
     if (sig_ep && sig_ep[0]) {
         endpoint = sig_ep;
         if (otlp_http_endpoint_path(sig_ep, sig_path, sizeof sig_path) == 0 && sig_path[0])
-            http_path = sig_path;   /* path 込みで verbatim (例 Splunk /v2/trace/otlp) */
+            http_path = sig_path;   /* verbatim, path included -- some vendors use
+                                       their own, such as /v2/trace/otlp */
         else
-            http_path = "/";        /* per-signal で path 無し: root、/v1/<signal> は付けない */
+            http_path = "/";        /* a per-signal endpoint with no path means root;
+                                       /v1/<signal> is still not appended */
     }
 
     char host[256], port[16];
@@ -322,7 +332,7 @@ int otlp_transport_send(const char *endpoint, const char *http_path, const char 
         if (status) *status = ok ? 200 : 0;
         return 0;
     }
-    /* http:// / https:// (https は tls=1、要 OTLP_WITH_TLS ビルド) */
+    /* http:// and https://; https sets tls=1 and needs an OTLP_WITH_TLS build. */
     return otlp_http_post(host, port, http_path,
                           content_type ? content_type : "application/x-protobuf",
                           body, body_len, tls, 0, status, err, errlen);

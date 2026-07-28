@@ -1,4 +1,4 @@
-/* otlp_k8s.c — cgroup_id -> k8s pod 解決。詳細は otlp_k8s.h。 */
+/* otlp_k8s.c -- resolve a cgroup id to its Kubernetes pod. See otlp_k8s.h. */
 #include "otlp_k8s.h"
 #include <stdio.h>
 #include <string.h>
@@ -7,7 +7,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-/* パス中の "kubepods" 以降を "/" で分解し {qos, pod_uid, container_id} を得る。 */
+/* Split the part of the path from "kubepods" onwards on "/" to obtain
+ * {qos, pod_uid, container_id}. */
 int spnl_k8s_parse_kubepods_path(const char *cgroup_path, spnl_k8s_pod_t *out)
 {
     if (!cgroup_path || !out) return 0;
@@ -16,26 +17,29 @@ int spnl_k8s_parse_kubepods_path(const char *cgroup_path, spnl_k8s_pod_t *out)
     const char *kp = strstr(cgroup_path, "kubepods");
     if (!kp) return 0;
 
-    /* kubepods 以降をコピーして "/" で分解 (systemd の ".slice"/".scope" 接尾辞も剥がす)。 */
+    /* Copy from "kubepods" onwards and split on "/", stripping the systemd
+     * ".slice" and ".scope" suffixes as we go. */
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", kp);
 
     char *save = NULL;
     for (char *tok = strtok_r(buf, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
-        /* systemd 形の接尾辞を除去 (kubepods-burstable-pod<UID>.slice / cri-*-<id>.scope)。 */
+        /* Drop the systemd suffixes: kubepods-burstable-pod<UID>.slice,
+         * cri-*-<id>.scope. */
         char comp[512];
         snprintf(comp, sizeof comp, "%s", tok);
         char *dot = strrchr(comp, '.');
         if (dot && (!strcmp(dot, ".slice") || !strcmp(dot, ".scope"))) *dot = '\0';
 
-        /* qos クラス。 */
+        /* The QoS class. */
         if (!strcmp(comp, "besteffort") || !strcmp(comp, "burstable") || !strcmp(comp, "guaranteed")) {
             snprintf(out->qos, sizeof out->qos, "%s", comp);
             continue;
         }
-        /* systemd 形 "kubepods-burstable-pod<UID>" -> pod トークンへ縮約。
-         * "kubepods" 内の "pod" を誤検出しないよう、行頭 or '-' の直後で、かつ直後が
-         * hex (UID の先頭) の "pod" だけを採用する。 */
+        /* Reduce the systemd form "kubepods-burstable-pod<UID>" to the pod token.
+         * To avoid matching the "pod" inside "kubepods", only accept a "pod" that
+         * begins the string or follows a '-', and is itself followed by a hex
+         * digit -- the start of the UID. */
         const char *podp = NULL;
         for (const char *sp = comp; (sp = strstr(sp, "pod")); sp += 3) {
             char after = sp[3];
@@ -44,21 +48,21 @@ int spnl_k8s_parse_kubepods_path(const char *cgroup_path, spnl_k8s_pod_t *out)
             if ((sp == comp || before == '-') && hexish) { podp = sp; break; }
         }
         if (podp) {
-            /* qos が prefix に埋まっている場合も拾う。 */
+            /* Pick up the QoS class when it is embedded in the prefix. */
             if (!out->qos[0]) {
                 if (strstr(comp, "burstable"))  snprintf(out->qos, sizeof out->qos, "burstable");
                 else if (strstr(comp, "besteffort")) snprintf(out->qos, sizeof out->qos, "besteffort");
                 else if (strstr(comp, "guaranteed")) snprintf(out->qos, sizeof out->qos, "guaranteed");
             }
             snprintf(out->pod_uid, sizeof out->pod_uid, "%s", podp + 3);
-            /* UID の区切りを正規化 (systemd の '_' -> '-')。 */
+            /* Normalise the UID separators: systemd writes '_' where the API says '-'. */
             for (char *c = out->pod_uid; *c; c++) if (*c == '_') *c = '-';
             continue;
         }
-        /* pod_uid が確定済で、これ以上分解要素があれば container id。 */
+        /* Once pod_uid is known, any further component is the container id. */
         if (out->pod_uid[0] && !out->container_id[0]) {
             const char *cid = comp;
-            /* systemd 形 "cri-containerd-<id>" / "docker-<id>" の prefix を剥がす。 */
+            /* Strip the systemd prefixes "cri-containerd-<id>" and "docker-<id>". */
             const char *dash = strrchr(comp, '-');
             if (dash && strlen(dash + 1) >= 32) cid = dash + 1;
             snprintf(out->container_id, sizeof out->container_id, "%s", cid);
@@ -69,7 +73,7 @@ int spnl_k8s_parse_kubepods_path(const char *cgroup_path, spnl_k8s_pod_t *out)
     return out->found;
 }
 
-/* cgroup_root 以下を再帰 walk して inode == cgid のディレクトリを見つける。 */
+/* Walk cgroup_root recursively looking for the directory whose inode is cgid. */
 static int walk_find(const char *dir, uint64_t cgid, char *outpath, size_t outcap)
 {
     DIR *d = opendir(dir);
@@ -102,11 +106,11 @@ int spnl_k8s_lookup_by_cgroup_id(uint64_t cgid, const char *cgroup_root, spnl_k8
     memset(out, 0, sizeof *out);
     const char *root = cgroup_root ? cgroup_root : "/sys/fs/cgroup";
     char path[1024] = {0};
-    /* まず kubepods 直下に限定して walk (速い・誤検出を避ける)。 */
+    /* Search under kubepods first: it is faster, and avoids false matches. */
     char kroot[1024];
     snprintf(kroot, sizeof kroot, "%s/kubepods", root);
     if (!walk_find(kroot, cgid, path, sizeof path)) {
-        /* systemd 形 kubepods.slice も試す。 */
+        /* Try the systemd spelling, kubepods.slice, as well. */
         snprintf(kroot, sizeof kroot, "%s/kubepods.slice", root);
         if (!walk_find(kroot, cgid, path, sizeof path)) return 0;
     }
@@ -121,7 +125,8 @@ int spnl_k8s_resolve_name(spnl_k8s_pod_t *p, const char *uidmap_file)
     char line[640];
     int hit = 0;
     while (fgets(line, sizeof line, f)) {
-        /* 形式 (後方互換): "<uid> <namespace>/<name> [<deployment> <service>]" */
+        /* The line format, extended backward-compatibly:
+         * "<uid> <namespace>/<name> [<deployment> <service>]" */
         char uid[64], nsname[400], depl[256] = "", svc[256] = "";
         int nf = sscanf(line, "%63s %399s %255s %255s", uid, nsname, depl, svc);
         if (nf < 2) continue;
@@ -134,7 +139,8 @@ int spnl_k8s_resolve_name(spnl_k8s_pod_t *p, const char *uidmap_file)
         } else {
             snprintf(p->pod_name, sizeof p->pod_name, "%s", nsname);
         }
-        /* 3/4 列目 (workload/service)。"-" or 空はプレースホルダ (未解決) として無視。 */
+        /* Columns three and four, the workload and Service. A "-" or an empty
+         * value is a placeholder for "not resolved", and is ignored. */
         if (nf >= 3 && depl[0] && strcmp(depl, "-") != 0)
             snprintf(p->deployment, sizeof p->deployment, "%s", depl);
         if (nf >= 4 && svc[0] && strcmp(svc, "-") != 0)
@@ -156,9 +162,10 @@ int spnl_k8s_fill_attrs(const spnl_k8s_pod_t *p, otlp_kv_t *attrs, int max)
     PUT("k8s.namespace.name", p->namespace_);
     PUT("k8s.pod.name",       p->pod_name);
     PUT("k8s.pod.uid",        p->pod_uid);
-    PUT("k8s.container.name", p->container_id);  /* MVP: container id (CRI 名解決は E303) */
-    PUT("k8s.deployment.name", p->deployment);   /* E310: owning workload (uid マップ 3 列目) */
-    PUT("k8s.service.name",    p->service);       /* E310: 発信元 Service (uid マップ 4 列目) */
+    PUT("k8s.container.name", p->container_id);  /* the container id; the CRI enricher
+                                                    rewrites this to a real name */
+    PUT("k8s.deployment.name", p->deployment);   /* owning workload, uid map column 3 */
+    PUT("k8s.service.name",    p->service);      /* originating Service, uid map column 4 */
     #undef PUT
     return n;
 }

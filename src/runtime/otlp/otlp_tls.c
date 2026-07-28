@@ -1,6 +1,6 @@
 /*
- * otlp_tls.c — mbedTLS による OTLP egress 用 TLS クライアント (ADR-013 T0/T1)
- * 詳細は otlp_tls.h を参照。connected fd の上に TLS を被せる薄い層。
+ * otlp_tls.c -- the mbedTLS-backed TLS client for OTLP egress. See otlp_tls.h.
+ * A thin layer that wraps TLS around an already-connected fd.
  */
 #include "otlp_tls.h"
 
@@ -19,20 +19,21 @@
 #include <mbedtls/error.h>
 
 struct otlp_tls {
-    int fd;                          /* 所有権は呼び出し側 (close しない) */
+    int fd;                          /* owned by the caller; never closed here */
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
     mbedtls_ctr_drbg_context drbg;
     mbedtls_entropy_context entropy;
     mbedtls_x509_crt cacert;
-    mbedtls_x509_crt clicert;        /* mTLS: client 証明書 */
-    mbedtls_pk_context pkey;         /* mTLS: client 秘密鍵 */
-    const char *alpn_protos[2];      /* ALPN リスト (mbedtls は handshake 中に参照、struct で延命) */
+    mbedtls_x509_crt clicert;        /* client certificate, for mutual TLS */
+    mbedtls_pk_context pkey;         /* client private key, for mutual TLS */
+    const char *alpn_protos[2];      /* the ALPN list. mbedTLS reads it during the
+                                        handshake, so it lives in the struct */
 };
 
 static void set_err(char *err, size_t n, const char *m) { if (err && n) snprintf(err, n, "%s", m); }
 
-/* BIO: blocking fd 上の send/recv (EINTR は再試行、EAGAIN は WANT_*) */
+/* BIO: send and recv on a blocking fd. EINTR retries; EAGAIN maps to WANT_*. */
 static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     int fd = *(int *)ctx;
     for (;;) {
@@ -54,7 +55,8 @@ static int net_recv(void *ctx, unsigned char *buf, size_t len) {
     }
 }
 
-/* system CA bundle を順に試して cacert に読む。読めた本数を返す。 */
+/* Try the usual system CA bundle locations in turn, loading into cacert.
+ * Returns how many certificates were read. */
 static int load_system_ca(mbedtls_x509_crt *cacert) {
     static const char *const paths[] = {
         "/etc/ssl/certs/ca-certificates.crt",   /* Debian/Ubuntu/Alpine */
@@ -91,7 +93,8 @@ otlp_tls_t *otlp_tls_connect(int fd, const char *hostname, const char *alpn, cha
         set_err(err, errlen, "ssl_config_defaults failed"); goto fail;
     }
 
-    /* ALPN (gRPC-over-TLS は "h2" 必須)。配列は struct で延命させる。 */
+    /* ALPN: gRPC over TLS requires "h2". The array must outlive this call, so it
+     * lives in the struct. */
     if (alpn) {
         t->alpn_protos[0] = alpn;
         t->alpn_protos[1] = NULL;
@@ -117,8 +120,9 @@ otlp_tls_t *otlp_tls_connect(int fd, const char *hostname, const char *alpn, cha
         mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     }
 
-    /* mTLS (client cert)。両 env が揃ったときだけ client 証明書を提示する。
-     * OTel 標準 env: OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE / OTEL_EXPORTER_OTLP_CLIENT_KEY。 */
+    /* Mutual TLS: present a client certificate only when both environment
+     * variables are set. These are the standard OpenTelemetry names,
+     * OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE and OTEL_EXPORTER_OTLP_CLIENT_KEY. */
     const char *ccert = getenv("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE");
     const char *ckey  = getenv("OTEL_EXPORTER_OTLP_CLIENT_KEY");
     if (ccert && ccert[0] && ckey && ckey[0]) {
@@ -139,7 +143,7 @@ otlp_tls_t *otlp_tls_connect(int fd, const char *hostname, const char *alpn, cha
     if ((ret = mbedtls_ssl_setup(&t->ssl, &t->conf)) != 0) {
         set_err(err, errlen, "ssl_setup failed"); goto fail;
     }
-    if ((ret = mbedtls_ssl_set_hostname(&t->ssl, hostname)) != 0) {  /* SNI + 検証名 */
+    if ((ret = mbedtls_ssl_set_hostname(&t->ssl, hostname)) != 0) {  /* SNI, and the name verified against the certificate */
         set_err(err, errlen, "ssl_set_hostname failed"); goto fail;
     }
     mbedtls_ssl_set_bio(&t->ssl, &t->fd, net_send, net_recv, NULL);

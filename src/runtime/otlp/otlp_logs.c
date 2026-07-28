@@ -1,6 +1,5 @@
 /*
- * otlp_logs.c — emit イベント -> OTLP logs エンコーダ
- * 詳細は otlp_logs.h を参照。
+ * otlp_logs.c -- encode emitted events as OTLP logs. See otlp_logs.h.
  */
 #include "otlp_logs.h"
 #include "otlp_pbutil.h"  /* otlp_enc_string / otlp_enc_one_sub / otlp_resource_t */
@@ -14,7 +13,7 @@ typedef struct {
     const otlp_log_record_t *recs; size_t n;
 } log_ctx_t;
 
-/* ScopeLogs.log_records: LogRecord 群 (arg = log_ctx_t*) */
+/* ScopeLogs.log_records: the LogRecords; arg is a log_ctx_t*. */
 static bool enc_log_records(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const log_ctx_t *c = (const log_ctx_t *)(*arg);
     for (size_t i = 0; i < c->n; i++) {

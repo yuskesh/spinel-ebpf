@@ -1,10 +1,10 @@
-/* otlp_cri.c — cgroup_id -> CRI container 名の解決。詳細は otlp_cri.h。 */
+/* otlp_cri.c -- resolve a cgroup id to its CRI container name. See otlp_cri.h. */
 #include "otlp_cri.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-/* ---- CRIMAP (cgid -> container 名) ---- */
+/* ---- the CRI map: cgroup id -> container name ---- */
 typedef struct { uint64_t cgid; char name[256]; } cri_ent_t;
 
 static cri_ent_t *g_map = NULL;
@@ -21,7 +21,7 @@ static void map_add(uint64_t cgid, const char *name) {
     g_map_n++;
 }
 
-/* SPNL_K8S_CRIMAP を 1 度だけ読む (uidmap/ipmap と同じ lazy one-shot)。 */
+/* Read SPNL_K8S_CRIMAP once, lazily, the same way the uid and ip maps are read. */
 static void lazy_init(void) {
     if (g_inited >= 0) return;
     const char *crimap = getenv("SPNL_K8S_CRIMAP");
@@ -33,7 +33,8 @@ static void lazy_init(void) {
         while (fgets(line, sizeof line, f)) {
             unsigned long long cgid = 0;
             char name[256];
-            /* 行形式 "<cgid> <container_name>" (cgid = leaf cgroup inode、10 進)。 */
+            /* Lines are "<cgid> <container_name>", where cgid is the leaf cgroup
+             * inode in decimal. */
             if (sscanf(line, "%llu %255s", &cgid, name) == 2 && cgid != 0)
                 map_add((uint64_t)cgid, name);
         }
