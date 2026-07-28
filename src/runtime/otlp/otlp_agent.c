@@ -1,6 +1,6 @@
 /*
- * otlp_agent.c — `--instrument` agent の OTLP push 実装
- * 詳細は otlp_agent.h を参照。
+ * otlp_agent.c -- the OTLP push implementation behind an --instrument agent.
+ * See otlp_agent.h.
  */
 #include "otlp_agent.h"
 #include "otlp_metrics.h"
@@ -9,24 +9,30 @@
 #include "otlp_http.h"
 #include "otlp_grpc.h"   /* otlp_transport_send (http/grpc routing) + gRPC service paths */
 #include "otlp_json.h"   /* otlp_want_json / otlp_endpoint_is_grpc / otlp_json_*_build */
-#include "otlp_enrich.h" /* E313: 層 2 enricher レジストリ (k8s / peer を registry 経由に) */
+#include "otlp_enrich.h" /* the enricher registry, through which k8s and peer are applied */
 #include "spnl_runtime.h"   /* spnl_log2_hist_count_keyed_obj / spnl_hist_buckets_keyed_obj, __u64 */
-#include "spnl/types.h"     /* struct spnl_event_hdr (record の型付き decode、E263 G2) */
-/* S2/E369: ringbuf record の userspace mirror。kernel の producer struct と同じ宣言
- * (src/codegen_c/record_schema.h) から生成された derived artifact — offset は計算済で、
- * ここに `data + H + 88` のような手書き定数はもう無い (再生成は make -C src/codegen_c mirror)。
+#include "spnl/types.h"     /* struct spnl_event_hdr, for decoding records by type */
+/* The userspace mirror of the ringbuf records. It is generated from the same
+ * declaration as the kernel producer structs (src/codegen_c/record_schema.h), so
+ * the offsets are computed rather than written: there is no hand-maintained
+ * `data + H + 88` anywhere below. Regenerate it with `make -C src/codegen_c mirror`.
  *
- * S4/E371: SPNL_REC_CONSUME_IMPL を定義して include すると、生成ヘッダは型付き consumer の
- * accessor (`spnl_rec_dns_qname` 等 = Ruby の `ev.qname` の実体) も**この TU に**定義する。
- * その代わり本 TU が spnl_rec_<id>_at() と宣言された derivation (spnl_dns_qname) を持つ責任を
- * 負う (どちらも下方で定義。欠けたら link error = silent な誤値にならない)。 */
+ * Including it with SPNL_REC_CONSUME_IMPL defined also puts the typed-consumer
+ * accessors -- spnl_rec_dns_qname and friends, which are what Ruby's `ev.qname`
+ * actually calls -- into *this* translation unit. In exchange this file must
+ * provide spnl_rec_<id>_at() and every declared derivation such as spnl_dns_qname;
+ * both are defined below. Omitting one is a link error rather than a silently
+ * wrong value. */
 #define SPNL_REC_CONSUME_IMPL 1
 #include "record_mirror_gen.h"
 
-/* 宣言された derivation の出力は span 属性の値バッファにも入る。両者は別の層
- * (契約 = 表 / 送信器 = otlp_http.h) にあるので、「収まる」ことをここで機械検査する
- * — 収まらなければ属性側だけが黙って切り詰められ、E377 が消した「同じ関数・違う幅」が
- * 別の姿で戻ってくる。cap を広げるときに落ちるのが正しい (器を先に広げよ)。 */
+/* Whatever a declared derivation produces also has to fit the value buffer of a
+ * span attribute. Those two live in different layers -- the record contract on one
+ * side, the transport's attribute type on the other -- so the fit is checked here
+ * mechanically. Without the check, only the attribute would be truncated, silently,
+ * and the "same function, two different widths" bug would come back wearing a new
+ * hat. Widening a cap past the buffer is meant to fail this: widen the buffer
+ * first. */
 #define SPNL_ATTR_VAL_CAP (sizeof(((otlp_kv_t *)0)->val))
 _Static_assert(SPNL_REC_DERIVED_DNS_QNAME_CAP      <= SPNL_ATTR_VAL_CAP, "ev.qname does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_CONN_PEER_CAP      <= SPNL_ATTR_VAL_CAP, "ev.peer does not fit in an attribute value");
@@ -36,10 +42,12 @@ _Static_assert(SPNL_REC_DERIVED_HTTP_PATH_CAP      <= SPNL_ATTR_VAL_CAP, "ev.pat
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_METHOD_CAP  <= SPNL_ATTR_VAL_CAP, "offcpu ev.method does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_PATH_CAP    <= SPNL_ATTR_VAL_CAP, "offcpu ev.path does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP <= SPNL_ATTR_VAL_CAP, "ev.wait_kind does not fit in an attribute value");
-/* offcpu と http は method/path について**同じ derivation**を共有する。両 channel が
- * それぞれ自分の bound を宣言するのは正しい (cap はその derivation の上限であって共有定数ではない、
- * E378) が、共有された関数に 2 つの違う幅が渡ると E377 の「同じ関数・違う幅」がそのまま戻る。
- * 源のフィールド幅が同じである限り 2 つの宣言は同じ数でなければならない — それをここで固定する。 */
+/* The off-CPU and HTTP channels share the *same* derivation for method and path.
+ * Each declaring its own bound is right -- a cap belongs to a derivation, it is not
+ * a shared constant -- but handing one shared function two different widths brings
+ * the "same function, two different widths" bug straight back. As long as the
+ * source fields are the same width, the two declarations must agree, and this
+ * pins that down. */
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_METHOD_CAP == SPNL_REC_DERIVED_HTTP_METHOD_CAP,
                "offcpu and http declare different caps for the shared derivation spnl_http_method()");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_PATH_CAP == SPNL_REC_DERIVED_HTTP_PATH_CAP,
@@ -47,11 +55,11 @@ _Static_assert(SPNL_REC_DERIVED_OFFCPU_PATH_CAP == SPNL_REC_DERIVED_HTTP_PATH_CA
 
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>         /* getenv (E293 audit span service.name) */
+#include <stdlib.h>         /* getenv, for the audit span's service.name */
 #include <string.h>
 #include <time.h>
 #include <unistd.h>         /* getpid (id seed) */
-#include <arpa/inet.h>      /* inet_ntop (E294 network.peer.address) */
+#include <arpa/inet.h>      /* inet_ntop, for network.peer.address */
 #include <bpf/libbpf.h>     /* ring_buffer (trace events drain) */
 #include <bpf/bpf.h>
 
@@ -98,14 +106,16 @@ int spnl_otlp_add_method(const char *ruby, const char *file, long long line, lon
 int spnl_otlp_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint) {
     if (!obj || !map_name || !endpoint) return -1;
 
-    /* static: メソッド多数でも stack を食わない (各 otlp_method_metric_t は buckets[64] で ~520B) */
+    /* static so that many methods do not eat the stack: each otlp_method_metric_t
+     * carries buckets[64], about 520 bytes. */
     static otlp_method_metric_t mm[OTLP_MAX_METHODS];
     size_t n = 0;
     for (int i = 0; i < g_nmethods; i++) {
         unsigned long long key = (unsigned long long)g_methods[i].idx;
         __u64 count = 0;
-        /* runtime は __u64 (unsigned long long)、otlp_method_metric_t.buckets は uint64_t。
-         * Linux では別型 (long long vs long) なので temp で受けて memcpy (alias 安全)。 */
+        /* The runtime uses __u64 (unsigned long long) while the metric struct uses
+         * uint64_t. On Linux those are distinct types, so read into a temporary and
+         * memcpy across rather than aliasing. */
         __u64 buckets[64] = {0};
         spnl_log2_hist_count_keyed_obj(obj, map_name, key, &count);
         spnl_hist_buckets_keyed_obj(obj, map_name, key, buckets);
@@ -132,11 +142,12 @@ int spnl_otlp_push_obj(struct bpf_object *obj, const char *map_name, const char 
     return status;
 }
 
-/* ---- 共通 drain / 時刻 (P003 R1, E263 G2) ---- */
+/* ---- shared ringbuf draining and time conversion ---- */
 
-/* emit 系 ringbuf を全 drain (records は呼出前に buffer 済)。0/-1。
- * poll_ms は 1 回の poll 待ち時間 (0 = 非ブロッキング)。S4/E371 の typed consumer が
- * Ruby から待ち時間を渡せるように分離しただけで、既存経路は従来どおり 100ms。 */
+/* Drain an emit ringbuf completely; records are buffered by the caller. Returns 0
+ * or -1. poll_ms is how long a single poll waits, with 0 meaning non-blocking. It
+ * is a parameter only so a typed consumer can pass a wait from Ruby; every other
+ * caller still uses 100ms. */
 static int otlp_drain_ms(struct bpf_object *obj, const char *map_name,
                          ring_buffer_sample_fn cb, void *ctx, int poll_ms) {
     struct bpf_map *m = bpf_object__find_map_by_name(obj, map_name);
@@ -155,7 +166,7 @@ static int otlp_drain(struct bpf_object *obj, const char *map_name,
     return otlp_drain_ms(obj, map_name, cb, ctx, 100);
 }
 
-/* ktime(monotonic) -> unix nano の加算オフセット (= realtime - monotonic) */
+/* The offset added to a monotonic ktime to get unix nanoseconds: realtime minus monotonic. */
 static int64_t otlp_ktime_to_unix_off(void) {
     struct timespec rt, mono;
     clock_gettime(CLOCK_REALTIME, &rt);
@@ -164,50 +175,56 @@ static int64_t otlp_ktime_to_unix_off(void) {
          - ((int64_t)mono.tv_sec * 1000000000LL + mono.tv_nsec);
 }
 
-/* ---- E304/E310/E313: span 属性の enrich は層 2 enricher レジストリ (otlp_enrich) に集約 ---- */
-/* 各 span push 経路は record から必要な入力 (cgid / peer address / signal 種別) を
- * otlp_enrich_ctx_t に詰めて otlp_enrich_run() を 1 回呼ぶ。登録済み enricher
- * (k8s=cgroup_id->k8s.* / peer=network.peer.address->peer.*) が signal_mask で判定され
- * 順に適用される (k8s は全経路、peer は conn のみ)。適用条件を満たさなければ hard no-op
- * (span byte は E304/E310 導入前と同一)。詳細・将来の enricher 追加は otlp_enrich.h。 */
+/* ---- attribute enrichment goes through the registry in otlp_enrich ---- */
+/* Every span push path packs what it has -- a cgroup id, a peer address, which
+ * signal it is -- into an otlp_enrich_ctx_t and calls otlp_enrich_run() once. The
+ * registered enrichers are then filtered by signal mask and applied in order: the
+ * Kubernetes one everywhere, the peer one only for connections. An enricher whose
+ * preconditions do not hold adds nothing, leaving the span exactly as it was. See
+ * otlp_enrich.h for the details, and for how to add another. */
 
-/* ---- E308: span バッチ化 (「1 record = 1 POST」を潰す) ---- */
-/* 各 span-push 経路 (dns/conn/l7/http/offcpu/audit) はこれまで record ごとに span を組んで
- * 即 POST していた (高頻度イベントで小 POST が大量に出る)。ここで span を deep-copy して積み、
- * (a) batch_max 件たまったら、または (b) drain サイクルの最後 (各 push 関数末尾) で 1 POST に
- * まとめて送る funnel を用意する。全経路が otlp_generic_span_t を組むので 1 ヘルパで一斉に効く。
+/* ---- span batching, so that one record does not mean one POST ---- */
+/* Each span push path -- dns, conn, l7, http, offcpu, audit -- used to build a span
+ * per record and POST it immediately, which turns a high-frequency event into a
+ * flood of tiny requests. This funnel deep-copies spans into a buffer and sends
+ * them as a single POST either when batch_max have accumulated or at the end of a
+ * drain cycle. Every path builds an otlp_generic_span_t, so one helper covers them
+ * all at once.
  *
- * 混在可否: resource 属性 (service.*) は全 span 共通、k8s.* 等は **span 属性** なので
- * 別 pod の span を同じ ResourceSpans に混ぜてよい (otlp_traces_generic_build_multi が
- * 1 ResourceSpans/ScopeSpans に repeated Span を並べる)。
+ * Mixing is legitimate: the resource attributes (service.*) are common to every
+ * span, while per-pod facts such as k8s.* are span attributes, so spans from
+ * different pods can share one ResourceSpans.
  *
- * 後方互換: env SPNL_OTLP_BATCH_MAX=1 で 1 span=1 POST に戻る (body は multi(n=1)=単一 build と
- * byte 一致)。既定はバッチ有効 (64)。deep-copy が要るのは otlp_generic_span_t が name/attrs を
- * ポインタで持ち、各 push ループが同じ static/stack バッファを使い回すため。 */
-#define OTLP_BATCH_HARD_MAX 128   /* 固定ストレージ上限 (env はここまで) */
-#define OTLP_BATCH_ATTR_CAP 20    /* 1 span の最大属性数 (E310 conn: base6+comm+k8s源6+peer2=15) */
-#define OTLP_BATCH_NAME_CAP 320   /* span 名の最大長 (実使用の最大は audit の 300) */
+ * Setting SPNL_OTLP_BATCH_MAX=1 restores one span per POST, and the body is then
+ * byte-identical to the single-span encoding. The default is 64. The copy has to be
+ * deep because otlp_generic_span_t holds its name and attributes by pointer, and
+ * each push loop reuses the same buffers. */
+#define OTLP_BATCH_HARD_MAX 128   /* the fixed storage ceiling; the env var clamps to it */
+#define OTLP_BATCH_ATTR_CAP 20    /* most attributes on one span; a connection span
+                                     peaks at 15: 6 base, comm, 6 from Kubernetes, 2 peer */
+#define OTLP_BATCH_NAME_CAP 320   /* longest span name; the longest in practice is an audit name at 300 */
 
 typedef struct {
     otlp_generic_span_t spans[OTLP_BATCH_HARD_MAX];
     char      names[OTLP_BATCH_HARD_MAX][OTLP_BATCH_NAME_CAP];
     otlp_kv_t attrs[OTLP_BATCH_HARD_MAX][OTLP_BATCH_ATTR_CAP];
-    int  n;            /* バッファ済 span 数 */
-    int  max;          /* flush 閾値 ([1, HARD_MAX]) */
-    int  posts;        /* flush 回数 (= POST 数、計測用) */
-    int  last_status;  /* 最終 flush の HTTP status */
+    int  n;            /* spans currently buffered */
+    int  max;          /* flush threshold, within [1, HARD_MAX] */
+    int  posts;        /* flushes so far, which is the POST count; used in tests */
+    int  last_status;  /* HTTP status of the most recent flush */
     const char *endpoint;
     const char *svc;
     const char *ver;
     const char *scope;
 } otlp_span_batch_t;
 
-/* single-threaded runtime + push 関数は逐次呼出なので 1 個を全経路で共有 (~1.4MB BSS)。 */
+/* The runtime is single-threaded and the push functions run one at a time, so all
+ * paths share a single buffer -- about 1.4 MB of BSS. */
 static otlp_span_batch_t g_span_batch;
 
 static int otlp_batch_env_max(void) {
     const char *e = getenv("SPNL_OTLP_BATCH_MAX");
-    int m = 64;   /* 既定: バッチ有効 */
+    int m = 64;   /* batching on by default */
     if (e && e[0]) { int v = atoi(e); if (v >= 1) m = v; }
     if (m < 1) m = 1;
     if (m > OTLP_BATCH_HARD_MAX) m = OTLP_BATCH_HARD_MAX;
@@ -221,13 +238,15 @@ static void otlp_batch_begin(otlp_span_batch_t *b, const char *endpoint,
     b->endpoint = endpoint; b->svc = svc; b->ver = ver; b->scope = scope;
 }
 
-/* 積んだ span を 1 リクエストにまとめて送る。送ったら HTTP status、空なら 0、失敗 -1。 */
+/* Send everything buffered as one request. Returns the HTTP status, 0 when there
+ * was nothing to send, or -1 on failure. */
 static int otlp_batch_flush(otlp_span_batch_t *b) {
     if (b->n <= 0) return 0;
-    static uint8_t buf[1 << 20];   /* HARD_MAX span 分を格納 (1MB static) */
+    static uint8_t buf[1 << 20];   /* 1 MB, enough for HARD_MAX spans */
     long blen = otlp_traces_generic_build_multi(buf, sizeof buf, b->svc, b->ver, b->scope,
                                                 b->spans, (size_t)b->n);
-    int had = b->n; b->n = 0;   /* 成否に関わらずバッファはクリア (取りこぼしより二重送出回避) */
+    int had = b->n; b->n = 0;   /* clear regardless of outcome: dropping on failure is
+                                   preferable to sending the same spans twice */
     if (blen < 0) { fprintf(stderr, "[otlp] batch encode failed (n=%d)\n", had); return -1; }
     int status = 0; char err[256] = {0};
     int rc = otlp_transport_send(b->endpoint, "/v1/traces", OTLP_GRPC_PATH_TRACES,
@@ -237,10 +256,11 @@ static int otlp_batch_flush(otlp_span_batch_t *b) {
     return status;
 }
 
-/* span を batch に deep-copy して積む (満杯なら先に flush)。積めたら 1、送信失敗でも 1
- * (span は積まれる)、encode/copy 不能で -1。name/attrs はバッファ所有の複製を指す。 */
+/* Deep-copy a span into the batch, flushing first when full. Returns 1 once the
+ * span is buffered -- including when that flush failed to send -- and -1 when it
+ * could not be copied. The stored name and attributes point at buffer-owned copies. */
 static int otlp_batch_add(otlp_span_batch_t *b, const otlp_generic_span_t *s) {
-    if (b->n >= b->max) otlp_batch_flush(b);   /* 満杯 flush (失敗しても次を積む) */
+    if (b->n >= b->max) otlp_batch_flush(b);   /* full: flush, and buffer this one regardless */
     if (b->n >= OTLP_BATCH_HARD_MAX) return -1;
     int i = b->n;
     otlp_generic_span_t *d = &b->spans[i];
@@ -248,16 +268,18 @@ static int otlp_batch_add(otlp_span_batch_t *b, const otlp_generic_span_t *s) {
     snprintf(b->names[i], OTLP_BATCH_NAME_CAP, "%s", s->name ? s->name : "");
     d->name = b->names[i];
     int na = s->nattrs; if (na < 0) na = 0; if (na > OTLP_BATCH_ATTR_CAP) na = OTLP_BATCH_ATTR_CAP;
-    for (int k = 0; k < na; k++) b->attrs[i][k] = s->attrs[k];   /* struct copy (key/val 配列ごと) */
+    for (int k = 0; k < na; k++) b->attrs[i][k] = s->attrs[k];   /* struct copy, key and value arrays included */
     d->attrs = b->attrs[i]; d->nattrs = na;
     b->n++;
-    (void)spnl_oneshot_add(1);   /* E323: 1 span = 1 event (exit は末尾の final flush で) */
+    (void)spnl_oneshot_add(1);   /* one span counts as one event; the exit check runs at the final flush */
     return 1;
 }
 
-/* 各 drain サイクル末尾の flush。tail batch を送出したあと SPNL_MAX_EVENTS を確認し、
- * 積算 span 数が K に達していれば clean exit (tail は flush 済 = 取りこぼしゼロ)。
- * K 到達判定はバッチ境界なので overshoot は「最後の 1 サイクルで積んだ span 数」に有界。 */
+/* The flush at the end of each drain cycle. It sends the tail batch, then checks
+ * SPNL_MAX_EVENTS: once the running span count reaches K the process exits cleanly,
+ * and because the tail has already been sent nothing is lost. The check happens on
+ * a batch boundary, so any overshoot is bounded by the spans buffered in that last
+ * cycle. */
 static int otlp_batch_flush_final(otlp_span_batch_t *b) {
     int st = otlp_batch_flush(b);
     if (spnl_oneshot_add(0)) spnl_oneshot_exit();
@@ -275,7 +297,7 @@ static int trace_rb_cb(void *ctx, void *data, size_t size) {
     struct ev_collector *c = (struct ev_collector *)ctx;
     const size_t H = sizeof(struct spnl_event_hdr);
     if (size < H + 32 || c->n >= c->cap) return 0;
-    const uint8_t *pl = (const uint8_t *)data + H;  /* payload (hdr の直後) */
+    const uint8_t *pl = (const uint8_t *)data + H;  /* the payload, immediately after the header */
     int64_t a, b, cc, d;
     memcpy(&a, pl + 0, 8); memcpy(&b, pl + 8, 8);
     memcpy(&cc, pl + 16, 8); memcpy(&d, pl + 24, 8);
@@ -329,24 +351,25 @@ int spnl_otlp_trace_push_obj(struct bpf_object *obj, const char *map_name, const
     if (rc != 0) { fprintf(stderr, "[otlp] trace send error: %s\n", err); return -1; }
     fprintf(stderr, "[otlp] pushed %d spans (%zu events) -> %s (status %d)\n",
             nsp, coll.n, endpoint, status);
-    if (spnl_oneshot_add((long)coll.n)) spnl_oneshot_exit();   /* E323: 1 event = 1 drained record */
+    if (spnl_oneshot_add((long)coll.n)) spnl_oneshot_exit();   /* one drained record counts as one event */
     return status;
 }
 
-/* ---- logs: emit ringbuf を drain -> LogRecord -> OTLP logs POST ---- */
+/* ---- logs: drain an emit ringbuf, turn each event into a LogRecord, POST ---- */
 
 #define OTLP_MAX_LOGS 8192
 
 struct log_rec_raw { uint64_t ktime; int64_t ival; char sval[256]; };
 struct log_collector { struct log_rec_raw *recs; size_t n; size_t cap; int is_str; };
 
-/* emit record: spnl_event_hdr + (__s64 value | char str[256])。timestamp は hdr から。 */
+/* An emit record is a spnl_event_hdr followed by either an __s64 value or a
+ * char str[256]; the timestamp comes from the header. */
 static int log_rb_cb(void *ctx, void *data, size_t size) {
     struct log_collector *c = (struct log_collector *)ctx;
     const size_t H = sizeof(struct spnl_event_hdr);
     if (size < H || c->n >= c->cap) return 0;
     const struct spnl_event_hdr *hdr = (const struct spnl_event_hdr *)data;
-    const uint8_t *pl = (const uint8_t *)data + H;  /* payload (hdr の直後) */
+    const uint8_t *pl = (const uint8_t *)data + H;  /* the payload, immediately after the header */
     struct log_rec_raw *r = &c->recs[c->n];
     r->ktime = hdr->timestamp;
     r->ival = 0; r->sval[0] = '\0';
@@ -401,19 +424,22 @@ int spnl_otlp_log_push_obj(struct bpf_object *obj, const char *map_name, int is_
                                  ct, body, (size_t)blen, &status, err, sizeof err);
     if (rc != 0) { fprintf(stderr, "[otlp] log send error: %s\n", err); return -1; }
     fprintf(stderr, "[otlp] pushed %zu logs -> %s (status %d)\n", coll.n, endpoint, status);
-    if (spnl_oneshot_add((long)coll.n)) spnl_oneshot_exit();   /* E323: 1 event = 1 log record */
+    if (spnl_oneshot_add((long)coll.n)) spnl_oneshot_exit();   /* one log record counts as one event */
     return status;
 }
 
-/* ---- E293: live 監査 span (str ringbuf の [file, comm, parent] 三つ組 -> 1 span) ---- */
-/* str ringbuf に 1 file_open あたり 3 record を fixed order で emit する前提:
+/* ---- live audit spans: the [file, comm, parent] triple becomes one span ---- */
+/* This assumes the probe emits three records per file_open into the string ringbuf,
+ * in a fixed order:
  *   emit_path(file)        -> file.path
  *   emit_comm              -> process.executable.name (semconv)
- *   emit_parent_path       -> process.parent.executable.path (独自 key)
- * hdr.timestamp (bpf_ktime_get_ns、monotonic) を unix nano に直して span 時刻にする
- * (E292 の 1970 = FFI :int 境界での ns 切り詰めを回避: 時刻は C 内で解決)。
- * 3 record は 1 BPF handler 実行内で連続 submit され、marker-comm filter + 単一プロセスの
- * probe なら interleave しない (§Edoc)。 */
+ *   emit_parent_path       -> process.parent.executable.path, an attribute of our own
+ * The header timestamp is a monotonic ktime, converted here to unix nanoseconds and
+ * used as the span time. Resolving it in C matters: passing nanoseconds across the
+ * FFI integer boundary truncates them, and the span lands in 1970.
+ * The three records are submitted back to back within one execution of the BPF
+ * handler, so with a marker-comm filter and a single-process probe they do not
+ * interleave. */
 static uint64_t audit_splitmix64(uint64_t *s) {
     uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -442,7 +468,7 @@ int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, 
         const char *file   = raw[i].sval;      /* emit_path */
         const char *comm   = raw[i + 1].sval;  /* emit_comm */
         const char *parent = raw[i + 2].sval;  /* emit_parent_path */
-        uint64_t t = (uint64_t)((int64_t)raw[i].ktime + off);   /* 実イベント時刻 */
+        uint64_t t = (uint64_t)((int64_t)raw[i].ktime + off);   /* when the event actually happened */
 
         otlp_generic_span_t s;
         memset(&s, 0, sizeof s);
@@ -453,7 +479,7 @@ int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, 
         s.start_unix_ns = t;
         s.end_unix_ns = t;
         s.kind = 0; /* INTERNAL */
-        s.is_error = false; /* observe (記録のみ)。deny 版は verdict=deny + is_error */
+        s.is_error = false; /* observation only; the enforcing variant sets verdict=deny and is_error */
 
         static char namebuf[300];
         snprintf(namebuf, sizeof namebuf, "file_open %s", file[0] ? file : "?");
@@ -471,26 +497,28 @@ int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, 
           snprintf(attrs[n].val, sizeof attrs[n].val, "observe"); n++; }
         s.attrs = attrs; s.nattrs = n;
 
-        otlp_batch_add(&g_span_batch, &s);   /* E308: 積んで満杯 or 末尾で 1 POST にまとめる */
+        otlp_batch_add(&g_span_batch, &s);   /* buffer it; one POST when full or at the end */
         sent++;
     }
-    otlp_batch_flush_final(&g_span_batch);   /* drain サイクル末尾: 残りを flush (取りこぼしゼロ) */
+    otlp_batch_flush_final(&g_span_batch);   /* end of the cycle: flush the remainder, losing nothing */
     fprintf(stderr, "[otlp] pushed %d audit spans (%zu str records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ================= S4/E371: typed consumer が共有する span スロット ==============
+/* ================= the span slots shared by every typed consumer =================
  *
- * 組み立て済 span の slot。Ruby は slot index+1 を handle として持つ (0 = span 無し)。
- * batch は add で deep-copy するので slot は send までしか生きていなくてよいが、
- * `send_otlp(to_span(a), ep)` を入れ子で複数書いても壊れないよう小さなリングにする。
+ * Slots for assembled spans. Ruby holds slot index + 1 as its handle, so 0 means
+ * "no span". The batch deep-copies on add, so a slot only has to survive until the
+ * send; it is a small ring anyway, so that nesting several
+ * `send_otlp(to_span(a), ep)` calls cannot corrupt one another.
  *
- * **全 typed channel の to_span が共有する**ので、最も広い channel の属性集合が
- * 入る大きさが要る (conn は 7 + 層 2 enricher で 20 まで積む)。各 channel の fill_span は
- * 従来どおり簡潔形と同じ本数で cap するので wire は不変 — ここは器の話だけ。
- * dns 節にあったものを E375 で全 channel の手前に移した (4 channel が使う共有物なので、
- * どれか 1 つの節の中にあるのは構造として嘘だった)。 */
+ * Every channel's to_span shares these, so they must be wide enough for the
+ * broadest one: a connection span carries 7 of its own and can reach 20 once the
+ * enrichers have run. Each channel's fill_span still caps at the same count the
+ * one-call form uses, so nothing about the wire changes -- this is only about the
+ * container. They sit ahead of all the channels rather than inside the dns section,
+ * since four channels use them. */
 #define OTLP_EV_SPAN_SLOTS 4
 #define OTLP_EV_SPAN_ATTRS 20
 static otlp_generic_span_t g_ev_span[OTLP_EV_SPAN_SLOTS];
@@ -498,11 +526,11 @@ static otlp_kv_t           g_ev_attrs[OTLP_EV_SPAN_SLOTS][OTLP_EV_SPAN_ATTRS];
 static char                g_ev_name[OTLP_EV_SPAN_SLOTS][160];
 static int                 g_ev_slot;
 static uint64_t            g_ev_seed;
-static int                 g_ev_batch_open;   /* この drain サイクルで batch を begin 済か */
-static int                 g_ev_sent;         /* flush までに積んだ span 数 (報告用) */
+static int                 g_ev_batch_open;   /* has a batch been opened this drain cycle */
+static int                 g_ev_sent;         /* spans buffered before the flush, for reporting */
 
-/* ---- E294: network 監査 span (packed connect-event -> network span) ---- */
-/* S5/E372: conn_event was the worst of the hand-written mirrors — a comment block
+/* ---- network audit spans: a packed connect event becomes a network span ---- */
+/* The connection record was the worst of the hand-written mirrors: a comment block
  * spelling out `pid(0..4) comm(4..20) ... daddr6_lo(64..72)` next to eleven
  * memcpy()s with literal offsets, kept in step with the kernel struct by review
  * alone. Both ends now derive from record_schema.h (cc_rec_conn). */
@@ -516,19 +544,22 @@ static int conn_rb_cb(void *ctx, void *data, size_t size) {
     return 0;
 }
 
-/* S4/E375: the conn record's two declared derivations (record_schema.h の
- * cc_rec_conn_derived)。**非 static** — 生成 accessor (`ev.peer` / `ev.direction`)
- * がここを呼び、span builder も同じ関数を呼ぶ。conn が E374 で据え置かれたのは、
- * どちらも**単一フィールドでは書けない** (宛先は family を見て daddr か daddr6_hi/lo、
- * direction は oldstate の読み替え) からで、E375 の 3 つ目の impl_form
- * "record_to_str" (record 丸ごとを受ける) がその形。
+/* The connection record's two declared derivations. They are deliberately not
+ * static: the generated accessors behind `ev.peer` and `ev.direction` call them,
+ * and so does the span builder -- one function, one answer.
  *
- * v4/v6 の分岐を C 側に置くのが肝: Ruby は `ev.peer` と書くだけで AF_INET6 を知らない
- * (意味づけは層 2 が所有、ADR-017 D1)。 */
+ * Connections were the last channel to gain typed consumers because neither value
+ * can be written from a single field: the destination depends on the address family
+ * (daddr, or the two halves of daddr6), and the direction is a reading of the
+ * previous socket state. That is what the record-to-string derivation form is for.
+ *
+ * Keeping the v4/v6 branch on this side is the point. Ruby writes `ev.peer` and
+ * never learns that AF_INET6 exists; deciding what the bytes mean belongs here. */
 
-/* 宛先アドレス文字列。daddr は raw be32 (IPv4)。E306: family==AF_INET6 のとき
- * daddr6_hi/lo (daddr_v6[16] を u64 2 分割で読んだもの、network order) を in6_addr に
- * 戻して v6 表記に。**span の network.peer.address はこの関数の出力そのもの**。 */
+/* The destination address as text. daddr is a raw big-endian IPv4 address; for
+ * AF_INET6 the two halves of the v6 address, read as network-order u64s, are
+ * reassembled into an in6_addr and formatted. The span's network.peer.address is
+ * exactly what this returns. */
 static void conn_peer_addr(const spnl_rec_conn_t *r, char *out, size_t cap) {
     if (r->family != 10 /* AF_INET6 */) {
         struct in_addr a; a.s_addr = r->daddr;
@@ -541,9 +572,10 @@ static void conn_peer_addr(const spnl_rec_conn_t *r, char *out, size_t cap) {
     }
 }
 
-/* `ev.peer` = "<address>:<port>" — アドレス部は network.peer.address と同じ関数の出力、
- * ポート部は network.peer.port。つまり span 名 (SPNL_EGRESS_CONN_SPAN_NAME_FMT =
- * "connect %s:%u") の主語と同じ文字列で、Ruby が見る値と wire が構造的に食い違えない。 */
+/* `ev.peer` is "<address>:<port>", where the address comes from the same function
+ * that produces network.peer.address and the port is network.peer.port. It is
+ * therefore the same string the span name is built from, which is what makes it
+ * structurally impossible for what Ruby sees to disagree with what is sent. */
 void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap) {
     char addr[INET6_ADDRSTRLEN] = {0};
     if (!r || cap <= 0) { if (out && cap > 0) out[0] = '\0'; return; }
@@ -551,9 +583,9 @@ void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap) {
     snprintf(out, (size_t)cap, "%s:%u", addr, r->dport);
 }
 
-/* `ev.direction` = span 属性 spnl.conn.direction そのもの。E306: ESTABLISHED 遷移の
- * 直前状態から。SYN_SENT(2)->ESTABLISHED = 自分から張った (active/client)、
- * SYN_RECV(3)->ESTABLISHED = 受けた (passive/server)。それ以外は other。 */
+/* `ev.direction` is the spnl.conn.direction attribute itself, read from the state
+ * the socket was in just before it reached ESTABLISHED: from SYN_SENT we dialled
+ * out (active), from SYN_RECV we accepted (passive), and anything else is other. */
 void spnl_conn_direction(const spnl_rec_conn_t *r, char *out, int cap) {
     const char *dir;
     if (!r || cap <= 0) { if (out && cap > 0) out[0] = '\0'; return; }
@@ -561,35 +593,41 @@ void spnl_conn_direction(const spnl_rec_conn_t *r, char *out, int cap) {
     snprintf(out, (size_t)cap, "%s", dir);
 }
 
-/* `ev.srtt_us` = 属性 net.peer.srtt_us **そのもの** (E376、4 つ目の impl_form
- * record_to_int)。kernel の tcp_sock->srtt_us は 1/8 us スケールなので実 us は >>3。
+/* `ev.srtt_us` is the net.peer.srtt_us attribute itself. The kernel's
+ * tcp_sock->srtt_us is in eighths of a microsecond, so the real value is that
+ * shifted right by three.
  *
- * E375 まではフィールドを生のまま expose していて、**Ruby が見る値と span の値が
- * 食い違う唯一のプロパティ**だった (RTT 1ms なら span=1000 / Ruby=8000)。宣言の note に
- * 「DIVIDE BY 8」と書く対処は警告であって契約ではない — 単位を 1 関数に閉じ込め、
- * span builder (簡潔形/明示形の両方) と E312 の request tree が同じ出力を使うことで、
- * 「Ruby が見る値 = 出て行く値」を構造で保つ。スケールは意味なので層 2 の持ち物 (D1)。 */
+ * This field was once exposed raw, and was the one property where the value Ruby
+ * saw differed from the value on the wire: a 1 ms round trip read as 1000 in the
+ * span and 8000 in Ruby. Writing "divide by 8" in a note is a warning, not a
+ * contract. Confining the unit to one function -- called by both span-building
+ * forms and by the request-tree assembly -- makes "what Ruby sees is what goes out"
+ * structural instead. A scale is part of what a number means, so it belongs on
+ * this side. */
 long spnl_conn_srtt_us(const spnl_rec_conn_t *r) {
     return r ? (long)(r->srtt_us >> 3) : 0;
 }
 
-/* S4/E375: 1 record -> egress 宣言が記述する span (簡潔形 push と明示形 to_span の共通
- * builder — dns/l7/http と同じ構造)。attrs は 20 要素 (7 + 層 2 enricher の余地)、
- * namebuf は span 名。戻り 1 = span を組んだ (conn record は常に span になる)。 */
+/* Build the span its egress declaration describes from one record. Both the
+ * one-call push and the explicit to_span go through this, as they do for the other
+ * channels. attrs holds 20 entries -- 7 of its own, and room for the enrichers --
+ * and namebuf receives the span name. Returns 1: a connection record always
+ * becomes a span. */
 static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed,
                           otlp_generic_span_t *s, otlp_kv_t *attrs,
                           char *namebuf, size_t namecap) {
-    /* dir の幅も accessor と同じ (E377、上の qname と同じ理由 — direction は "active" /
-     * "passive" / "other" しか返さないので実害は無いが、規則を例外なしにしておく)。
-     * その「同じ幅」は direction 自身に宣言された cap (16 = "passive" + NUL に余裕)。 */
+    /* The width here matches the accessor's, for the same reason it does for the
+     * DNS name below. Direction only ever yields "active", "passive" or "other", so
+     * nothing would actually break, but the rule is kept without exceptions. That
+     * shared width comes from direction's own declared cap. */
     char peer[INET6_ADDRSTRLEN] = {0}, dir[SPNL_REC_DERIVED_CONN_DIRECTION_CAP] = {0};
     int is6 = (rr->family == 10 /* AF_INET6 */);
-    conn_peer_addr(rr, peer, sizeof peer);        /* = ev.peer のアドレス部 */
-    spnl_conn_direction(rr, dir, (int)sizeof dir);/* = ev.direction (同じ関数) */
+    conn_peer_addr(rr, peer, sizeof peer);        /* the address half of ev.peer */
+    spnl_conn_direction(rr, dir, (int)sizeof dir);/* ev.direction, the very same function */
     uint64_t t = (uint64_t)((int64_t)rr->hdr.timestamp + off);
 
     memset(s, 0, sizeof *s);
-    otlp_span_new_root(s, seed);   /* E312: 単一 trace-context 生成 (共通プリミティブ) */
+    otlp_span_new_root(s, seed);   /* the one place trace contexts are minted */
     s->start_unix_ns = t; s->end_unix_ns = t; s->kind = 0;
 
     snprintf(namebuf, namecap, SPNL_EGRESS_CONN_SPAN_NAME_FMT, peer, rr->dport);
@@ -600,22 +638,24 @@ static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_PORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"%u",rr->dport); n++;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_TRANSPORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"tcp"); n++;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_TYPE);         snprintf(attrs[n].val,sizeof attrs[n].val,"%s",is6?"ipv6":"ipv4"); n++;
-    /* 実 us。semconv に RTT 属性が無いので独自 key。E376: スケーリングは derivation に
-     * 集約したので、この値は `ev.srtt_us` と**同じ関数の出力** (= 同値)。 */
+    /* Microseconds. semconv has no attribute for round-trip time, so the name is
+     * ours. The scaling lives in the derivation, so this is literally the output of
+     * the same function `ev.srtt_us` calls. */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US);     snprintf(attrs[n].val,sizeof attrs[n].val,"%lld",(long long)spnl_conn_srtt_us(rr)); n++;
     /* active/passive. semconv has no connection-direction key -> custom. */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION);  snprintf(attrs[n].val,sizeof attrs[n].val,"%s",dir); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-    /* 層 2 enricher レジストリ — CONN は k8s (発信元 pod + workload/service) と
-     * peer (宛先 -> peer pod/service/external) の両方が適用対象。出力順は registry 順
-     * (k8s -> peer) で E304+E310 の直呼びと byte 同一。 */
+    /* Connections are the one signal both enrichers apply to: Kubernetes for the
+     * originating pod and its workload, peer for the destination. They run in
+     * registry order, k8s then peer. */
     otlp_enrich_ctx_t ec = { OTLP_SIGNAL_CONN, rr->cgid, peer };
     n += otlp_enrich_run(&ec, attrs + n, 20 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
 
-/* 直近 drain の conn record (簡潔形 push と明示形 typed consumer が同じ器を共有)。 */
+/* The connection records from the last drain. The one-call push and the typed
+ * consumer share this buffer. */
 static spnl_rec_conn_t g_rec_conn[OTLP_MAX_LOGS];
 static int             g_rec_conn_n;
 
@@ -637,7 +677,7 @@ int spnl_otlp_conn_span_push_obj(struct bpf_object *obj, const char *map_name, c
         otlp_kv_t attrs[20];
         static char namebuf[128];
         if (!conn_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) continue;
-        otlp_batch_add(&g_span_batch, &s);   /* E308 */
+        otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
@@ -646,7 +686,7 @@ int spnl_otlp_conn_span_push_obj(struct bpf_object *obj, const char *map_name, c
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ---- S4/E375: typed record consumer (`on_emit :conn do |ev|`) ---- */
+/* ---- typed record consumer: `on_emit :conn do |ev|` ---- */
 const spnl_rec_conn_t *spnl_rec_conn_at(int i) {
     return (i >= 0 && i < g_rec_conn_n) ? &g_rec_conn[i] : NULL;
 }
@@ -660,7 +700,8 @@ int spnl_rec_conn_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     return g_rec_conn_n;
 }
 
-/* `to_span(ev)` / `conn_span(ev)` — 1 record を egress 宣言どおりの span に (0 = 無効 handle)。 */
+/* `to_span(ev)` and `conn_span(ev)`: one record becomes the span its declaration
+ * describes. A 0 return means the handle was not valid. */
 int spnl_rec_conn_to_span(int i) {
     const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
     if (!r) return 0;
@@ -673,10 +714,12 @@ int spnl_rec_conn_to_span(int i) {
     return slot + 1;
 }
 
-/* ---- E295: DNS query span (resolver-independent、socket :53 の QNAME) ---- */
-/* record 型 (spnl_rec_dns_t) と各フィールドの offset は record_mirror_gen.h の生成物。
- * 短い record (contract 未満) は unpack が -1 を返して捨てる (旧 `size < H + 104` 検査に相当、
- * 閾値は record サイズ = SPNL_REC_DNS_SIZE から導出)。 */
+/* ---- DNS query spans: the QNAME seen on a socket bound to port 53 ----
+ * Watching the socket rather than a resolver library is what makes this
+ * resolver-independent.
+ * The record type and its field offsets are generated into record_mirror_gen.h. A
+ * record shorter than the contract makes unpack return -1 and is dropped; the
+ * threshold is derived from the declared record size rather than written out. */
 struct dns_collector { spnl_rec_dns_t *recs; size_t n; size_t cap; };
 
 static int dns_rb_cb(void *ctx, void *data, size_t size) {
@@ -688,10 +731,9 @@ static int dns_rb_cb(void *ctx, void *data, size_t size) {
 }
 
 /* length-prefixed QNAME (raw[12..]) -> dotted host. userspace parse (no verifier).
- * S4/E371: non-static because it is the declared implementation of the derived
- * property `ev.qname` (record_schema.h の CcRecDerived)。生成 accessor
- * spnl_rec_dns_qname() がこの関数を呼ぶので、Ruby が読む hostname と span の
- * dns.question.name は**同じ 1 つのパーサ**の出力になる。 */
+ * Not static, because it is the declared implementation of the derived
+ * This is the `ev.qname` property. The generated accessor calls this function, so
+ * the hostname Ruby reads and the span's dns.question.name come out of one parser. */
 void spnl_dns_qname(const unsigned char *raw, char *out, int cap) {
     int off = 12, o = 0;
     while (off < 60 && o < cap - 1) {
@@ -704,48 +746,54 @@ void spnl_dns_qname(const unsigned char *raw, char *out, int cap) {
     out[o] = 0;
 }
 
-/* S4/E371: 1 record -> egress 宣言が記述する span。**簡潔形と明示形の両方がここを通る**
- * (spnl_otlp_dns_span_push_obj = 全 record にこれを適用して送る sugar、
- *  spnl_rec_dns_to_span = Ruby の `to_span(ev)` が 1 record に適用する明示形)。
- * 「糖衣を剥がすと明示形が出る」がコメントでなく構造的事実になる — 属性・SpanKind・
- * 時刻の作者が 1 箇所しかないので、2 形式が食い違うことがない。
+/* Build the span its egress declaration describes from one record. Both forms come
+ * through here: the one-call push is sugar that applies this to every record and
+ * sends them, and to_span applies it to the record the consumer chose. That the
+ * sugar unwraps to the explicit form is therefore a structural fact rather than a
+ * comment -- there is exactly one author of the attributes, the span kind and the
+ * timestamps, so the two cannot drift apart.
  *
- * attrs は 8 要素、namebuf は span 名バッファ (呼び手所有 = batch へ deep-copy されるまで
- * 生きていればよい)。戻り 1 = span を組んだ、0 = この record は span にならない
- * (QNAME が parse できない = egress 宣言の condition "always (…dropped, no span)")。 */
+ * attrs holds 8 entries and namebuf receives the span name; both are owned by the
+ * caller and need only survive until the batch deep-copies them. Returns 1 when a
+ * span was built, and 0 when this record does not become one -- an unparseable
+ * QNAME, which the declaration records as its drop condition. */
 static int dns_fill_span(const spnl_rec_dns_t *rr, int64_t off, uint64_t *seed,
                          otlp_generic_span_t *s, otlp_kv_t *attrs,
                          char *namebuf, size_t namecap) {
-    /* 幅は生成 accessor が `ev.qname` に渡すのと同じ — 同じ関数に違う cap を渡すと、
-     * 長い値で切り詰め位置が食い違う。E378: その 1 つの幅は qname 自身の宣言 (cap 256 =
-     * DNS 名の上限 255 + NUL) から来る。 */
+    /* The same width the generated accessor passes for `ev.qname`. Handing one
+     * function two different caps makes long values truncate in two different
+     * places; the single width comes from qname's own declaration, 255 for a DNS
+     * name plus the terminator. */
     char host[SPNL_REC_DERIVED_DNS_QNAME_CAP]; spnl_dns_qname(rr->raw, host, sizeof host);
     if (!host[0]) return 0;   /* not a parseable DNS query */
     uint64_t t = (uint64_t)((int64_t)rr->hdr.timestamp + off);
 
     memset(s, 0, sizeof *s);
-    otlp_span_new_root(s, seed);   /* E312: 単一 trace-context 生成 (共通プリミティブ) */
-    /* dns_emit carries a real resolution RTT (duration_ns>0); E295 emit_dns is
+    otlp_span_new_root(s, seed);   /* the one place trace contexts are minted */
+    /* The latency-aware emit carries a real resolution round trip (duration_ns>0);
+     * the query-only emit is
      * query-only (duration_ns==0 -> span end == start, as before). */
     s->start_unix_ns = t; s->end_unix_ns = t + rr->duration_ns; s->kind = 0;
     snprintf(namebuf, namecap, SPNL_EGRESS_DNS_SPAN_NAME_FMT, host);
     s->name = namebuf;
 
-    /* S3/E370: span 名と属性キーは record_schema.h の egress 宣言から生成された
-     * SPNL_EGRESS_DNS_* (record_mirror_gen.h)。ここは宣言の**消費者**であって
-     * 作者ではない — `capabilities --json` / `describe` が出す契約と wire が同一。 */
+    /* The span name and attribute keys are the SPNL_EGRESS_DNS_* macros, generated
+     * from the egress declaration. This code consumes that declaration rather than
+     * authoring it, which is why the contract `capabilities --json` and `describe`
+     * report is the same thing that goes on the wire. */
     int n = 0;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_DNS_ATTR_DNS_QUESTION_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",host); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_DNS_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-    if (rr->duration_ns) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_DNS_ATTR_SPNL_DNS_LATENCY_NS); snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)rr->duration_ns); n++; }   /* E311: DNS resolution RTT */
-    otlp_enrich_ctx_t ec = { OTLP_SIGNAL_DNS, rr->cgid, NULL };   /* E313: k8s のみ (peer は conn 専用) */
+    if (rr->duration_ns) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_DNS_ATTR_SPNL_DNS_LATENCY_NS); snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)rr->duration_ns); n++; }   /* the resolution round-trip time */
+    otlp_enrich_ctx_t ec = { OTLP_SIGNAL_DNS, rr->cgid, NULL };   /* Kubernetes only; peer is for connections */
     n += otlp_enrich_run(&ec, attrs + n, 8 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
 
-/* 直近 drain の DNS record。簡潔形 (push) と明示形 (typed consumer) が同じ器を使う
- * ので、record を 2 度持たない (~1MB static)。single-threaded・逐次呼出前提。 */
+/* The DNS records from the last drain. Both forms use this one buffer rather than
+ * keeping two copies of about a megabyte. The runtime is single-threaded and these
+ * are called in sequence. */
 static spnl_rec_dns_t g_rec_dns[OTLP_MAX_LOGS];
 static int            g_rec_dns_n;
 
@@ -767,7 +815,7 @@ int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, co
         otlp_kv_t attrs[8];
         static char namebuf[160];
         if (!dns_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) continue;
-        otlp_batch_add(&g_span_batch, &s);   /* E308 */
+        otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
@@ -776,25 +824,29 @@ int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, co
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ================= S4/E371: typed record consumer (`on_emit :dns do |ev|`) ==========
+/* ================= typed record consumer: `on_emit :dns do |ev|` ===================
  *
- * 簡潔形 (`spnl_otlp_dns_span_push(ep)`) は「drain -> 全 record を span 化 -> 送信」を
- * 1 語に潰しており、間に Ruby のロジックを挟めない。ここはその 1 語を **3 つの語**に
- * 分解する: drain (record を配る) / to_span (1 record を span に) / send (span を送る)。
- * どれも record の byte 像を Ruby に渡さない — Ruby が持つのは drain 内の index (handle) で、
- * フィールドは生成 accessor (spnl_rec_dns_*、record_mirror_gen.h) 越しにだけ見える。
+ * The one-call form collapses drain, build and send into a single verb, which
+ * leaves nowhere for the probe author's own logic to go. These split that verb into
+ * three: drain hands out records, to_span turns one into a span, send sends it.
+ * None of them exposes the record's bytes to Ruby: what Ruby holds is an index into
+ * the drain, and fields are reachable only through the generated accessors.
  *
- * span の中身は dns_fill_span() = 簡潔形と同じ builder なので、明示形で書いても属性・
- * SpanKind・時刻は 1 バイトも変わらない (差は「どの record を送るか」だけ = 利益②)。 */
+ * The span itself is built by the same function the one-call form uses, so writing
+ * the explicit form changes not one byte of the attributes, the span kind or the
+ * timestamps. The only thing that changes is which records get sent. */
 
-/* 生成 accessor が呼ぶ lookup (record_mirror_gen.h が prototype を宣言)。範囲外は NULL
- * = accessor が zero-value を返す (Ruby に不正な handle の持ちようが無いので crash させない)。 */
+/* The lookup the generated accessors call; its prototype is in the generated
+ * header. An out-of-range index yields NULL, and the accessor then returns a zero
+ * value: Ruby has no way to hold an invalid handle, so this must not crash. */
 const spnl_rec_dns_t *spnl_rec_dns_at(int i) {
     return (i >= 0 && i < g_rec_dns_n) ? &g_rec_dns[i] : NULL;
 }
 
-/* drain: ringbuf の record を配列に読み、件数を返す (Ruby の handle 0..n-1)。
- * timeout_ms は 1 poll の待ち時間 (0 = 非ブロッキング)。負値は簡潔形と同じ 100ms。 */
+/* drain: read the ringbuf's records into an array and return how many there were;
+ * Ruby's handles are the indices 0..n-1. timeout_ms is how long a single poll
+ * waits, with 0 meaning non-blocking and a negative value meaning the 100ms the
+ * one-call form uses. */
 int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct dns_collector coll = { g_rec_dns, 0, OTLP_MAX_LOGS };
@@ -804,11 +856,12 @@ int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int tim
     return g_rec_dns_n;
 }
 
-/* slot / seed / batch 状態は全 typed channel 共有 (上方の "typed consumer が共有する
- * span スロット" 節)。 */
+/* The slots, the seed and the batch state are shared by every typed channel; see
+ * the section above. */
 
-/* `to_span(ev)` — 1 record を egress 宣言どおりの span に。0 = span にならない record
- * (QNAME 不成立)。send_otlp(0, ep) は no-op なので Ruby 側で分岐しなくても安全。 */
+/* `to_span(ev)`: one record becomes the span its declaration describes. A 0 return
+ * means this record does not become a span -- an unparseable QNAME. Sending handle
+ * 0 is a no-op, so a probe need not branch on it. */
 int spnl_rec_dns_to_span(int i) {
     const spnl_rec_dns_t *r = spnl_rec_dns_at(i);
     if (!r) return 0;
@@ -821,9 +874,11 @@ int spnl_rec_dns_to_span(int i) {
     return slot + 1;
 }
 
-/* `send_otlp(span, ep)` — span を送信バッチに積む (E308 と同じ funnel: 満杯で 1 POST、
- * 残りは flush で)。戻り 1 = 積んだ、0 = 何もしなかった (無効 handle / 引数不足)。
- * endpoint はサイクル最初の send のものを使う (途中で変えたい用途は今は無い)。 */
+/* `send_otlp(span, ep)`: add a span to the send batch, through the same funnel
+ * everything else uses -- one POST when it fills, the rest at the flush. Returns 1
+ * when the span was buffered and 0 when nothing happened, such as an invalid
+ * handle. The endpoint is taken from the first send of the cycle; nothing needs to
+ * change it midway. */
 int spnl_otlp_span_send(int handle, const char *endpoint) {
     if (handle <= 0 || handle > OTLP_EV_SPAN_SLOTS || !endpoint || !endpoint[0]) return 0;
     if (!g_ev_batch_open) {
@@ -838,8 +893,9 @@ int spnl_otlp_span_send(int handle, const char *endpoint) {
     return 1;
 }
 
-/* サイクル末尾の flush (生成 driver が毎サイクル呼ぶ)。戻りは最後の POST の HTTP status
- * (1 本も積んでいなければ 0) — 簡潔形の push が返すものと同じ意味。 */
+/* The end-of-cycle flush, which the generated driver calls every cycle. It returns
+ * the HTTP status of the last POST, or 0 if nothing was buffered -- the same thing
+ * the one-call push returns. */
 int spnl_otlp_span_flush(void) {
     if (!g_ev_batch_open) return 0;
     int st = otlp_batch_flush_final(&g_span_batch);
@@ -850,11 +906,11 @@ int spnl_otlp_span_flush(void) {
     return st;
 }
 
-/* ---- E297: L7 request/response latency span (send->recv round-trip) ---- */
+/* ---- L7 request/response latency span: the send-to-recv round trip ---- */
 /* l7_event: hdr + {pid, comm[16], daddr(be32), dport(host), family, start_ktime, duration_ns}.
- * Unlike E294/E296 connect spans (duration=0), the L7 span's duration IS the payload:
+ * Unlike a connect span, whose duration is zero, the L7 span's duration IS the payload:
  * end_unix = start_unix + duration_ns = time-to-first-response-byte. */
-/* S5/E372: record type + offsets come from record_mirror_gen.h (generated from the
+/* The record type and offsets come from record_mirror_gen.h (generated from the
  * same record_schema.h the kernel struct is generated from); the hand-typed
  * `memcpy(p + 32, ...)` ladder that used to live here is gone. */
 struct l7_collector { spnl_rec_l7_t *recs; size_t n; size_t cap; };
@@ -867,9 +923,10 @@ static int l7_rb_cb(void *ctx, void *data, size_t size) {
     return 0;
 }
 
-/* S4/E374: 1 record -> egress 宣言が記述する span。**簡潔形と明示形の両方がここを通る**
- * (dns_fill_span と同じ構造 — 属性・SpanKind・時刻の作者を 1 箇所に保つ)。
- * attrs は 10 要素。戻り 1 = span を組んだ (l7 record は常に span になる)。 */
+/* Build the span its egress declaration describes from one record; both forms come
+ * through here, exactly as they do for DNS, so that the attributes, span kind and
+ * timestamps have a single author. attrs holds 10 entries. Returns 1: an L7 record
+ * always becomes a span. */
 static int l7_fill_span(const spnl_rec_l7_t *rr, int64_t off, uint64_t *seed,
                         otlp_generic_span_t *s, otlp_kv_t *attrs,
                         char *namebuf, size_t namecap) {
@@ -880,7 +937,7 @@ static int l7_fill_span(const spnl_rec_l7_t *rr, int64_t off, uint64_t *seed,
     uint64_t start_unix = (uint64_t)((int64_t)rr->start_ktime + off);
 
     memset(s, 0, sizeof *s);
-    otlp_span_new_root(s, seed);   /* E312: 単一 trace-context 生成 (共通プリミティブ) */
+    otlp_span_new_root(s, seed);   /* the one place trace contexts are minted */
     /* span duration = L7 round-trip latency (NOT srtt); this is the payload. */
     s->start_unix_ns = start_unix; s->end_unix_ns = start_unix + rr->duration_ns; s->kind = 3 /* CLIENT */;
 
@@ -895,14 +952,14 @@ static int l7_fill_span(const spnl_rec_l7_t *rr, int64_t off, uint64_t *seed,
     /* L7 round-trip latency in ns (span duration is authoritative; this is a convenience attr). */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_L7_ATTR_SPNL_L7_LATENCY_NS); snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)rr->duration_ns); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_L7_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-    /* peer は conn 専用 (signal_mask) なので L7 では k8s のみ適用 = E304 と byte 同一。 */
+    /* The peer enricher is for connections only, so L7 gets just the Kubernetes one. */
     otlp_enrich_ctx_t ec = { OTLP_SIGNAL_L7, rr->cgid, peer };
     n += otlp_enrich_run(&ec, attrs + n, 10 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
 
-/* 直近 drain の L7 record (簡潔形 push と明示形 typed consumer が同じ器を共有)。 */
+/* The L7 records from the last drain, shared by both forms. */
 static spnl_rec_l7_t g_rec_l7[OTLP_MAX_LOGS];
 static int           g_rec_l7_n;
 
@@ -924,7 +981,7 @@ int spnl_otlp_l7_span_push_obj(struct bpf_object *obj, const char *map_name, con
         otlp_kv_t attrs[10];
         static char namebuf[128];
         if (!l7_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) continue;
-        otlp_batch_add(&g_span_batch, &s);   /* E308 */
+        otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
@@ -933,7 +990,7 @@ int spnl_otlp_l7_span_push_obj(struct bpf_object *obj, const char *map_name, con
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ---- S4/E374: typed record consumer (`on_emit :l7 do |ev|`) ---- */
+/* ---- typed record consumer: `on_emit :l7 do |ev|` ---- */
 const spnl_rec_l7_t *spnl_rec_l7_at(int i) {
     return (i >= 0 && i < g_rec_l7_n) ? &g_rec_l7[i] : NULL;
 }
@@ -947,7 +1004,8 @@ int spnl_rec_l7_drain_obj(struct bpf_object *obj, const char *map_name, int time
     return g_rec_l7_n;
 }
 
-/* `to_span(ev)` / `l7_span(ev)` — 1 record を egress 宣言どおりの span に (0 = 無効 handle)。 */
+/* `to_span(ev)` and `l7_span(ev)`: one record becomes its declared span; 0 means
+ * the handle was not valid. */
 int spnl_rec_l7_to_span(int i) {
     const spnl_rec_l7_t *r = spnl_rec_l7_at(i);
     if (!r) return 0;
@@ -960,12 +1018,13 @@ int spnl_rec_l7_to_span(int i) {
     return slot + 1;
 }
 
-/* ---- E298: HTTP L7 RED span (method/path/status + duration) ---- */
+/* ---- HTTP RED span: method, path, status and duration ---- */
 /* http_event: hdr + {pid, comm[16], daddr, dport, family, start_ktime, duration_ns,
  * req[64], resp[16]}. method/path parsed from req ("METHOD path HTTP/.."), status from
- * resp ("HTTP/1.1 NNN ..") in userspace (kernel only did a bounded copy — QNAME/E295 pattern).
+ * resp ("HTTP/1.1 NNN ..") in userspace; the kernel only did a bounded copy, as it
+ * does for a DNS name.
  * Span duration = L7 round-trip; status>=500 -> Span.status=ERROR (RED error axis). */
-/* S5/E372: layout from record_schema.h (cc_rec_http) via the generated mirror. */
+/* The layout comes from the record declaration, via the generated mirror. */
 struct http_collector { spnl_rec_http_t *recs; size_t n; size_t cap; };
 
 static int http_rb_cb(void *ctx, void *data, size_t size) {
@@ -987,12 +1046,11 @@ static void http_token(const unsigned char *src, size_t srclen, char *dst, size_
     dst[j] = '\0';
 }
 
-/* S4/E374: the three declared derivations of the HTTP record (record_schema.h の
- * cc_rec_http_derived)。**非 static** — 生成 accessor (spnl_rec_http_method 等 =
- * Ruby の `ev.method`) がここを呼び、span builder も同じ関数を呼ぶので、Ruby が
- * フィルタに使う値と span に載る値が構造的に食い違えない (E371 の qname と同型)。
- * 各 impl は自分の source field の幅を知っている (表は長さを渡さない、E371 の慣行) —
- * 幅は生成 struct から取るので、ここに手書きの 64 / 16 は無い。 */
+/* The HTTP record's three declared derivations. They are deliberately not static:
+ * the generated accessors behind `ev.method` and friends call them, and so does the
+ * span builder -- so the value a probe filters on cannot differ from the value that
+ * ends up on the span. Each implementation knows the width of its own source field,
+ * taken from the generated struct, which is why no literal 64 or 16 appears here. */
 #define SPNL_HTTP_REQ_LEN  (sizeof(((const spnl_rec_http_t *)0)->req))
 #define SPNL_HTTP_RESP_LEN (sizeof(((const spnl_rec_http_t *)0)->resp))
 
@@ -1019,19 +1077,21 @@ long spnl_http_status(const unsigned char *resp) {
     return status;
 }
 
-/* S4/E374: 1 record -> egress 宣言が記述する span (簡潔形 push と明示形 to_span の共通 builder)。
- * attrs は 14 要素 (E378 で latency 属性が 1 個増えた)、namebuf は span 名。
- * 戻り 1 = span を組んだ (http record は常に span になる)。 */
+/* Build the span its egress declaration describes from one record; the shared
+ * builder for both forms. attrs holds 14 entries and namebuf receives the span
+ * name. Returns 1: an HTTP record always becomes a span. */
 static int http_fill_span(const spnl_rec_http_t *rr, int64_t off, uint64_t *seed,
                           otlp_generic_span_t *s, otlp_kv_t *attrs,
                           char *namebuf, size_t namecap) {
-    /* method/path/status は宣言された derivation (= `ev.method` の実体) の出力。
-     * 幅も derivation の契約の一部 — 生成 accessor と同じ幅を渡す。E298 以来の
-     * method[16] は、空白を含まない 64B の head (kernel 側 filter spnl_is_http_req は
-     * 先頭 4 byte しか見ないので到達可能) で `ev.method` が 64 文字・span が 15 文字と
-     * 食い違っていた。実 HTTP の method は 7 文字以下なので、通常のトラフィックでは
-     * 出力は 1 byte も変わらない。E378: その幅は各 derivation 自身の宣言 (65 = req[64] +
-     * NUL = 切り出し元より長くなり得ないという上限)。 */
+    /* Method, path and status are the outputs of the declared derivations -- the
+     * same functions `ev.method` and friends call. The width is part of that
+     * contract, so the same one is passed here. A 16-byte method buffer once made
+     * these disagree: a 64-byte request head with no space in it (reachable,
+     * because the kernel-side filter only inspects the first four bytes) gave Ruby
+     * 64 characters and the span 15. Real HTTP methods are at most seven
+     * characters, so ordinary traffic never saw a difference. The width now comes
+     * from each derivation's own declaration: it cannot exceed the field it is cut
+     * from, plus a terminator. */
     char method[SPNL_REC_DERIVED_HTTP_METHOD_CAP] = {0}, path[SPNL_REC_DERIVED_HTTP_PATH_CAP] = {0};
     spnl_http_method(rr->req, method, (int)sizeof method);
     spnl_http_path(rr->req, path, (int)sizeof path);
@@ -1044,7 +1104,7 @@ static int http_fill_span(const spnl_rec_http_t *rr, int64_t off, uint64_t *seed
     uint64_t start_unix = (uint64_t)((int64_t)rr->start_ktime + off);
 
     memset(s, 0, sizeof *s);
-    otlp_span_new_root(s, seed);   /* E312: 単一 trace-context 生成 (共通プリミティブ) */
+    otlp_span_new_root(s, seed);   /* the one place trace contexts are minted */
     s->start_unix_ns = start_unix; s->end_unix_ns = start_unix + rr->duration_ns;
     s->kind = 3 /* CLIENT — we observe the caller (curl) */;
     s->is_error = (status >= 500);   /* RED error axis: status>=500 -> Span.status=ERROR */
@@ -1057,7 +1117,7 @@ static int http_fill_span(const spnl_rec_http_t *rr, int64_t off, uint64_t *seed
     if (path[0])   { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_URL_PATH); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",path); n++; }
     if (status>0)  { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_HTTP_RESPONSE_STATUS_CODE); snprintf(attrs[n].val,sizeof attrs[n].val,"%d",status); n++; }
     /* TLS-plaintext path (SSL uprobe) carries no sock -> daddr==0. Mark url.scheme=https
-     * and omit peer. The tcp path (E298, daddr!=0) is byte-identical to before. */
+     * and omit peer. The plain TCP path, where daddr is set, is unchanged. */
     if (rr->daddr == 0 && rr->dport == 0) {
         snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_URL_SCHEME); snprintf(attrs[n].val,sizeof attrs[n].val,"https"); n++;
     } else {
@@ -1065,20 +1125,21 @@ static int http_fill_span(const spnl_rec_http_t *rr, int64_t off, uint64_t *seed
         snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_NETWORK_PEER_PORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"%u",rr->dport); n++;
     }
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_NETWORK_TRANSPORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"tcp"); n++;
-    /* l7 の spnl.l7.latency_ns と対称。span の長さが正 (start/end) で、この属性は
-     * 同じ数を検索可能にするためのもの — `ev.duration_ns` が両 channel で公開されている
-     * のに http だけ span 側に対応物が無い、という非対称を解消する。 */
+    /* Symmetric with the L7 channel's latency attribute. The span's own start and
+     * end are authoritative for its length; this attribute exists so the same
+     * number is searchable. It also removes an asymmetry: `ev.duration_ns` is
+     * published on both channels, but only L7 had a matching span attribute. */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_SPNL_HTTP_LATENCY_NS); snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)rr->duration_ns); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_HTTP_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-    /* peer は conn 専用 (signal_mask) なので HTTP では k8s のみ適用 = E304 と byte 同一。
-     * 上限は 14 (E378 で属性 1 個増えたぶん 13 から繰り上げ — 層 2 enricher の余地 6 は不変)。 */
+    /* The peer enricher is for connections only, so HTTP gets just the Kubernetes
+     * one. The cap of 14 leaves the same room for enrichers as before. */
     otlp_enrich_ctx_t ec = { OTLP_SIGNAL_HTTP, rr->cgid, peer };
     n += otlp_enrich_run(&ec, attrs + n, 14 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
 
-/* 直近 drain の HTTP record (簡潔形 push と明示形 typed consumer が同じ器を共有)。 */
+/* The HTTP records from the last drain, shared by both forms. */
 static spnl_rec_http_t g_rec_http[OTLP_MAX_LOGS];
 static int             g_rec_http_n;
 
@@ -1097,10 +1158,10 @@ int spnl_otlp_http_span_push_obj(struct bpf_object *obj, const char *map_name, c
     int sent = 0;
     for (size_t i = 0; i < coll.n; i++) {
         otlp_generic_span_t s;
-        otlp_kv_t attrs[14];   /* E378: 属性 1 個 (spnl.http.latency_ns) 追加ぶん 13 -> 14 */
+        otlp_kv_t attrs[14];   /* 14 since the latency attribute was added */
         static char namebuf[96];
         if (!http_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) continue;
-        otlp_batch_add(&g_span_batch, &s);   /* E308 */
+        otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
@@ -1109,7 +1170,7 @@ int spnl_otlp_http_span_push_obj(struct bpf_object *obj, const char *map_name, c
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ---- S4/E374: typed record consumer (`on_emit :http do |ev|`) ---- */
+/* ---- typed record consumer: `on_emit :http do |ev|` ---- */
 const spnl_rec_http_t *spnl_rec_http_at(int i) {
     return (i >= 0 && i < g_rec_http_n) ? &g_rec_http[i] : NULL;
 }
@@ -1123,7 +1184,8 @@ int spnl_rec_http_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     return g_rec_http_n;
 }
 
-/* `to_span(ev)` / `http_span(ev)` — 1 record を egress 宣言どおりの span に (0 = 無効 handle)。 */
+/* `to_span(ev)` and `http_span(ev)`: one record becomes its declared span; 0 means
+ * the handle was not valid. */
 int spnl_rec_http_to_span(int i) {
     const spnl_rec_http_t *r = spnl_rec_http_at(i);
     if (!r) return 0;
@@ -1136,9 +1198,9 @@ int spnl_rec_http_to_span(int i) {
     return slot + 1;
 }
 
-/* ---- E341: Redis L7 RED span (command/error/duration) ---- */
+/* ---- Redis RED span: command, error and duration ---- */
 /* redis_event has the same byte layout as http_event, and used to borrow http_rec_raw /
- * http_rb_cb outright. S5/E372 gives it its own declaration (cc_rec_redis) and hence its own
+ * http_rb_cb outright. It now has its own declaration, and hence its own
  * generated mirror: the two records are equal today but are separate contracts, and `describe`
  * should name the struct a Redis probe actually writes. Only the userspace parse differs
  * (RESP command / -ERR reply instead of method/path/status).
@@ -1243,7 +1305,8 @@ int spnl_otlp_redis_span_push_obj(struct bpf_object *obj, const char *map_name, 
         snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_REDIS_ATTR_NETWORK_PEER_PORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"%u",rr->dport); n++;
         snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_REDIS_ATTR_NETWORK_TRANSPORT);    snprintf(attrs[n].val,sizeof attrs[n].val,"tcp"); n++;
         if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_REDIS_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-        /* k8s pod attribution; L7 signal (peer is conn-only, E313) -> reuse HTTP signal. */
+        /* Kubernetes attribution only: the peer enricher is for connections, so this
+         * reuses the HTTP signal. */
         otlp_enrich_ctx_t ec = { OTLP_SIGNAL_HTTP, rr->cgid, peer };
         n += otlp_enrich_run(&ec, attrs + n, 13 - n);
         s.attrs = attrs; s.nattrs = n;
@@ -1257,25 +1320,27 @@ int spnl_otlp_redis_span_push_obj(struct bpf_object *obj, const char *map_name, 
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ---- E300: off-CPU-during-request span (why is the L7 span slow) ---- */
+/* ---- off-CPU-during-request span: why the request was slow ---- */
 /* offcpu_event: hdr + {pid, comm[16], pad, duration_ns, offcpu_ns, wait_stack(s32), req[64],
  * resp[16]}. The span is an HTTP span (method/path/status/duration) PLUS spnl.offcpu_ns /
  * spnl.oncpu_ns / wait.kind. wait.kind is classified in userspace by scanning the captured
  * kernel wait-stack frames against /proc/kallsyms (io/lock/sleep/net/other). */
-/* S5/E372: the one channel whose append-only *reading* rule is load-bearing — E312
+/* The one channel where the append-only *reading* rule is load-bearing: the tree
  * appended start_ktime and hdr_ext, and a producer built before that writes a shorter
  * record which must still be accepted with the two new fields zero. That rule is now
  * declared (cc_rec_offcpu.required_through = "cgid") and the generated unpack applies
  * it, instead of two hand-written `if (size >= H + 144)` guards. */
-/* offcpu の req/resp は http record と同じ「ワイヤの先頭 N バイト」で、L7 の
- * 読み方 (method/path/status) も同じ — なのでこの channel は http の**宣言された
- * derivation** (spnl_http_method / _path / _status) をそのまま呼ぶ。E377 まではここに
- * パースのコピーがあり、(a) 幅が古く (method[16])、(b) path の開始位置を切り詰め済み
- * method の strlen から求めていた (長い method で開始位置がずれる) ため、**同じ HTTP head
- * から http span と offcpu span で違う値**が出得た。
+/* The off-CPU channel's request and response buffers hold the same first bytes off
+ * the wire as the HTTP channel's, and are read the same way, so this channel calls
+ * the HTTP channel's declared derivations rather than parsing them again. There
+ * used to be a copy of that parsing here, and it had drifted: its method buffer was
+ * narrower, and it located the path from the strlen of an already-truncated method,
+ * which shifts once the method is long. The same request head could therefore yield
+ * different values on an HTTP span and an off-CPU span.
  *
- * derivation の impl は自分の source field の幅を http record から取る (SPNL_HTTP_REQ_LEN)
- * ので、両 record の幅が一致していることがこの再利用の前提。ずれたらビルドで落とす: */
+ * The derivations take their source width from the HTTP record, so reusing them
+ * depends on both records declaring the same width. If that ever stops being true,
+ * the build fails here: */
 _Static_assert(sizeof(((const spnl_rec_offcpu_t *)0)->req)  == sizeof(((const spnl_rec_http_t *)0)->req),
                "offcpu.req is no longer the same width as http.req -- the shared HTTP derivation "
                "(spnl_http_method/_path) reads http's width and would over/under-read this record");
@@ -1292,9 +1357,10 @@ static int offcpu_rb_cb(void *ctx, void *data, size_t size) {
     return 0;
 }
 
-/* E312 Step3: request 先頭バイト列から W3C traceparent ヘッダ値を探して out[56] に取り出す
- * (E295 パターン: kernel は bounded copy、userspace で parse)。見つかれば 1、無ければ 0。
- * 大小無視で "traceparent:" を探し、値の先頭 55 文字 ("vv-<32>-<16>-ff") をコピー。 */
+/* Look for a W3C traceparent header in the captured request bytes and copy its
+ * value out. As everywhere else, the kernel does a bounded copy and userspace does
+ * the parsing. Returns 1 when found, 0 otherwise. The search for "traceparent:" is
+ * case-insensitive, and the first 55 characters of the value are copied. */
 static int otlp_find_traceparent(const unsigned char *buf, size_t n, char *out, size_t outcap) {
     static const char *KEY = "traceparent:";
     size_t klen = strlen(KEY);
@@ -1370,27 +1436,32 @@ static const char *_oc_wait_kind(struct bpf_object *obj, const char *stacks_map,
     return "other";
 }
 
-/* --- S4/E379: the offcpu record's three own derivations -------------------
+/* --- the off-CPU record's three own derivations ---------------------------
  *
- * 非 static — 生成 accessor (`ev.offcpu_ns` / `ev.oncpu_ns` / `ev.wait_kind`) がここを呼び、
- * span builder も同じ関数を呼ぶ。method/path/status は http の derivation をそのまま共有
- * なので、offcpu 固有はこの 3 つだけ。
+ * Not static: the generated accessors behind `ev.offcpu_ns`, `ev.oncpu_ns` and
+ * `ev.wait_kind` call these, and so does the span builder. Method, path and status
+ * are shared with the HTTP channel, so these three are all that is specific here.
  *
- * この channel の typed 化が最後になったのは、**egress 属性の 3 つがフィールドそのままでは
- * 出せない**から:
- *   - spnl.offcpu_ns  = min(offcpu_ns, duration_ns)   … clamp した値 (生フィールドでない)
- *   - spnl.oncpu_ns   = duration_ns - 上記            … フィールドに存在しない計算値
- *   - spnl.wait.kind  = wait_stack を kallsyms で分類 … record 外の状態を読む
- * 生フィールドを expose すると E376 (srtt の 1/8 us) と同じ食い違いが 3 通り生まれる。 */
+ * This channel was the last to gain typed consumers because none of its three
+ * attributes can be published as a field:
+ *   - spnl.offcpu_ns  is min(offcpu_ns, duration_ns), a clamped value
+ *   - spnl.oncpu_ns   is the difference, a number no field holds
+ *   - spnl.wait.kind  classifies a captured stack against kallsyms, which is state
+ *                     outside the record entirely
+ * Exposing the raw fields instead would create three separate ways for what Ruby
+ * sees to disagree with what is sent. */
 
-/* wait.kind が読む「どの object の どの stack map か」。record には stack **id** しか無く、
- * その id を引くには drain 元の object が要る。E371 以来の 4 形式は全て「record + (定数)」で
- * 完結していたが、これは**同じ record を持ってきた側が知っている周辺情報**なので、5 つ目の
- * impl_form を足すのではなく **drain / push の入口で覚えておく** 形にした:
- *   - どちらの経路も stacks_map を引数で受け取っている (glue が "bpf_stacks" を渡す)
- *   - accessor が呼ばれるのは必ずその drain の直後 (`ev` は「直近 drain の index」)
- * ので、覚えている値は常に「その record を運んできた object」。無い場合 (host オラクル等)
- * の答えは "unknown" で、それは読めない stack map と同じ語 (_oc_wait_kind)。 */
+/* Which object and which stack map wait.kind should resolve against. The record
+ * carries only a stack *id*, and resolving it needs the object the record was
+ * drained from. Every other derivation is a function of the record alone, so rather
+ * than inventing a fifth derivation form for this, both entry points simply
+ * remember the pair on the way in:
+ *   - each already receives the stack map name as an argument
+ *   - an accessor is only ever called straight after that drain, since a handle is
+ *     an index into the most recent one
+ * so what is remembered always belongs to the object that carried the record. When
+ * nothing has been remembered -- a host-side test, say -- the answer is "unknown",
+ * which is the same word an unreadable stack map produces. */
 static struct bpf_object *g_offcpu_obj;
 static char               g_offcpu_stacks[64];
 
@@ -1399,24 +1470,27 @@ static void offcpu_set_stack_ctx(struct bpf_object *obj, const char *stacks_map)
     snprintf(g_offcpu_stacks, sizeof g_offcpu_stacks, "%s", stacks_map ? stacks_map : "");
 }
 
-/* `ev.offcpu_ns` = 属性 spnl.offcpu_ns そのもの。clamp は飾りではない: offcpu_ns は
- * sched_switch が積む合計、duration_ns は recv/send の対が測る窓で、**別のフックが別々に
- * 測る**ので合計が窓を超える record は表現可能。span は E300 以来 clamp 後を報告してきたので、
- * Ruby にも clamp 後を渡す (生値を渡すと「普通の record では一致し、異常な record でだけ
- * 食い違う」= フィルタが最も効いてほしい所で嘘をつく)。 */
+/* `ev.offcpu_ns` is the spnl.offcpu_ns attribute itself. The clamp is not
+ * decoration: the off-CPU total is accumulated by the scheduler tracepoint while
+ * the window is measured by the recv/send pair, and two hooks measuring separately
+ * can produce a total that exceeds the window. Spans have always reported the
+ * clamped value, so Ruby gets the clamped value too. Handing over the raw one would
+ * agree on ordinary records and differ only on anomalous ones -- lying exactly
+ * where a filter matters most. */
 long spnl_offcpu_offcpu_ns(const spnl_rec_offcpu_t *r) {
     if (!r) return 0;
     return (long)(r->offcpu_ns > r->duration_ns ? r->duration_ns : r->offcpu_ns);
 }
 
-/* `ev.oncpu_ns` = 属性 spnl.oncpu_ns。フィールドではなく差 (窓 - 待ち) なので、
- * ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns が構造的に成り立つ。 */
+/* `ev.oncpu_ns` is the spnl.oncpu_ns attribute: not a field but a difference, the
+ * window minus the wait. That makes ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns
+ * true by construction. */
 long spnl_offcpu_oncpu_ns(const spnl_rec_offcpu_t *r) {
     if (!r) return 0;
     return (long)(r->duration_ns - (uint64_t)spnl_offcpu_offcpu_ns(r));
 }
 
-/* `ev.wait_kind` = 属性 spnl.wait.kind そのもの (同じ _oc_wait_kind の出力)。 */
+/* `ev.wait_kind` is the spnl.wait.kind attribute itself, from the same classifier. */
 void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap) {
     if (!out || cap <= 0) return;
     out[0] = '\0';
@@ -1425,35 +1499,40 @@ void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap) {
              _oc_wait_kind(g_offcpu_obj, g_offcpu_stacks[0] ? g_offcpu_stacks : NULL, r->wait_stack));
 }
 
-/* S4/E379: 1 record -> egress 宣言が記述する **request-window span** (簡潔形 push と
- * 明示形 to_span の共通 builder — dns/conn/l7/http と同じ構造)。attrs は 13 要素。
+/* Build the request-window span its egress declaration describes from one record;
+ * the shared builder for both forms, as elsewhere. attrs holds 13 entries.
  *
- * 他 channel との違いが 2 つあり、どちらも E300 の性質そのもの:
- *   (1) 時刻の起点は record の ktime ではなく **"now - duration"**。この record は経過時間
- *       (窓の長さ) を運ぶもので、簡潔形 push は E300 以来この anchor を使っている
- *       (E312 が start_ktime を append したが、それを使うのは request tree 経路だけ)。
- *       なので他 channel の `off` (ktime->unix) ではなく now_unix を受け取る。
- *   (2) 1 record は **2 span** になり得る (窓 + off-CPU wait の子)。ここが組むのは親 =
- *       window span で、子を nest するのは簡潔形 push のレンダリング (egress 宣言の note)。
- *       明示形 `to_span(ev)` が返すのは親 1 本 — 待ちの値 (spnl.offcpu_ns / spnl.wait.kind)
- *       は親にも載るので、消費者が読む値は同じ。 */
+ * Two things differ from the other channels, and both follow from what this record
+ * is:
+ *   (1) The span starts at "now minus duration" rather than at a timestamp in the
+ *       record. What this record carries is an elapsed time -- the length of the
+ *       window -- and that anchor is what the one-call push has always used. (A
+ *       start_ktime field was added later, but only the request-tree path reads
+ *       it.) So this takes the current unix time rather than a ktime offset.
+ *   (2) One record can become *two* spans: the window, and a child for the off-CPU
+ *       wait. What is built here is the parent. Nesting the child is part of how
+ *       the one-call push renders the record, as its declaration notes.
+ *       The explicit `to_span(ev)` returns just the parent. The wait's numbers are
+ *       on the parent too, so a consumer reads the same values either way; only the
+ *       shape of the waterfall differs. */
 static int offcpu_fill_span(const spnl_rec_offcpu_t *rr, uint64_t now_unix, uint64_t *seed,
                             otlp_generic_span_t *s, otlp_kv_t *attrs,
                             char *namebuf, size_t namecap) {
-    /* 宣言された derivation の出力を、その derivation 自身の宣言 cap で受ける。
-     * method/path は http と共有の関数で、cap も同値 (冒頭の _Static_assert)。 */
+    /* Receive each derivation's output in a buffer of that derivation's own
+     * declared cap. Method and path share the HTTP channel's functions, and their
+     * caps agree -- which the assertions at the top of this file enforce. */
     char method[SPNL_REC_DERIVED_OFFCPU_METHOD_CAP] = {0}, path[SPNL_REC_DERIVED_OFFCPU_PATH_CAP] = {0};
     char wk[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP] = {0};
     spnl_http_method(rr->req, method, (int)sizeof method);
     spnl_http_path(rr->req, path, (int)sizeof path);
     int status = (int)spnl_http_status(rr->resp);
-    uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);   /* = ev.offcpu_ns (同じ関数) */
-    uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);    /* = ev.oncpu_ns  (同じ関数) */
-    spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);           /* = ev.wait_kind (同じ関数) */
+    uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);   /* ev.offcpu_ns, same function */
+    uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);    /* ev.oncpu_ns,  same function */
+    spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);           /* ev.wait_kind, same function */
     uint64_t start_unix = now_unix - rr->duration_ns;
 
     memset(s, 0, sizeof *s);
-    otlp_span_new_root(s, seed);   /* E312: 単一 trace-context 生成 (共通プリミティブ) */
+    otlp_span_new_root(s, seed);   /* the one place trace contexts are minted */
     s->start_unix_ns = start_unix; s->end_unix_ns = start_unix + rr->duration_ns;
     s->kind = 2 /* SERVER — we observe the request handler */;
     s->is_error = (status >= 500);
@@ -1469,13 +1548,13 @@ static int offcpu_fill_span(const spnl_rec_offcpu_t *rr, uint64_t now_unix, uint
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_ONCPU_NS);  snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)oncpu); n++;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",wk); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
-    otlp_enrich_ctx_t ec = { OTLP_SIGNAL_OFFCPU, rr->cgid, NULL };   /* E313: k8s のみ (peer は conn 専用) */
+    otlp_enrich_ctx_t ec = { OTLP_SIGNAL_OFFCPU, rr->cgid, NULL };   /* Kubernetes only; peer is for connections */
     n += otlp_enrich_run(&ec, attrs + n, 13 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
 
-/* 直近 drain の offcpu record (簡潔形 push と明示形 typed consumer が同じ器を共有)。 */
+/* The off-CPU records from the last drain, shared by both forms. */
 static spnl_rec_offcpu_t g_rec_offcpu[OTLP_MAX_LOGS];
 static int               g_rec_offcpu_n;
 
@@ -1484,7 +1563,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
     if (!obj || !map_name || !endpoint) return -1;
     struct offcpu_collector coll = { g_rec_offcpu, 0, OTLP_MAX_LOGS };
     g_rec_offcpu_n = 0;
-    offcpu_set_stack_ctx(obj, stacks_map);   /* E379: wait.kind が引く stack map */
+    offcpu_set_stack_ctx(obj, stacks_map);   /* the stack map wait.kind resolves against */
     if (otlp_drain(obj, map_name, offcpu_rb_cb, &coll) != 0) return -1;
     g_rec_offcpu_n = (int)coll.n;
 
@@ -1498,32 +1577,34 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
     int sent = 0;
     for (size_t i = 0; i < coll.n; i++) {
         spnl_rec_offcpu_t *rr = &coll.recs[i];
-        /* 1 offcpu record を 2 span の木にレンダリング。
-         *   parent = request span (SERVER, duration = recv->send の window 全体) = fill_span
-         *   child  = off-CPU wait span (INTERNAL, duration = offcpu_ns、window 内に nest)
-         * 共通 trace_id + child.parent_span_id = parent.span_id。E300 の 1-span 属性
-         * (spnl.offcpu_ns/oncpu_ns/wait.kind) は parent に残す (後方互換) + 待ちを子 span に
-         * 分離して Span Performance の waterfall に見せる。近似: E300 は off-CPU の合計 offcpu_ns
-         * を持つ (各待ちの発生時刻でない) ため、子は window 先頭に配置 (start=親start,
-         * dur=offcpu_ns)。cross-record 子 (DNS/L7) は実 timestamp を持つので後段 (E312 Step2)。 */
+        /* Render one record as a two-span tree:
+         *   parent  the request span (SERVER), lasting the whole recv-to-send window
+         *   child   the off-CPU wait (INTERNAL), lasting offcpu_ns, nested inside it
+         * They share a trace id, and the child's parent is the parent's span id. The
+         * wait numbers stay on the parent as they always have, and the child exists
+         * so the wait shows up as its own bar in a waterfall view.
+         * One approximation: the record carries the *total* off-CPU time, not when
+         * each wait happened, so the child is placed at the start of the window.
+         * Children that come from other records do carry real timestamps. */
         otlp_generic_span_t parent;
         otlp_kv_t attrs[13];
         static char namebuf[96];
         if (!offcpu_fill_span(rr, now_unix, &seed, &parent, attrs, namebuf, sizeof namebuf)) continue;
 
-        otlp_batch_add(&g_span_batch, &parent);   /* E308: 木ごと 1 バッチに */
+        otlp_batch_add(&g_span_batch, &parent);   /* the whole tree goes into one batch */
         sent++;
 
-        /* off-CPU wait child: 実 off-CPU があった (offcpu>0) ときだけ。/spin (CPU-bound、
-         * offcpu≈0) は待ち子を出さない = 全 on-CPU の正直な waterfall。値は親と同じ
-         * derivation の出力 なので、親の属性と子の属性が食い違うことはない。 */
+        /* Emit the wait child only when there actually was one. A CPU-bound request
+         * has no wait and so gets no child, which is an honest waterfall of pure
+         * on-CPU time. The values come from the same derivations the parent used, so
+         * parent and child cannot disagree. */
         uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);
         if (offcpu > 0) {
             char wk[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP] = {0};
             spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);
             otlp_generic_span_t child; memset(&child, 0, sizeof child);
             otlp_span_new_child(&child, &parent, &seed);
-            child.start_unix_ns = parent.start_unix_ns;    /* 近似: window 先頭 (E312 Step0) */
+            child.start_unix_ns = parent.start_unix_ns;    /* approximation: the start of the window */
             child.end_unix_ns   = parent.start_unix_ns + offcpu;
             child.kind = 1 /* INTERNAL */;
             static char cnamebuf[64];
@@ -1533,7 +1614,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
             snprintf(cattrs[cn].key,sizeof cattrs[cn].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND); snprintf(cattrs[cn].val,sizeof cattrs[cn].val,"%s",wk); cn++;
             snprintf(cattrs[cn].key,sizeof cattrs[cn].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_OFFCPU_NS); snprintf(cattrs[cn].val,sizeof cattrs[cn].val,"%llu",(unsigned long long)offcpu); cn++;
             child.attrs = cattrs; child.nattrs = cn;
-            otlp_batch_add(&g_span_batch, &child);   /* E308 */
+            otlp_batch_add(&g_span_batch, &child);   /* buffer it; the batch flushes at the end of the cycle */
             sent++;
         }
     }
@@ -1543,13 +1624,13 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
     return sent > 0 ? g_span_batch.last_status : 0;
 }
 
-/* ---- S4/E379: typed record consumer (`on_emit :offcpu do |ev|`) ---- */
+/* ---- typed record consumer: `on_emit :offcpu do |ev|` ---- */
 const spnl_rec_offcpu_t *spnl_rec_offcpu_at(int i) {
     return (i >= 0 && i < g_rec_offcpu_n) ? &g_rec_offcpu[i] : NULL;
 }
 
-/* 他 channel の drain と違い stacks_map も受ける — `ev.wait_kind` が引く stack map を
- * この drain の object と一緒に覚えるため (glue が "bpf_stacks" を渡す)。 */
+/* Unlike the other drains this one also takes a stack map name, so that
+ * `ev.wait_kind` can remember it alongside the object this drain came from. */
 int spnl_rec_offcpu_drain_obj(struct bpf_object *obj, const char *map_name,
                               const char *stacks_map, int timeout_ms) {
     if (!obj || !map_name) return -1;
@@ -1561,10 +1642,12 @@ int spnl_rec_offcpu_drain_obj(struct bpf_object *obj, const char *map_name,
     return g_rec_offcpu_n;
 }
 
-/* `to_span(ev)` / `offcpu_span(ev)` — 1 record を egress 宣言どおりの **window span** に
- * (0 = 無効 handle)。簡潔形が drain サイクルごとに 1 度取る "now" を、こちらは record ごとに
- * 取る (差はサイクル内の経過分 = sub-ms、anchor の意味は同じ)。off-CPU wait の子 span は
- * 簡潔形のレンダリング — 明示形は 1 record = 1 span を返す (待ちの値は親に載っている)。 */
+/* `to_span(ev)` and `offcpu_span(ev)`: one record becomes its declared window span;
+ * 0 means the handle was not valid. Where the one-call form takes "now" once per
+ * drain cycle, this takes it per record; the difference is the sub-millisecond
+ * elapsed within a cycle, and the anchor means the same thing. The off-CPU wait
+ * child is part of how the one-call form renders a record: the explicit form returns
+ * one span per record, and the wait's numbers are on it. */
 int spnl_rec_offcpu_to_span(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
     if (!r) return 0;
@@ -1579,28 +1662,36 @@ int spnl_rec_offcpu_to_span(int i) {
     return slot + 1;
 }
 
-/* ---- E312 Step2: multi-source request tree (request window + cross-record children) ---- */
-/* offcpu window record (parent) + dns/conn record (children) を drain し、リクエスト単位の
- * TREE を組む: parent = request span (SERVER, recv->send window)、children = off-CPU wait
- * (同一 record) + DNS resolve + TCP connect を **同 tgid かつ window 内 ktime** で相関 (E312
- * otlp_child_in_window)。木全体は 1 POST (E308 バッチ)。
+/* ---- multi-source request tree: a request window and its cross-record children ---- */
+/* Drain the off-CPU window records as parents and the DNS and connection records as
+ * children, and assemble a tree per request: the parent is the request span covering
+ * the recv-to-send window, and the children are the off-CPU wait from the same
+ * record plus any DNS resolve or TCP connect that shares its thread group and falls
+ * inside its window. The whole tree goes out in one POST.
  *
- * window-buffered: 子 (dns/conn) は親 window が閉じる**前**の push cycle で drain され得るので、
- * 相関できない子を**永続 pending バッファに繰り越し** (g_pend_*)、後続 cycle で親が現れたら nest。
- * TTL (既定 30s、SPNL_TREE_CHILD_TTL_MS) を超えても親が来ない子だけ standalone 単一 span に
- * フォールバック (誤った親子より安全 + 取りこぼしゼロ)。親 (window close) は即 emit (子は既に pending)。
- * 前提: 1 tid=1 リクエストの同期ハンドラ (sequential)。dns/conn map は任意 (無ければその子源はスキップ)。 */
+ * A child can be drained in a cycle that runs *before* its parent's window closes,
+ * so children that match nothing are carried forward in a pending buffer and nested
+ * when their parent turns up in a later cycle. Only a child whose parent never
+ * arrives within the time-to-live (30 seconds by default, SPNL_TREE_CHILD_TTL_MS)
+ * falls back to a standalone span -- safer than inventing a parent, and nothing is
+ * lost either way. Parents are emitted as soon as their window closes, since their
+ * children are already pending.
+ * This assumes a synchronous handler where one thread serves one request. The DNS
+ * and connection maps are optional; a probe without one simply contributes no
+ * children from that source. */
 
-/* DNS/conn record を span に (id は呼び出し側が root/child で設定済)。parseable なら 1、else 0。 */
+/* Turn a DNS or connection record into a span; the caller has already assigned its
+ * ids as a root or a child. Returns 1 when the record parsed, 0 otherwise. */
 static int otlp_tree_fill_dns(const spnl_rec_dns_t *d, int64_t off, int as_child,
                               otlp_generic_span_t *s, otlp_kv_t *a, char *nb, size_t nbcap) {
-    char host[SPNL_REC_DERIVED_DNS_QNAME_CAP]; spnl_dns_qname(d->raw, host, sizeof host);   /* E377/E378: 幅も accessor と同じ (qname の宣言 cap) */
+    char host[SPNL_REC_DERIVED_DNS_QNAME_CAP]; spnl_dns_qname(d->raw, host, sizeof host);   /* the same width the accessor uses: qname's declared cap */
     if (!host[0]) return 0;
     uint64_t ds = (uint64_t)((int64_t)d->hdr.timestamp + off);
     s->start_unix_ns = ds; s->end_unix_ns = ds + d->duration_ns; s->kind = as_child ? 3 /*CLIENT*/ : 0;
     snprintf(nb, nbcap, SPNL_EGRESS_DNS_SPAN_NAME_FMT, host); s->name = nb;
-    /* 同じ record の別 consumer (E312 request tree)。属性キーは同一宣言 (S3/E370) 由来で、
-     * 違うのは nest 時の SpanKind (CLIENT) だけ — その差は egress 宣言の note に書いてある。 */
+    /* A second consumer of the same record. The attribute keys come from the same
+     * declaration; the only difference when nested is the span kind, and the
+     * declaration says so. */
     int an = 0;
     snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_DNS_ATTR_DNS_QUESTION_NAME); snprintf(a[an].val,sizeof a[an].val,"%s",host); an++;
     if (d->duration_ns) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_DNS_ATTR_SPNL_DNS_LATENCY_NS); snprintf(a[an].val,sizeof a[an].val,"%llu",(unsigned long long)d->duration_ns); an++; }
@@ -1611,22 +1702,24 @@ static int otlp_tree_fill_dns(const spnl_rec_dns_t *d, int64_t off, int as_child
 static int otlp_tree_fill_conn(const spnl_rec_conn_t *co, int64_t off, int as_child,
                                otlp_generic_span_t *s, otlp_kv_t *a, char *nb, size_t nbcap) {
     char peer[INET6_ADDRSTRLEN] = {0};
-    conn_peer_addr(co, peer, sizeof peer);   /* E375: v4/v6 の選択は 1 箇所 (= ev.peer と同じ) */
+    conn_peer_addr(co, peer, sizeof peer);   /* the v4/v6 choice lives in one place, the same one ev.peer uses */
     uint64_t cs = (uint64_t)((int64_t)co->hdr.timestamp + off);
     s->start_unix_ns = cs; s->end_unix_ns = cs; s->kind = as_child ? 3 /*CLIENT*/ : 0;
     snprintf(nb, nbcap, SPNL_EGRESS_CONN_SPAN_NAME_FMT, peer, co->dport); s->name = nb;
     int an = 0;
     snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_ADDRESS); snprintf(a[an].val,sizeof a[an].val,"%s",peer); an++;
     snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_PORT); snprintf(a[an].val,sizeof a[an].val,"%u",co->dport); an++;
-    /* 単位変換は spnl_conn_srtt_us に 1 箇所 (= ev.srtt_us / 簡潔形 span と同じ出力)。
-     * 「srtt を持つ record だけ属性を載せる」判定は生フィールドのまま = E312 と挙動同一。 */
+    /* The unit conversion lives in one function, whose output is what both
+     * ev.srtt_us and the one-call span carry. Whether the attribute appears at all
+     * is still decided from the raw field, so behaviour here is unchanged. */
     if (co->srtt_us > 0) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US); snprintf(a[an].val,sizeof a[an].val,"%lld",(long long)spnl_conn_srtt_us(co)); an++; }
     if (co->comm[0]) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(a[an].val,sizeof a[an].val,"%s",co->comm); an++; }
     s->attrs = a; s->nattrs = an;
     return 1;
 }
 
-/* 永続 pending 子バッファ (push cycle を跨いで子を保持し、後続の親に nest する) */
+/* The pending-children buffer, which holds children across push cycles so a later
+ * parent can adopt them. */
 static spnl_rec_dns_t      g_pend_dns[OTLP_MAX_LOGS];  static size_t g_npend_dns;
 static spnl_rec_conn_t     g_pend_conn[OTLP_MAX_LOGS]; static size_t g_npend_conn;
 
@@ -1641,13 +1734,14 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
     struct offcpu_collector pc = { praw, 0, OTLP_MAX_LOGS };
     struct dns_collector    dc = { draw, 0, OTLP_MAX_LOGS };
     struct conn_collector   cc = { craw, 0, OTLP_MAX_LOGS };
-    offcpu_set_stack_ctx(obj, stacks_map);   /* E379: wait.kind が引く stack map (この経路も同じ) */
-    if (otlp_drain(obj, offcpu_map, offcpu_rb_cb, &pc) != 0) return -1;   /* parent source 必須 */
-    /* children 任意: map が無い子源はスキップ (エラーにしない) */
+    offcpu_set_stack_ctx(obj, stacks_map);   /* the stack map wait.kind resolves against, here too */
+    if (otlp_drain(obj, offcpu_map, offcpu_rb_cb, &pc) != 0) return -1;   /* the parent source is required */
+    /* Children are optional: a missing map skips that source rather than failing. */
     if (dns_map  && bpf_object__find_map_by_name(obj, dns_map))  (void)otlp_drain(obj, dns_map,  dns_rb_cb,  &dc);
     if (conn_map && bpf_object__find_map_by_name(obj, conn_map)) (void)otlp_drain(obj, conn_map, conn_rb_cb, &cc);
 
-    /* 新しく drain した子を永続 pending に繰り越す (満杯なら新規を捨てる = 稀) */
+    /* Carry the newly drained children forward; when the buffer is full the new
+     * ones are dropped, which is rare. */
     for (size_t j = 0; j < dc.n && g_npend_dns < OTLP_MAX_LOGS; j++)  g_pend_dns[g_npend_dns++]  = dc.recs[j];
     for (size_t j = 0; j < cc.n && g_npend_conn < OTLP_MAX_LOGS; j++) g_pend_conn[g_npend_conn++] = cc.recs[j];
 
@@ -1657,7 +1751,7 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
     uint64_t seed = (uint64_t)time(NULL) ^ ((uint64_t)getpid() << 32);
     struct timespec mono; clock_gettime(CLOCK_MONOTONIC, &mono);
     uint64_t now_mono = (uint64_t)mono.tv_sec*1000000000ull + (uint64_t)mono.tv_nsec;
-    uint64_t ttl_ns = 30000ull * 1000000ull;   /* 既定 30s */
+    uint64_t ttl_ns = 30000ull * 1000000ull;   /* 30 seconds by default */
     { const char *e = getenv("SPNL_TREE_CHILD_TTL_MS"); if (e && e[0]) { long v = atol(e); if (v > 0) ttl_ns = (uint64_t)v * 1000000ull; } }
     otlp_batch_begin(&g_span_batch, endpoint, svc, g_version, "spinel-ebpf");
 
@@ -1668,26 +1762,29 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
 
     for (size_t i = 0; i < pc.n; i++) {
         spnl_rec_offcpu_t *rr = &pc.recs[i];
-        /* 上の push 経路と同じ — http の宣言された derivation を共有する
-         * (request tree の親 span も、同じ head から同じ method/path/status を出す)。 */
+        /* As in the push path above, this shares the HTTP channel's declared
+         * derivations, so the request-tree parent reads the same method, path and
+         * status out of the same request head. */
         char method[SPNL_REC_DERIVED_OFFCPU_METHOD_CAP] = {0}, path[SPNL_REC_DERIVED_OFFCPU_PATH_CAP] = {0};
         spnl_http_method(rr->req, method, (int)sizeof method);
         spnl_http_path(rr->req, path, (int)sizeof path);
         int status = (int)spnl_http_status(rr->resp);
-        /* clamp と差も宣言された derivation の出力 (= `ev.offcpu_ns` / `ev.oncpu_ns`)。
-         * 同じ record を読む 2 つ目の消費者がここ (E312 request tree) なので、E378 が
-         * method/path/status でやったことを残り 3 プロパティにも及ぼす。 */
+        /* The clamp and the difference are declared derivations too, so this second
+         * consumer of the record reports exactly what the first one does. */
         uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);
         uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);
-        /* 正確な window 開始 (start_ktime)。無い旧 record は now-duration に退避。 */
+        /* The exact window start. An older record without one falls back to
+         * now minus duration. */
         uint64_t start_unix;
         if (rr->start_ktime) start_unix = (uint64_t)((int64_t)rr->start_ktime + off);
         else { struct timespec tn; clock_gettime(CLOCK_REALTIME,&tn);
                start_unix = (uint64_t)tn.tv_sec*1000000000ull + (uint64_t)tn.tv_nsec - rr->duration_ns; }
 
         otlp_generic_span_t parent; memset(&parent, 0, sizeof parent);
-        /* E312 Step3: 受信 traceparent (W3C) があれば その trace_id を根にし、我々の SERVER span を
-         * その子に nest (分散トレースの一部)。無ければ生成。outbound へは注入しない (観測専用)。 */
+        /* If the request carried a traceparent, adopt its trace id and nest our
+         * SERVER span underneath the caller's, making this part of their distributed
+         * trace; otherwise mint a new one. Nothing is injected into outbound
+         * requests: this observes, it does not propagate. */
         char tp[64];
         if (otlp_find_traceparent(rr->hdr_ext, sizeof rr->hdr_ext, tp, sizeof tp))
             otlp_span_root_from_traceparent(&parent, tp, &seed);
@@ -1704,15 +1801,15 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
         if (status>0)  { snprintf(pattrs[n].key,sizeof pattrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_HTTP_RESPONSE_STATUS_CODE); snprintf(pattrs[n].val,sizeof pattrs[n].val,"%d",status); n++; }
         snprintf(pattrs[n].key,sizeof pattrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_ONCPU_NS); snprintf(pattrs[n].val,sizeof pattrs[n].val,"%llu",(unsigned long long)oncpu); n++;
         if (rr->comm[0]) { snprintf(pattrs[n].key,sizeof pattrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(pattrs[n].val,sizeof pattrs[n].val,"%s",rr->comm); n++; }
-        otlp_enrich_ctx_t ec = { OTLP_SIGNAL_OFFCPU, rr->cgid, NULL };   /* E313: k8s のみ (request-tree parent) */
+        otlp_enrich_ctx_t ec = { OTLP_SIGNAL_OFFCPU, rr->cgid, NULL };   /* Kubernetes only; this is the request-tree parent */
         n += otlp_enrich_run(&ec, pattrs + n, 13 - n);
         parent.attrs = pattrs; parent.nattrs = n;
         otlp_batch_add(&g_span_batch, &parent); nspans++;
 
-        /* child: off-CPU wait (同一 record) */
+        /* child: the off-CPU wait, from this same record */
         if (offcpu > 0) {
             char wk[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP] = {0};
-            spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);   /* E379: = ev.wait_kind (同じ関数) */
+            spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);   /* ev.wait_kind, same function */
             otlp_generic_span_t ch; memset(&ch, 0, sizeof ch);
             otlp_span_new_child(&ch, &parent, &seed);
             ch.start_unix_ns = start_unix; ch.end_unix_ns = start_unix + offcpu; ch.kind = 1 /* INTERNAL */;
@@ -1723,7 +1820,7 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
             ch.attrs = ca; ch.nattrs = m;
             otlp_batch_add(&g_span_batch, &ch); nspans++; nchild++;
         }
-        /* child: pending DNS resolves in window (同 tgid) */
+        /* children: pending DNS resolves inside the window, same thread group */
         for (size_t j = 0; j < g_npend_dns; j++) {
             if (dns_used[j]) continue;
             spnl_rec_dns_t *d = &g_pend_dns[j];
@@ -1734,7 +1831,7 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
             static otlp_kv_t ca[3]; static char cn[160];
             if (otlp_tree_fill_dns(d, off, 1, &ch, ca, cn, sizeof cn)) { otlp_batch_add(&g_span_batch, &ch); nspans++; nchild++; }
         }
-        /* child: pending TCP connects in window (同 tgid) */
+        /* children: pending TCP connects inside the window, same thread group */
         for (size_t j = 0; j < g_npend_conn; j++) {
             if (conn_used[j]) continue;
             spnl_rec_conn_t *co = &g_pend_conn[j];
@@ -1747,8 +1844,9 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
         }
     }
 
-    /* pending の掃除: matched は除去。unmatched かつ TTL 超過 -> standalone フォールバック (取りこぼしゼロ)。
-     * 未 matched かつ TTL 内は次 cycle に繰り越し (親がまだ来ていないかもしれない)。 */
+    /* Sweep the pending buffer: drop what was matched; send what is unmatched and
+     * past its time-to-live as a standalone span, so nothing is lost; and carry the
+     * rest forward, since their parent may still be coming. */
     { size_t w = 0;
       for (size_t j = 0; j < g_npend_dns; j++) {
           if (dns_used[j]) continue;                                  /* matched -> drop */

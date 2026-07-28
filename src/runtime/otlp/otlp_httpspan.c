@@ -1,6 +1,6 @@
 /*
- * otlp_httpspan.c — HTTP server span + W3C trace context 伝播。詳細は otlp_httpspan.h。
- * libbpf 非依存 (span builder + transport のみ)。
+ * otlp_httpspan.c -- HTTP server spans with W3C trace context propagation.
+ * See otlp_httpspan.h. No libbpf dependency: just the span builder and transport.
  */
 #include "otlp_httpspan.h"
 #include "otlp_traces.h"   /* otlp_http_span_t + otlp_traces_http_build */
@@ -39,19 +39,20 @@ static int hexdec(const char *s, uint8_t *out, int nbytes) {
     return 1;
 }
 
-/* W3C traceparent "VV-<32hex traceid>-<16hex spanid>-<2hex flags>" を parse。
- * 妥当なら trace_id(16) + parent(8) を埋めて 1、無効なら 0。 */
+/* Parse a W3C traceparent, "VV-<32 hex trace id>-<16 hex span id>-<2 hex flags>".
+ * On a valid value it fills the 16-byte trace id and 8-byte parent and returns 1;
+ * otherwise 0. */
 static int parse_traceparent(const char *tp, uint8_t trace_id[16], uint8_t parent[8]) {
     if (!tp) return 0;
     while (*tp == ' ' || *tp == '\t') tp++;
     if (strlen(tp) < 55) return 0;                  /* 2+1+32+1+16+1+2 */
     if (tp[2] != '-' || tp[35] != '-' || tp[52] != '-') return 0;
-    if (hexval(tp[0]) < 0 || hexval(tp[1]) < 0) return 0;  /* version は使わないが hex 必須 */
+    if (hexval(tp[0]) < 0 || hexval(tp[1]) < 0) return 0;  /* the version is unused, but must be hex */
     if (!hexdec(tp + 3, trace_id, 16)) return 0;
     if (!hexdec(tp + 36, parent, 8)) return 0;
     int tz = 1; for (int i = 0; i < 16; i++) if (trace_id[i]) { tz = 0; break; }
     int pz = 1; for (int i = 0; i < 8; i++) if (parent[i]) { pz = 0; break; }
-    if (tz || pz) return 0;                         /* all-zero は invalid (W3C) */
+    if (tz || pz) return 0;                         /* an all-zero id is invalid per the spec */
     return 1;
 }
 
@@ -63,7 +64,8 @@ static uint64_t splitmix64(uint64_t *s) {
 }
 static void put_u64_be(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (56 - 8 * i)); }
 
-/* sockaddr_storage -> inet_ntop 文字列 + host 順 port (IPv4/IPv6)。非 inet は out[0]=0。 */
+/* Render a sockaddr_storage as text plus a host-order port, for IPv4 and IPv6.
+ * A non-inet address yields an empty string. */
 static void addr_to_str(const struct sockaddr_storage *ss, char *out, size_t outlen, int *port) {
     out[0] = '\0';
     if (port) *port = 0;
@@ -78,21 +80,22 @@ static void addr_to_str(const struct sockaddr_storage *ss, char *out, size_t out
     }
 }
 
-/* ---- http.server.request.duration accumulator (秒・OBI 同一バケット、E272 S2) ---- */
+/* ---- the http.server.request.duration accumulator, in seconds ---- */
 
 #define HTTP_DUR_MAX_SERIES 64
 #define HTTP_DUR_NBOUNDS    15
-/* OBI 既定バケット境界 (pkg/export/bucket.go)。bucket_counts は境界数+1 = 16。 */
+/* The same bucket boundaries the OpenTelemetry eBPF instrumentation uses, so the
+ * two are directly comparable. bucket_counts has one more entry than boundaries. */
 static const double g_http_dur_bounds[HTTP_DUR_NBOUNDS] =
     { 0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 };
 
 typedef struct {
     char     method[16];
-    char     route[128];      /* route-or-target (シリーズキー) */
-    int      has_route;       /* route (真) か target フォールバック (偽) か */
+    char     route[128];      /* the route, or the target: this series' key */
+    int      has_route;       /* true for a real route, false for the target fallback */
     int32_t  status;
     uint64_t count;
-    double   sum;             /* 秒 */
+    double   sum;             /* seconds */
     uint64_t buckets[HTTP_DUR_NBOUNDS + 1];
     int      used;
 } http_dur_series_t;
@@ -101,7 +104,8 @@ static http_dur_series_t g_http_dur[HTTP_DUR_MAX_SERIES];
 static int      g_http_dur_n = 0;
 static uint64_t g_http_dur_start = 0;
 
-/* (method, route-or-target, status) の series に duration(秒) を積む。溢れは drop + 警告。 */
+/* Add a duration, in seconds, to the series keyed by method, route-or-target and
+ * status. An overflowing series is dropped with a warning. */
 static void http_dur_record(const char *method, const char *route_or_target, int has_route,
                             int32_t status, double dur_s) {
     const char *m = method ? method : "";
@@ -127,7 +131,7 @@ static void http_dur_record(const char *method, const char *route_or_target, int
         s->used = 1;
     }
     if (dur_s < 0) dur_s = 0;
-    int b = HTTP_DUR_NBOUNDS;  /* > 最終境界 = +inf バケット */
+    int b = HTTP_DUR_NBOUNDS;  /* above the last boundary: the +inf bucket */
     for (int i = 0; i < HTTP_DUR_NBOUNDS; i++) {
         if (dur_s <= g_http_dur_bounds[i]) { b = i; break; }
     }
@@ -136,8 +140,9 @@ static void http_dur_record(const char *method, const char *route_or_target, int
     s->sum += dur_s;
 }
 
-/* 横断相関付きの内部コア。従来 API (span_fd) は tenant=NULL / retx=-1 / sends=-1 を
- * 渡すので追加属性は省略され、出力は E272 と byte 一致。span_fd_x が実値を渡す。 */
+/* The internal core, which also carries the cross-layer attributes. The plain API
+ * passes tenant=NULL and negative counters, so those attributes are omitted and its
+ * output is unchanged; only the extended entry point passes real values. */
 static int http_span_fd_core(int fd, const char *traceparent, const char *method,
                              const char *target, const char *route, int status_code,
                              uint64_t t0, uint64_t t1, const char *tenant,
@@ -151,9 +156,9 @@ static int http_span_fd_core(int fd, const char *traceparent, const char *method
     uint64_t seed = (t1 ? t1 : t0) ^ ((uint64_t)getpid() << 32) ^ (++counter * 0x100000001B3ULL);
 
     if (parse_traceparent(traceparent, s.trace_id, s.parent_span_id)) {
-        s.has_parent = true;                        /* 受信 trace を継続、incoming span が親 */
+        s.has_parent = true;                        /* continue the incoming trace; its span is our parent */
     } else {
-        put_u64_be(s.trace_id, splitmix64(&seed));  /* 新規 trace */
+        put_u64_be(s.trace_id, splitmix64(&seed));  /* no context: start a new trace */
         put_u64_be(s.trace_id + 8, splitmix64(&seed));
         s.has_parent = false;
     }
@@ -164,7 +169,7 @@ static int http_span_fd_core(int fd, const char *traceparent, const char *method
     s.url_path = target;
     s.status_code = status_code;
 
-    /* fd から server (getsockname) / client (getpeername) を導出 (IPv4/IPv6) */
+    /* Derive the server address from getsockname and the client from getpeername. */
     char srvaddr[INET6_ADDRSTRLEN] = {0}, cliaddr[INET6_ADDRSTRLEN] = {0};
     int srvport = 0;
     if (fd >= 0) {
@@ -179,21 +184,22 @@ static int http_span_fd_core(int fd, const char *traceparent, const char *method
     s.server_address = srvaddr[0] ? srvaddr : NULL;
     s.server_port = srvport;
     s.client_address = cliaddr[0] ? cliaddr : NULL;
-    s.url_scheme = "http";                          /* spinel server は平文 */
+    s.url_scheme = "http";                          /* this server speaks cleartext */
     s.route = (route && route[0]) ? route : NULL;
-    /* L2–L8 横断相関の追加属性 (省略可: NULL / <0 は builder 側で drop) */
+    /* The optional cross-layer attributes; the builder drops NULL and negatives. */
     s.tenant = (tenant && tenant[0]) ? tenant : NULL;
     s.tcp_established = tcp_established;
     s.tcp_state_changes = tcp_state_changes;
 
-    /* span 名: route があれば "<METHOD> <route>" (低カーディナリティ)、無ければ path fallback */
+    /* Span name: "<METHOD> <route>" when a route is known, which keeps cardinality
+     * low, and otherwise the request target. */
     int has_route = (route && route[0]) ? 1 : 0;
     const char *name_path = has_route ? route : target;
     static char namebuf[300];
     snprintf(namebuf, sizeof namebuf, "%s %s", method ? method : "", name_path ? name_path : "");
     s.name = namebuf;
 
-    /* http.server.request.duration (秒) をシリーズに積む */
+    /* Accumulate http.server.request.duration, in seconds. */
     if (g_http_dur_start == 0) g_http_dur_start = spnl_otlp_now_unix_ns();
     double dur_s = (t1 > t0) ? (double)(t1 - t0) / 1e9 : 0.0;
     http_dur_record(method, name_path, has_route, status_code, dur_s);
@@ -226,8 +232,9 @@ int spnl_otlp_http_span_fd(int fd, const char *traceparent, const char *method,
                              t0, t1, NULL, -1, -1, endpoint);
 }
 
-/* 横断相関付き SERVER span。span_fd に L8 tenant + L3/L4 (4-tuple keyed) established/state_changes
- * を足して 1 span に同居させる。established/state_changes が <0 のとき該当属性は省略。 */
+/* A SERVER span carrying cross-layer context: the application-level tenant and the
+ * connection-keyed established / state-change counters, all on the one span. A
+ * negative counter omits its attribute. */
 int spnl_otlp_http_span_fd_x(int fd, const char *traceparent, const char *method,
                              const char *target, const char *route, int status_code,
                              uint64_t t0, uint64_t t1, const char *tenant,
@@ -244,15 +251,19 @@ int spnl_otlp_http_span(const char *traceparent, const char *method, const char 
                                   status_code, t0, t1, endpoint);
 }
 
-/* 監査 (deny/path/lineage) を 1 span 化して直送する。O11y は OTLP logs 直送不可
- * なので、監査は span (traces) で APM/Trace Analyzer に載せる。
+/* Send one audit event -- the verdict, the path and the process lineage -- as a
+ * single span. Spans rather than logs, because the backends this targets accept
+ * OTLP traces directly but not OTLP logs, and traces put the event in front of the
+ * same analysis tools as everything else.
  *   - exe_path        -> process.executable.path     (semconv v1.37.0)
  *   - file_path       -> file.path                   (semconv v1.37.0)
- *   - parent_exe_path -> process.parent.executable.path (**独自 key**、semconv に無い。
- *                        parent は process.parent_pid のみが標準。実行パスは独自)
- *   - verdict         -> verdict                     (**独自 key**、allow/deny)
- * span 名は "file_open <file_path>"、kind=INTERNAL。traceparent を継続 (E274 相関)。
- * deny=1 は span.status を ERROR にする (「拒否した」ことを APM で色分け)。 */
+ *   - parent_exe_path -> process.parent.executable.path. This attribute name is
+ *                        our own: semconv standardises process.parent_pid but has
+ *                        nothing for the parent's executable path.
+ *   - verdict         -> verdict, also ours, carrying allow or deny.
+ * The span is named "file_open <file_path>" with kind INTERNAL, and continues an
+ * incoming traceparent so the audit joins the surrounding trace. A deny sets the
+ * span status to ERROR, which is what makes a refusal stand out. */
 int spnl_otlp_audit_file_span(const char *traceparent,
                               const char *exe_path, const char *parent_exe_path,
                               const char *file_path, const char *verdict, int deny,
@@ -284,13 +295,13 @@ int spnl_otlp_audit_file_span(const char *traceparent,
     #define A(k,v) do { if ((v) && (v)[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",k); \
                         snprintf(attrs[n].val,sizeof attrs[n].val,"%s",v); n++; } } while (0)
     A("process.executable.path",        exe_path);        /* semconv */
-    A("process.parent.executable.path", parent_exe_path); /* 独自 key */
+    A("process.parent.executable.path", parent_exe_path); /* an attribute name of our own */
     A("file.path",                      file_path);       /* semconv */
-    A("verdict",                        verdict);         /* 独自 key */
+    A("verdict",                        verdict);         /* likewise */
     #undef A
     s.attrs = attrs;
     s.nattrs = n;
-    s.is_error = (deny != 0);   /* deny した open は APM で ERROR 色分け */
+    s.is_error = (deny != 0);   /* a refused open surfaces as an error */
 
     const char *svc = getenv("OTEL_SERVICE_NAME");
     if (!svc || !svc[0]) svc = "spinel-ebpf-audit";
@@ -298,7 +309,7 @@ int spnl_otlp_audit_file_span(const char *traceparent,
     int status = 0; char err[256] = {0};
     long blen; const char *ct; const uint8_t *body;
     if (otlp_want_json() && !otlp_endpoint_is_grpc(endpoint)) {
-        /* JSON exporter は http span 専用。監査 span は protobuf のみ (JSON は未対応)。 */
+        /* The JSON exporter only covers HTTP spans; audit spans go out as protobuf. */
         static uint8_t pbuf[8192];
         blen = otlp_traces_generic_build(pbuf, sizeof pbuf, svc, NULL, "spinel-ebpf", &s);
         body = pbuf; ct = "application/x-protobuf";
