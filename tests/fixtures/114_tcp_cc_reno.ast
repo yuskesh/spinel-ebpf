@@ -1,0 +1,279 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/114_tcp_cc_reno.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ClassNode
+N 3 ConstantReadNode
+S 3 name RenoCC
+R 2 constant_path 3
+N 4 ConstantPathNode
+N 5 ConstantReadNode
+S 5 name BPF
+R 4 parent 5
+S 4 name TcpCC
+R 2 superclass 4
+N 6 StatementsNode
+N 7 DefNode
+S 7 name init
+N 8 ParametersNode
+N 9 RequiredParameterNode
+S 9 name sk
+A 8 requireds 9
+A 8 optionals 
+A 8 keywords 
+A 8 posts 
+R 7 parameters 8
+N 10 StatementsNode
+N 11 IntegerNode
+I 11 value 0
+A 10 body 11
+R 7 body 10
+R 7 receiver -1
+N 12 DefNode
+S 12 name ssthresh
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name sk
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 15 StatementsNode
+N 16 LocalVariableWriteNode
+S 16 name half
+N 17 CallNode
+S 17 name /
+N 18 CallNode
+S 18 name snd_cwnd
+N 19 LocalVariableReadNode
+S 19 name sk
+R 18 receiver 19
+R 18 arguments -1
+R 18 block -1
+S 18 call_operator .
+R 17 receiver 18
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 2
+A 20 arguments 21
+R 17 arguments 20
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+N 22 IfNode
+N 23 CallNode
+S 23 name <
+N 24 LocalVariableReadNode
+S 24 name half
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 2
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 predicate 23
+N 27 StatementsNode
+N 28 IntegerNode
+I 28 value 2
+A 27 body 28
+R 22 statements 27
+N 29 ElseNode
+N 30 StatementsNode
+N 31 LocalVariableReadNode
+S 31 name half
+A 30 body 31
+R 29 statements 30
+R 22 subsequent 29
+A 15 body 16,22
+R 12 body 15
+R 12 receiver -1
+N 32 DefNode
+S 32 name undo_cwnd
+N 33 ParametersNode
+N 34 RequiredParameterNode
+S 34 name sk
+A 33 requireds 34
+A 33 optionals 
+A 33 keywords 
+A 33 posts 
+R 32 parameters 33
+N 35 StatementsNode
+N 36 CallNode
+S 36 name prior_cwnd
+N 37 LocalVariableReadNode
+S 37 name sk
+R 36 receiver 37
+R 36 arguments -1
+R 36 block -1
+S 36 call_operator .
+A 35 body 36
+R 32 body 35
+R 32 receiver -1
+N 38 DefNode
+S 38 name cong_avoid
+N 39 ParametersNode
+N 40 RequiredParameterNode
+S 40 name sk
+N 41 RequiredParameterNode
+S 41 name ack
+N 42 RequiredParameterNode
+S 42 name acked
+A 39 requireds 40,41,42
+A 39 optionals 
+A 39 keywords 
+A 39 posts 
+R 38 parameters 39
+N 43 StatementsNode
+N 44 IfNode
+N 45 CallNode
+S 45 name <
+N 46 CallNode
+S 46 name snd_cwnd
+N 47 LocalVariableReadNode
+S 47 name sk
+R 46 receiver 47
+R 46 arguments -1
+R 46 block -1
+S 46 call_operator .
+R 45 receiver 46
+N 48 ArgumentsNode
+N 49 CallNode
+S 49 name snd_ssthresh
+N 50 LocalVariableReadNode
+S 50 name sk
+R 49 receiver 50
+R 49 arguments -1
+R 49 block -1
+S 49 call_operator .
+A 48 arguments 49
+R 45 arguments 48
+R 45 block -1
+S 45 call_operator .
+R 44 predicate 45
+N 51 StatementsNode
+N 52 CallOperatorWriteNode
+N 53 LocalVariableReadNode
+S 53 name sk
+R 52 receiver 53
+S 52 name snd_cwnd
+S 52 binary_operator +
+N 54 LocalVariableReadNode
+S 54 name acked
+R 52 value 54
+A 51 body 52
+R 44 statements 51
+N 55 ElseNode
+N 56 StatementsNode
+N 57 LocalVariableWriteNode
+S 57 name cnt
+N 58 CallNode
+S 58 name +
+N 59 CallNode
+S 59 name snd_cwnd_cnt
+N 60 LocalVariableReadNode
+S 60 name sk
+R 59 receiver 60
+R 59 arguments -1
+R 59 block -1
+S 59 call_operator .
+R 58 receiver 59
+N 61 ArgumentsNode
+N 62 LocalVariableReadNode
+S 62 name acked
+A 61 arguments 62
+R 58 arguments 61
+R 58 block -1
+S 58 call_operator .
+R 57 value 58
+N 63 IfNode
+N 64 CallNode
+S 64 name >=
+N 65 LocalVariableReadNode
+S 65 name cnt
+R 64 receiver 65
+N 66 ArgumentsNode
+N 67 CallNode
+S 67 name snd_cwnd
+N 68 LocalVariableReadNode
+S 68 name sk
+R 67 receiver 68
+R 67 arguments -1
+R 67 block -1
+S 67 call_operator .
+A 66 arguments 67
+R 64 arguments 66
+R 64 block -1
+S 64 call_operator .
+R 63 predicate 64
+N 69 StatementsNode
+N 70 CallOperatorWriteNode
+N 71 LocalVariableReadNode
+S 71 name sk
+R 70 receiver 71
+S 70 name snd_cwnd
+S 70 binary_operator +
+N 72 IntegerNode
+I 72 value 1
+R 70 value 72
+N 73 CallNode
+S 73 name snd_cwnd_cnt=
+N 74 LocalVariableReadNode
+S 74 name sk
+R 73 receiver 74
+N 75 ArgumentsNode
+N 76 IntegerNode
+I 76 value 0
+A 75 arguments 76
+R 73 arguments 75
+R 73 block -1
+S 73 call_operator .
+A 69 body 70,73
+R 63 statements 69
+N 77 ElseNode
+N 78 StatementsNode
+N 79 CallNode
+S 79 name snd_cwnd_cnt=
+N 80 LocalVariableReadNode
+S 80 name sk
+R 79 receiver 80
+N 81 ArgumentsNode
+N 82 LocalVariableReadNode
+S 82 name cnt
+A 81 arguments 82
+R 79 arguments 81
+R 79 block -1
+S 79 call_operator .
+A 78 body 79
+R 77 statements 78
+R 63 subsequent 77
+A 56 body 57,63
+R 55 statements 56
+R 44 subsequent 55
+A 43 body 44
+R 38 body 43
+R 38 receiver -1
+N 83 DefNode
+S 83 name set_state
+N 84 ParametersNode
+N 85 RequiredParameterNode
+S 85 name sk
+N 86 RequiredParameterNode
+S 86 name new_state
+A 84 requireds 85,86
+A 84 optionals 
+A 84 keywords 
+A 84 posts 
+R 83 parameters 84
+N 87 StatementsNode
+N 88 IntegerNode
+I 88 value 0
+A 87 body 88
+R 83 body 87
+R 83 receiver -1
+A 6 body 7,12,32,38,83
+R 2 body 6
+A 1 body 2
+R 0 statements 1

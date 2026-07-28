@@ -112,6 +112,7 @@ R 39 receiver -1
 R 39 arguments -1
 R 39 block -1
 S 39 call_operator .
+I 39 vcall 1
 R 38 value 39
 N 40 IfNode
 N 41 CallNode

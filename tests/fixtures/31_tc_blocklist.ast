@@ -44,6 +44,7 @@ R 18 receiver -1
 R 18 arguments -1
 R 18 block -1
 S 18 call_operator .
+I 18 vcall 1
 A 17 arguments 18
 R 16 arguments 17
 R 16 block -1

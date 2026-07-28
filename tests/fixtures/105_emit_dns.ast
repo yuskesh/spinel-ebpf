@@ -1,0 +1,66 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/105_emit_dns.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__udp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name len
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name ==
+N 10 CallNode
+S 10 name kfield
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name sk
+N 13 StringNode
+S 13 content sock
+N 14 StringNode
+S 14 content __sk_common.skc_dport
+A 11 arguments 12,13,14
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+R 9 receiver 10
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 13568
+A 15 arguments 16
+R 9 arguments 15
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 17 StatementsNode
+N 18 CallNode
+S 18 name emit_dns
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name msg
+A 19 arguments 20
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+A 17 body 18
+R 8 statements 17
+R 8 subsequent -1
+N 21 IntegerNode
+I 21 value 0
+A 7 body 8,21
+R 2 body 7
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

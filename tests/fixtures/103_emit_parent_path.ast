@@ -1,0 +1,68 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/103_emit_parent_path.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @opens
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name lsm__file_open
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name file
+N 7 RequiredParameterNode
+S 7 name ret
+A 5 requireds 6,7
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 8 StatementsNode
+N 9 InstanceVariableWriteNode
+S 9 name @opens
+N 10 CallNode
+S 10 name +
+N 11 InstanceVariableReadNode
+S 11 name @opens
+R 10 receiver 11
+N 12 ArgumentsNode
+N 13 IntegerNode
+I 13 value 1
+A 12 arguments 13
+R 10 arguments 12
+R 10 block -1
+S 10 call_operator .
+R 9 value 10
+N 14 CallNode
+S 14 name emit_path
+R 14 receiver -1
+N 15 ArgumentsNode
+N 16 LocalVariableReadNode
+S 16 name file
+A 15 arguments 16
+R 14 arguments 15
+R 14 block -1
+S 14 call_operator .
+N 17 CallNode
+S 17 name emit_comm
+R 17 receiver -1
+R 17 arguments -1
+R 17 block -1
+S 17 call_operator .
+I 17 vcall 1
+N 18 CallNode
+S 18 name emit_parent_path
+R 18 receiver -1
+R 18 arguments -1
+R 18 block -1
+S 18 call_operator .
+I 18 vcall 1
+N 19 IntegerNode
+I 19 value 0
+A 8 body 9,14,17,18,19
+R 4 body 8
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

@@ -1,0 +1,151 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/122_go_tls_native.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name GoTlsNative
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value uprobe
+N 12 StringNode
+S 12 content /opt/app/goclient:crypto/tls.(*Conn).Write
+A 10 arguments 11,12
+R 9 arguments 10
+N 13 BlockNode
+S 13 locals conn,ptr,len
+N 14 BlockParametersNode
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name conn
+N 17 RequiredParameterNode
+S 17 name ptr
+N 18 RequiredParameterNode
+S 18 name len
+A 15 requireds 16,17,18
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+R 13 parameters 14
+N 19 StatementsNode
+N 20 CallNode
+S 20 name go_tls_req
+R 20 receiver -1
+N 21 ArgumentsNode
+N 22 LocalVariableReadNode
+S 22 name conn
+N 23 LocalVariableReadNode
+S 23 name ptr
+N 24 LocalVariableReadNode
+S 24 name len
+A 21 arguments 22,23,24
+R 20 arguments 21
+R 20 block -1
+S 20 call_operator .
+A 19 body 20
+R 13 body 19
+R 9 block 13
+S 9 call_operator .
+N 25 CallNode
+S 25 name on
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 SymbolNode
+S 27 value uprobe
+N 28 StringNode
+S 28 content /opt/app/goclient:crypto/tls.(*Conn).Read
+A 26 arguments 27,28
+R 25 arguments 26
+N 29 BlockNode
+S 29 locals conn,ptr,len
+N 30 BlockParametersNode
+N 31 ParametersNode
+N 32 RequiredParameterNode
+S 32 name conn
+N 33 RequiredParameterNode
+S 33 name ptr
+N 34 RequiredParameterNode
+S 34 name len
+A 31 requireds 32,33,34
+A 31 optionals 
+A 31 keywords 
+A 31 posts 
+R 30 parameters 31
+R 29 parameters 30
+N 35 StatementsNode
+N 36 CallNode
+S 36 name go_tls_resp_stash
+R 36 receiver -1
+N 37 ArgumentsNode
+N 38 LocalVariableReadNode
+S 38 name conn
+N 39 LocalVariableReadNode
+S 39 name ptr
+A 37 arguments 38,39
+R 36 arguments 37
+R 36 block -1
+S 36 call_operator .
+A 35 body 36
+R 29 body 35
+R 25 block 29
+S 25 call_operator .
+N 40 CallNode
+S 40 name on
+R 40 receiver -1
+N 41 ArgumentsNode
+N 42 SymbolNode
+S 42 value go_uret
+N 43 StringNode
+S 43 content /opt/app/goclient:crypto/tls.(*Conn).Read
+A 41 arguments 42,43
+R 40 arguments 41
+N 44 BlockNode
+S 44 locals ret
+N 45 BlockParametersNode
+N 46 ParametersNode
+N 47 RequiredParameterNode
+S 47 name ret
+A 46 requireds 47
+A 46 optionals 
+A 46 keywords 
+A 46 posts 
+R 45 parameters 46
+R 44 parameters 45
+N 48 StatementsNode
+N 49 CallNode
+S 49 name go_tls_emit
+R 49 receiver -1
+N 50 ArgumentsNode
+N 51 LocalVariableReadNode
+S 51 name ret
+A 50 arguments 51
+R 49 arguments 50
+R 49 block -1
+S 49 call_operator .
+A 48 body 49
+R 44 body 48
+R 40 block 44
+S 40 call_operator .
+A 4 body 5,9,25,40
+R 2 body 4
+A 1 body 2
+R 0 statements 1

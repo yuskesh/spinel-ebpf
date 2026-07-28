@@ -25,6 +25,7 @@ R 9 receiver -1
 R 9 arguments -1
 R 9 block -1
 S 9 call_operator .
+I 9 vcall 1
 R 8 receiver 9
 N 10 ArgumentsNode
 N 11 LocalVariableReadNode
@@ -69,6 +70,7 @@ R 22 receiver -1
 R 22 arguments -1
 R 22 block -1
 S 22 call_operator .
+I 22 vcall 1
 R 21 receiver 22
 N 23 ArgumentsNode
 N 24 LocalVariableReadNode
@@ -138,6 +140,7 @@ R 42 receiver -1
 R 42 arguments -1
 R 42 block -1
 S 42 call_operator .
+I 42 vcall 1
 R 41 receiver 42
 N 43 ArgumentsNode
 N 44 LocalVariableReadNode
@@ -180,6 +183,7 @@ R 54 receiver -1
 R 54 arguments -1
 R 54 block -1
 S 54 call_operator .
+I 54 vcall 1
 R 53 receiver 54
 N 55 ArgumentsNode
 N 56 LocalVariableReadNode

@@ -15,16 +15,52 @@
 #   build/csrc/*.o          compiler objects the in-process eBPF codegen links
 #   build/libprism.a        the prism parser library
 #
+# Optionally also fetches and builds mbedTLS into deps/mbedtls, which is only
+# needed to send telemetry over TLS (an https:// or grpcs:// OTLP endpoint). It
+# is off by default: a probe that posts to a plain http:// collector never links
+# mbedTLS, so most users do not need the ~50 MB checkout.
+#
+#   SPNL_WITH_TLS=1 scripts/setup.sh
+#
+# Optionally also fetches the OTLP protobuf schemas and the nanopb generator,
+# which nothing in normal use needs. The protobuf *encoders* are already here,
+# pre-generated under src/runtime/otlp/pb/ and committed, so building a probe and
+# sending telemetry needs neither checkout. They are for the two jobs that read
+# or rebuild that wire format: the harnesses under tests/runtime/ that decode a
+# payload back into text with protoc, and scripts/regen-otlp-pb.sh.
+#
+#   SPNL_WITH_PROTO=1 scripts/setup.sh
+#
 # Tunables (environment variables):
-#   SPINEL_REPO  git URL of the fork     (default https://github.com/yuskesh/spinel.git)
-#   SPINEL_REF   branch / tag / commit   (default: a tag on c-emit-ir = upstream + Patch 1)
-#   SPINEL_DIR   checkout location       (default <repo>/deps/spinel)
+#   SPINEL_REPO   git URL of the fork     (default https://github.com/yuskesh/spinel.git)
+#   SPINEL_REF    branch / tag / commit   (default: a tag on c-emit-ir = upstream + Patch 1)
+#   SPINEL_DIR    checkout location       (default <repo>/deps/spinel)
+#   SPNL_WITH_TLS set to 1 to also fetch + build mbedTLS (default: off)
+#   MBEDTLS_REPO  git URL                 (default https://github.com/Mbed-TLS/mbedtls.git)
+#   MBEDTLS_REF   tag / branch / commit   (default v3.6.6, an LTS release)
+#   MBEDTLS_DIR   checkout location       (default <repo>/deps/mbedtls)
+#   SPNL_WITH_PROTO set to 1 to also fetch opentelemetry-proto + nanopb (default: off)
+#   PROTO_REPO    git URL                 (default https://github.com/open-telemetry/opentelemetry-proto.git)
+#   PROTO_REF     tag / branch / commit   (default v1.10.0, the pin the encoders were generated from)
+#   PROTO_DIR     checkout location       (default <repo>/deps/opentelemetry-proto)
+#   NANOPB_REPO   git URL                 (default https://github.com/nanopb/nanopb.git)
+#   NANOPB_REF    tag / branch / commit   (default 0.4.9.1, matching the vendored runtime)
+#   NANOPB_DIR    checkout location       (default <repo>/deps/nanopb)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SPINEL_REPO="${SPINEL_REPO:-https://github.com/yuskesh/spinel.git}"
-SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.06.23}"
+SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.07.21}"
 SPINEL_DIR="${SPINEL_DIR:-$HERE/deps/spinel}"
+MBEDTLS_REPO="${MBEDTLS_REPO:-https://github.com/Mbed-TLS/mbedtls.git}"
+MBEDTLS_REF="${MBEDTLS_REF:-v3.6.6}"
+MBEDTLS_DIR="${MBEDTLS_DIR:-$HERE/deps/mbedtls}"
+PROTO_REPO="${PROTO_REPO:-https://github.com/open-telemetry/opentelemetry-proto.git}"
+PROTO_REF="${PROTO_REF:-v1.10.0}"
+PROTO_DIR="${PROTO_DIR:-$HERE/deps/opentelemetry-proto}"
+NANOPB_REPO="${NANOPB_REPO:-https://github.com/nanopb/nanopb.git}"
+NANOPB_REF="${NANOPB_REF:-0.4.9.1}"
+NANOPB_DIR="${NANOPB_DIR:-$HERE/deps/nanopb}"
 
 echo ">>> spinel: $SPINEL_REPO @ $SPINEL_REF"
 echo ">>> into:   $SPINEL_DIR"
@@ -70,4 +106,57 @@ objs=$(ls "$SPINEL_DIR"/build/csrc/*.o 2>/dev/null | grep -v '/main\.o$' | wc -l
 [ "${objs:-0}" -gt 0 ] || { echo "!!! missing: build/csrc/*.o"; exit 1; }
 
 echo ">>> OK: bin/spinel + $objs codegen objects + libprism.a"
-echo ">>> spinel-ebpf is ready. Try: bin/spinel-ebpf compile <file>.rb --build"
+
+# 4. Optional: mbedTLS, for OTLP over TLS (https:// / grpcs:// endpoints).
+#    Skipped unless asked for. bin/spinel-ebpf links it only when the generated C
+#    contains such an endpoint, so a plain-http setup never needs this step.
+if [ "${SPNL_WITH_TLS:-0}" = "1" ]; then
+  echo ">>> mbedTLS: $MBEDTLS_REPO @ $MBEDTLS_REF"
+  echo ">>> into:    $MBEDTLS_DIR"
+  if [ ! -d "$MBEDTLS_DIR/.git" ]; then
+    mkdir -p "$(dirname "$MBEDTLS_DIR")"
+    # Shallow, single-tag clone: mbedTLS carries a lot of history we never read.
+    # --recurse-submodules picks up the `framework` submodule the build needs.
+    git clone --depth 1 --branch "$MBEDTLS_REF" \
+      --recurse-submodules --shallow-submodules "$MBEDTLS_REPO" "$MBEDTLS_DIR"
+  else
+    git -C "$MBEDTLS_DIR" remote set-url origin "$MBEDTLS_REPO"
+    git -C "$MBEDTLS_DIR" fetch --depth 1 --tags origin "$MBEDTLS_REF"
+    git -C "$MBEDTLS_DIR" checkout -q FETCH_HEAD
+    git -C "$MBEDTLS_DIR" submodule update --init --recursive --depth 1
+  fi
+  "$HERE/scripts/build-mbedtls.sh"
+  tls_note=", with TLS"
+else
+  tls_note=""
+fi
+
+# 5. Optional: the OTLP schemas and the nanopb generator. Neither is needed to
+#    build a probe or to send telemetry -- the encoders are committed. These are
+#    for decoding a payload back into text (tests/runtime) and for regenerating
+#    those encoders (scripts/regen-otlp-pb.sh).
+if [ "${SPNL_WITH_PROTO:-0}" = "1" ]; then
+  fetch_pin() {   # <repo> <ref> <dir>
+    echo ">>> $(basename "$3"): $1 @ $2"
+    if [ ! -d "$3/.git" ]; then
+      mkdir -p "$(dirname "$3")"
+      git clone --depth 1 --branch "$2" "$1" "$3"
+    else
+      git -C "$3" remote set-url origin "$1"
+      git -C "$3" fetch --depth 1 --tags origin "$2"
+      git -C "$3" checkout -q FETCH_HEAD
+    fi
+  }
+  fetch_pin "$PROTO_REPO" "$PROTO_REF" "$PROTO_DIR"
+  fetch_pin "$NANOPB_REPO" "$NANOPB_REF" "$NANOPB_DIR"
+  [ -d "$PROTO_DIR/opentelemetry" ] || { echo "!!! missing: $PROTO_DIR/opentelemetry"; exit 1; }
+  [ -f "$NANOPB_DIR/generator/nanopb_generator.py" ] || {
+    echo "!!! missing: $NANOPB_DIR/generator/nanopb_generator.py"; exit 1; }
+  echo ">>> OK: OTLP schemas + nanopb generator"
+fi
+
+echo ">>> spinel-ebpf is ready$tls_note. Try: bin/spinel-ebpf compile <file>.rb --build"
+[ "${SPNL_WITH_TLS:-0}" = "1" ] ||
+  echo ">>> (TLS is off. For an https:// or grpcs:// OTLP endpoint, re-run with SPNL_WITH_TLS=1.)"
+[ "${SPNL_WITH_PROTO:-0}" = "1" ] ||
+  echo ">>> (OTLP schemas are off. To decode telemetry in tests/runtime, re-run with SPNL_WITH_PROTO=1.)"

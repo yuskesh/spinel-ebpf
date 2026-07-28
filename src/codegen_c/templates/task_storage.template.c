@@ -36,7 +36,7 @@ static __always_inline __s64 spnl_task_incr(__s64 delta)
 }
 
 /* single-get read-modify-write - store `value`, return the prior
- * value. One bpf_task_storage_get so it stays clear of the two-get
+ * value. One bpf_task_storage_get, so it stays clear of the two-get
  * aliasing quirk. */
 static __always_inline __s64 spnl_task_swap(__s64 value)
 {

@@ -58,9 +58,12 @@ container exec dev bash -c '
 
 | Directory | What it adds |
 |---|---|
-| `http-1.0-server` | single-process HTTP/1.0 accept loop |
-| `l7-path-counter` | an L7 per-path counter that lives in a BPF map |
-| `so-reuseport` | multiple worker processes sharing a port via SO_REUSEPORT |
-| `keepalive` | HTTP/1.1 persistent connections on top of SO_REUSEPORT |
-| `epoll` | one worker per core multiplexing many connections with epoll |
-| `pure-xdp-tcp-slice` | handshake + request + response served entirely in XDP, no kernel TCP socket |
+| `http-1.0-server/` | The baseline. A single-process accept loop plus a request-line parser: `GET /` and `GET /health` return 200, unknown paths 404, non-GET 405, malformed request lines 400. One request per connection (`Connection: close`). |
+| `l7-path-counter/` | An L7 per-path counter that lives entirely in a BPF map. Each served request calls `record_path_hit(path_key)`, which is partitioned to the eBPF side and lands in the `bpf_path_counts` HASH map -- readable with `bpftool map dump name bpf_path_counts`. |
+| `so-reuseport/` | Multiple worker processes. Each worker opens its own listen socket with SO_REUSEPORT on the same port, and the kernel's 5-tuple hash spreads incoming SYNs across the group. Everything from the L7 counter variant still applies. |
+| `keepalive/` | HTTP/1.1 persistent connections on top of SO_REUSEPORT. Without keepalive, one request per connection makes the server RTT-bound over a real network, so it cannot be compared fairly against nginx. Pure userspace (builds `--native-only`, no libbpf) to isolate the keepalive question. |
+| `epoll/` | An event-driven worker. The blocking keepalive model occupies a worker for the whole life of one connection, so N workers serve only N concurrent connections. Here each worker runs an epoll loop and multiplexes many connections, the way nginx does, so one worker per core saturates the machine. |
+| `pure-xdp-tcp-slice/` | The response never reaches userspace. The kernel TCP stack does not listen on the port at all; the XDP program answers SYN / data / FIN itself, using `bpf_tcp_raw_gen_syncookie_ipv4` for the handshake and a per-flow state map for the rest. No `accept`, `read`, `write` or `close` on the server side. `tcp_slice.rb` is the DSL form, `ruby_slice.rb` writes the same slice as a plain Ruby `xdp__` method, and `server.rb` is the earlier XDP_TX variant that still uses the kernel handshake. |
+| `kernel_cache_demo/` | Declaring a route is enough. `kernel_cache "/ping", body` makes spinel-ebpf synthesize a pure-XDP TCP slice that serves that path from the kernel -- no hand-written eBPF. `ping.rb` builds the body at runtime and pushes it into a BPF map; `routes.rb` declares several routes dispatched by one slice. |
+| `sendfile_demo/` | `sendfile(2)` zero-copy static-file serving: HTTP framing stays in Ruby, and only the body bytes go from the file page cache straight to the socket, never through a userspace buffer (nginx's `sendfile on`). Also contains the dogfooding demos that serve the project's own presentation deck and a browser terminal. |
+| `ws_echo.rb` | A WebSocket echo server with RFC 6455 handshake and frame parse / unmask / build / mask written entirely in Ruby -- no C shims. Client frames are masked binary and routinely contain NUL bytes, so the I/O is binary-safe throughout. |

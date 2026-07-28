@@ -1,0 +1,67 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/101_ppid.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @from_init
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fmod_ret__security_file_open
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name file
+N 7 RequiredParameterNode
+S 7 name ret
+A 5 requireds 6,7
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 8 StatementsNode
+N 9 IfNode
+N 10 CallNode
+S 10 name ==
+N 11 CallNode
+S 11 name ppid
+R 11 receiver -1
+R 11 arguments -1
+R 11 block -1
+S 11 call_operator .
+I 11 vcall 1
+R 10 receiver 11
+N 12 ArgumentsNode
+N 13 IntegerNode
+I 13 value 1
+A 12 arguments 13
+R 10 arguments 12
+R 10 block -1
+S 10 call_operator .
+R 9 predicate 10
+N 14 StatementsNode
+N 15 InstanceVariableWriteNode
+S 15 name @from_init
+N 16 CallNode
+S 16 name +
+N 17 InstanceVariableReadNode
+S 17 name @from_init
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 1
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+A 14 body 15
+R 9 statements 14
+R 9 subsequent -1
+N 20 LocalVariableReadNode
+S 20 name ret
+A 8 body 9,20
+R 4 body 8
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

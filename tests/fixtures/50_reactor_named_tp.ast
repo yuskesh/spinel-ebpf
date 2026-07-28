@@ -33,6 +33,7 @@ S 13 content sched_switch
 A 10 arguments 11,12,13
 R 9 arguments 10
 N 14 BlockNode
+S 14 locals prev_pid,next_pid
 N 15 BlockParametersNode
 N 16 ParametersNode
 N 17 RequiredParameterNode

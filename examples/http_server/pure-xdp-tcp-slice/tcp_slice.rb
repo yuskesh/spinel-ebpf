@@ -1,16 +1,17 @@
 # examples/http_server/pure-xdp-tcp-slice/tcp_slice.rb
 #
-# Pure-XDP TCP slice for /health.
+# The final form: a pure-XDP TCP slice for /health.
 #
-# Architecture: kernel TCP stack does NOT listen on port 8080. Instead the
+# Architecture: the kernel TCP stack does NOT listen on port 8080. Instead the
 # XDP program intercepts SYN/data/FIN at the lo ingress hook and answers
 # entirely from the eBPF side using `bpf_tcp_raw_gen_syncookie_ipv4` for
 # handshake and a per-flow state map for ESTABLISHED/RESPONSE_SENT/CLOSED
-# transitions. Worker process is not required: there is no `accept` queue,
+# transitions. A worker process is not required: there is no `accept` queue,
 # no `read`, no `write`, no `close` syscall on the server side.
 #
-# This is the strict form of "the response does not traverse userspace" in
-# its strongest possible sense.
+# This is "the response does not traverse userspace" in its strongest possible
+# sense -- userspace is not merely bypassed on the data path, it holds no socket
+# for this port at all.
 #
 # Build:
 #   spinel-ebpf compile examples/http_server/pure-xdp-tcp-slice/tcp_slice.rb \
@@ -22,16 +23,16 @@
 
 # The body is a marker. The codegen recognises `xdp__tcp_slice__<name>` and
 # emits the complete TCP slice machinery (bpf_conntab map + 4 helpers + the
-# state-machine entry point) automatically — the body below is *replaced* at
+# state-machine entry point) automatically -- the body below is *replaced* at
 # compile time, not lowered.
 #
-# The slice is hardcoded for /health on port 8080. A future revision will lift
-# this into Ruby-DSL-configurable form (`def xdp__tcp_slice__<name>(port,
-# prefix, body)`).
+# This slice is hardcoded for /health on port 8080. Making it configurable from
+# the Ruby DSL (`def xdp__tcp_slice__<name>(port, prefix, body)`) is future work;
+# see kernel_cache_demo/ for the declarative multi-route form.
 def xdp__tcp_slice__health
   XDP_PASS  # placeholder (codegen replaces the whole function)
 end
 
 puts "[tcp_slice] kernel-side /health responder ready"
-puts "[tcp_slice] worker process not required — strace this process should show 0 data-plane syscalls"
+puts "[tcp_slice] worker process not required -- strace this process should show 0 data-plane syscalls"
 sleep 3600

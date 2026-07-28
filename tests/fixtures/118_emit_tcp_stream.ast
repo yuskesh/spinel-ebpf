@@ -1,0 +1,38 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/118_emit_tcp_stream.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name size
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name emit_tcp_stream
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name sk
+N 11 LocalVariableReadNode
+S 11 name msg
+N 12 LocalVariableReadNode
+S 12 name size
+A 9 arguments 10,11,12
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+A 7 body 8
+R 2 body 7
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

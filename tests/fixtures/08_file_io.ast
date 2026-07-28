@@ -26,6 +26,7 @@ S 10 content r
 A 8 arguments 9,10
 R 6 arguments 8
 N 11 BlockNode
+S 11 locals f
 N 12 BlockParametersNode
 N 13 ParametersNode
 N 14 RequiredParameterNode

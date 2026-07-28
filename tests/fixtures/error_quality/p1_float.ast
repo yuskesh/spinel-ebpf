@@ -1,0 +1,33 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/error_quality_p1_float.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 LocalVariableWriteNode
+S 7 name x
+N 8 FloatNode
+F 8 value 1.5
+R 7 value 8
+N 9 InstanceVariableOperatorWriteNode
+S 9 name @count
+S 9 binary_operator +
+N 10 LocalVariableReadNode
+S 10 name x
+R 9 value 10
+A 6 body 7,9
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

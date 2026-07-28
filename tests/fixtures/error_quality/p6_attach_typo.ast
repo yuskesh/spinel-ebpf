@@ -1,0 +1,20 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/error_quality_p6_attach_typo.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe_do_sys_openat2
+R 2 parameters -1
+N 3 StatementsNode
+N 4 CallNode
+S 4 name latency_start
+R 4 receiver -1
+R 4 arguments -1
+R 4 block -1
+S 4 call_operator .
+I 4 vcall 1
+A 3 body 4
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

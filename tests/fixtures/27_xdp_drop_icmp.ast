@@ -40,6 +40,7 @@ R 16 receiver -1
 R 16 arguments -1
 R 16 block -1
 S 16 call_operator .
+I 16 vcall 1
 R 15 receiver 16
 N 17 ArgumentsNode
 N 18 ConstantReadNode

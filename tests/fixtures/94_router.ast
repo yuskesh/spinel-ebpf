@@ -23,6 +23,7 @@ R 9 receiver -1
 R 9 arguments -1
 R 9 block -1
 S 9 call_operator .
+I 9 vcall 1
 A 8 arguments 9
 R 7 arguments 8
 R 7 block -1

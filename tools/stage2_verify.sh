@@ -1,14 +1,14 @@
 #!/bin/sh
-# In-process codegen gate. Run INSIDE the build container (spnlbuild),
-# cwd = repo root. Confirms the PRODUCTION in-process codegen (parse+analyze
-# .rb -> Compiler -> emit, no --emit-ir) reproduces the committed goldens
-# (tests/golden/*.bpf.c) byte-for-byte — the same goldens the host gate
-# (tools/golden.rb) pins the text codegen to. Together: golden.rb gates the
-# codegen logic on the host; this gates that the in-process path == golden.
+# In-process codegen gate. Run INSIDE the build
+# container (spnlbuild), cwd = repo root. Confirms the PRODUCTION in-process
+# codegen (parse+analyze .rb -> Compiler -> emit, no --emit-ir) reproduces the
+# committed goldens (tests/golden/*.bpf.c) byte-for-byte — the same goldens the
+# host gate (tools/golden.rb) pins the text codegen to. Together: golden.rb gates
+# the codegen logic on the host; this gates that the in-process path == golden.
 #
-# (Previously this diffed the in-process output against the Ruby CodegenBpf
-#  oracle; that lockstep is retired — the goldens are the source of truth now.
-#  See tools/golden.rb / tools/cgen_oracle.rb.)
+# (This used to diff the in-process output against the Ruby CodegenBpf oracle;
+#  that lockstep is retired -- the goldens are the source of truth now. See
+#  tools/golden.rb / tools/cgen_oracle.rb.)
 set -eu
 cd "$(dirname "$0")/.."
 SP=deps/spinel

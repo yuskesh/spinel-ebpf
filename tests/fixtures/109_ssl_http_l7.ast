@@ -1,0 +1,96 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/109_ssl_http_l7.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name uprobe__SSL_write
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name ssl
+N 5 RequiredParameterNode
+S 5 name buf
+N 6 RequiredParameterNode
+S 6 name num
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name ssl_req_start
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name ssl
+N 11 LocalVariableReadNode
+S 11 name buf
+A 9 arguments 10,11
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 12 IntegerNode
+I 12 value 0
+A 7 body 8,12
+R 2 body 7
+R 2 receiver -1
+N 13 DefNode
+S 13 name uprobe__SSL_read
+N 14 ParametersNode
+N 15 RequiredParameterNode
+S 15 name ssl
+N 16 RequiredParameterNode
+S 16 name buf
+N 17 RequiredParameterNode
+S 17 name num
+A 14 requireds 15,16,17
+A 14 optionals 
+A 14 keywords 
+A 14 posts 
+R 13 parameters 14
+N 18 StatementsNode
+N 19 CallNode
+S 19 name ssl_resp_stash
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name ssl
+N 22 LocalVariableReadNode
+S 22 name buf
+A 20 arguments 21,22
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+N 23 IntegerNode
+I 23 value 0
+A 18 body 19,23
+R 13 body 18
+R 13 receiver -1
+N 24 DefNode
+S 24 name uretprobe__SSL_read
+N 25 ParametersNode
+N 26 RequiredParameterNode
+S 26 name ret
+A 25 requireds 26
+A 25 optionals 
+A 25 keywords 
+A 25 posts 
+R 24 parameters 25
+N 27 StatementsNode
+N 28 CallNode
+S 28 name ssl_emit
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 LocalVariableReadNode
+S 30 name ret
+A 29 arguments 30
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+N 31 IntegerNode
+I 31 value 0
+A 27 body 28,31
+R 24 body 27
+R 24 receiver -1
+A 1 body 2,13,24
+R 0 statements 1

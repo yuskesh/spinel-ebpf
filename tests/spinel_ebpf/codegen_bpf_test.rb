@@ -54,7 +54,7 @@ class CodegenBpfTest < Minitest::Test
     c = emit_for("04_class_with_ivars")
     assert_includes c, '#include "vmlinux.h"'
     assert_includes c, '#include <bpf/bpf_helpers.h>'
-    assert_includes c, 'char LICENSE[] SEC("license") = "Dual MIT/GPL";'
+    assert_includes c, 'char LICENSE[] SEC("license") = "GPL";'
   end
 
   def test_header_mentions_source_unit_and_counts
@@ -2307,10 +2307,637 @@ end
     assert_match(/bpf_get_current_comm\(_se\d+->str/, inner)
   end
 
-  def test_builtins_in_builtin_names
+  def test_comm_builtins_in_builtin_names
     assert_includes GEN::BUILTIN_NAMES, "divu"
     assert_includes GEN::BUILTIN_NAMES, "comm_hash"
     assert_includes GEN::BUILTIN_NAMES, "emit_comm"
+  end
+
+  # ---------- cgroup_id (k8s pod correlation) ----------
+
+  def test_cgroup_id_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "cgroup_id"
+  end
+
+  def test_cgroup_id_inlines_bpf_get_current_cgroup_id
+    c = emit_for("111_cgroup_id")
+    inner = c[/kprobe__do_sys_openat2_inner\(.*?\n\}/m]
+    refute_nil inner
+    # 0-arg value builtin, in the same family as cpu_id/ktime_ns.
+    assert_match(/= \(\(__s64\)bpf_get_current_cgroup_id\(\)\);/, inner)
+  end
+
+  # ---------- k8s pod attribution (cgid on packed-record spans) ----------
+  # Each emit path stamps bpf_get_current_cgroup_id() into a new __u64 cgid field
+  # so userspace can resolve the pod (otlp_k8s). Probe .rb is unchanged — the field
+  # rides the existing record. These lock the Ruby oracle; the C codegen is golden-gated.
+
+  def test_conn_event_carries_cgid
+    c = emit_for("104_emit_connect")
+    assert_match(/struct \w+_conn_event \{.*__u64 cgid;.*\};/m, c)
+    inner = c[/tracepoint__sock__inet_sock_set_state_inner\(.*?\n\}/m]
+    assert_match(/->cgid = bpf_get_current_cgroup_id\(\);/, inner)
+  end
+
+  def test_dns_event_carries_cgid
+    c = emit_for("105_emit_dns")
+    assert_match(/struct \w+_dns_event \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/->cgid = bpf_get_current_cgroup_id\(\);/, c)
+  end
+
+  def test_sock_owner_records_cgid_and_emit_connect_recovers_it
+    # conn runs in softirq for external connects -> owner (process ctx) carries the cgid.
+    c = emit_for("106_sock_owner_correlate")
+    assert_match(/struct \w+_sock_owner_info \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/_soi\.cgid = bpf_get_current_cgroup_id\(\);/, c)   # sock_owner_set records
+    assert_match(/->cgid = _soi->cgid;/, c)                          # emit_connect recovers
+  end
+
+  def test_l7_threads_cgid_from_req_state_to_event
+    c = emit_for("107_emit_l7")
+    assert_match(/struct \w+_req_state \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/struct \w+_l7_event \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/_rst\.cgid = bpf_get_current_cgroup_id\(\);/, c)   # captured at request send
+    assert_match(/->cgid = \w+->cgid;/, c)                          # copied into the event
+  end
+
+  def test_http_threads_cgid_from_pending_to_event
+    c = emit_for("108_http_l7")
+    assert_match(/struct \w+_http_pending_st \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/struct \w+_http_event \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/_hp\.cgid = bpf_get_current_cgroup_id\(\);/, c)
+    assert_match(/->cgid = _ep->cgid;/, c)
+  end
+
+  def test_offcpu_event_carries_cgid
+    c = emit_for("110_offcpu_l7")
+    assert_match(/struct \w+_offcpu_event \{.*__u64 cgid;.*\};/m, c)
+    assert_match(/->cgid = bpf_get_current_cgroup_id\(\);/, c)
+  end
+
+  # ---------- emit_path (full path via bpf_d_path) ----------
+
+  def test_emit_path_uses_d_path_into_str_ringbuf
+    c = emit_for("99_emit_path")
+    # Rides the per-unit string-event channel, same as emit_comm/emit_argv.
+    assert_includes c, "_str_events SEC(\".maps\");"
+    inner = c[/lsm__file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_match(/bpf_ringbuf_reserve\(&u_99_emit_path_str_events/, inner)
+    # Measured: bpf_d_path memmoves the result to buf[0] but leaves the
+    # pre-memmove copy in the tail, so the slot is zeroed before the call.
+    assert_match(/__builtin_memset\(_pe\d+->str, 0, sizeof\(_pe\d+->str\)\);/, inner)
+    assert_match(/bpf_d_path\(&\(\(struct file \*\)\(unsigned long\)\(file\)\)->f_path, _pe\d+->str/, inner)
+    assert_match(/bpf_ringbuf_submit\(_pe\d+, 0\);/, inner)
+  end
+
+  def test_emit_path_works_in_fmod_ret_too
+    c = emit_for("99_emit_path")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_match(/bpf_d_path\(&\(\(struct file \*\)\(unsigned long\)\(file\)\)->f_path/, inner)
+  end
+
+  def test_emit_path_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "emit_path"
+  end
+
+  # A kernel-gated helper must fail at compile time, not emit a program
+  # the verifier rejects at load. The gate is NOT a plain name list — measurement
+  # showed lsm/file_open OK but lsm/file_permission REJECTED ("helper call is
+  # not allowed in probe"), while fmod_ret/security_file_permission is OK. Pin
+  # the measured set so nobody widens it by guessing.
+  # (The raise itself needs a fixture to emit from; the C codegen's die() on
+  # lsm/file_permission + kprobe was verified on a 7.1.3 kernel.)
+  def test_emit_path_allowlist_is_the_measured_set
+    ok = GEN::MethodEmitter::DPATH_OK_SECS
+    assert_includes ok, "lsm/file_open"
+    assert_includes ok, "fmod_ret/security_file_open"
+    assert_includes ok, "fmod_ret/security_file_permission"
+    # measured REJECTED by the kernel -> must not be emittable
+    refute_includes ok, "lsm/file_permission"
+    refute_includes ok, "fentry/vfs_write"
+    # the gate compares against detect_attach's SEC, so it must line up
+    assert_equal "lsm/file_permission", GEN.detect_attach("lsm__file_permission")[:sec]
+    assert_equal "lsm/file_open",       GEN.detect_attach("lsm__file_open")[:sec]
+  end
+
+  # ---------- path_eq (the equivalent of Tetragon's matchBinaries) ----------
+
+  def test_path_eq_lowers_to_sized_buf_and_unrolled_compare
+    c = emit_for("100_path_eq")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    # "/etc/spnl_locked_file" = 21 bytes -> buf = ((21+1+7)/8)*8 = 24, ret = 22.
+    # Sizing to the literal is the correct semantics: a longer real path makes
+    # bpf_d_path return -ENAMETOOLONG => no match (the layout was measured).
+    assert_match(/char _pb\d+\[24\] = \{0\};/, inner)
+    assert_match(/__s64 _pr\d+ = bpf_d_path\(&\(\(struct file \*\)\(unsigned long\)\(file\)\)->f_path, _pb\d+, sizeof\(_pb\d+\)\);/, inner)
+    # length first, so a mismatched length short-circuits the byte compares away
+    assert_match(/__s64 _pm\d+ = \(_pr\d+ == 22\);/, inner)
+    # AOT: the literal's bytes are burned in, one unrolled compare each
+    assert_match(/_pm\d+ = _pm\d+ && \(_pb\d+\[0\] == 47\);/, inner)   # '/'
+    assert_match(/_pm\d+ = _pm\d+ && \(_pb\d+\[20\] == 101\);/, inner) # 'e'
+    assert_equal 21, inner.scan(/_pm\d+ = _pm\d+ && \(_pb\d+\[\d+\] == \d+\);/).length
+  end
+
+  def test_path_eq_is_an_expression_driving_if
+    c = emit_for("100_path_eq")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    # path_eq is an expression (unlike emit_path, a statement), so it drives `if`
+    assert_match(/if \(\(_pm\d+\)\)/, inner)
+  end
+
+  def test_path_eq_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "path_eq"
+  end
+
+  # Same kernel gate as emit_path — pin the measured set so it fails at compile time.
+  def test_path_eq_shares_the_measured_dpath_allowlist
+    ok = GEN::MethodEmitter::DPATH_OK_SECS
+    assert_includes ok, "fmod_ret/security_file_open"
+    refute_includes ok, "lsm/file_permission"
+  end
+
+  # Measured: buf<=504 loads, buf>=512 is rejected by clang ("BPF stack limit
+  # is exceeded"). The cap sits inside that wall with headroom for the rest of the frame.
+  def test_path_eq_max_is_inside_the_measured_stack_wall
+    assert_operator GEN::MethodEmitter::PATH_EQ_MAX, :<=, 504
+  end
+
+  # ---------- ppid + parent_path_eq (lineage, Tetragon matchParentBinaries) ----------
+
+  def test_ppid_is_core_read_scalar_not_direct_deref
+    c = emit_for("101_ppid")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    # scalar read => BPF_CORE_READ (probe_read), not a direct deref: only pointers
+    # that must stay trusted (for bpf_d_path) are dereferenced directly.
+    assert_match(/\(\(__s64\)BPF_CORE_READ\(bpf_get_current_task_btf\(\), real_parent, tgid\)\)/, inner)
+    # ppid pulls in the CO-RE header
+    assert_includes c, "#include <bpf/bpf_core_read.h>"
+  end
+
+  def test_parent_path_eq_uses_direct_deref_for_trusted_dpath
+    c = emit_for("102_parent_path_eq")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    # DIRECT DEREF chain (not BPF_CORE_READ) so the pointer stays trusted for bpf_d_path
+    assert_match(/struct task_struct \*_pt\d+ = bpf_get_current_task_btf\(\);/, inner)
+    assert_match(/bpf_d_path\(&_pt\d+->real_parent->mm->exe_file->f_path, _pb\d+/, inner)
+    # "/usr/bin/spnlbad" = 16 bytes -> ret == 17 (parent), and the fixture ANDs it
+    # with path_eq(file, "/etc/spnl_parent_file") = 21 bytes -> ret == 22.
+    assert_match(/__s64 _pm\d+ = \(_pr\d+ == 17\);/, inner)   # parent_path_eq length gate
+    assert_match(/__s64 _pm\d+ = \(_pr\d+ == 22\);/, inner)   # path_eq length gate
+    # 16 (parent) + 21 (file) unrolled byte compares, both burned in at compile time
+    assert_equal 37, inner.scan(/_pm\d+ = _pm\d+ && \(_pb\d+\[\d+\] == \d+\);/).length
+  end
+
+  def test_lineage_builtins_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "ppid"
+    assert_includes GEN::BUILTIN_NAMES, "parent_path_eq"
+  end
+
+  # parent_path_eq shares the same bpf_d_path compile-time gate. Same pinned set as path_eq.
+  def test_parent_path_eq_shares_measured_dpath_allowlist
+    ok = GEN::MethodEmitter::DPATH_OK_SECS
+    assert_includes ok, "fmod_ret/security_file_open"
+    refute_includes ok, "lsm/file_permission"
+  end
+
+  # ---------- emit_parent_path (live audit — parent exe path) ----------
+
+  def test_emit_parent_path_direct_deref_to_str_ringbuf
+    c = emit_for("103_emit_parent_path")
+    inner = c[/lsm__file_open_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_includes c, "_str_events SEC(\".maps\");"
+    # DIRECT DEREF chain (not BPF_CORE_READ) so it stays trusted for bpf_d_path
+    assert_match(/struct task_struct \*_pt\d+ = bpf_get_current_task_btf\(\);/, inner)
+    assert_match(/bpf_d_path\(&_pt\d+->real_parent->mm->exe_file->f_path, _pe\d+->str/, inner)
+    assert_match(/__builtin_memset\(_pe\d+->str, 0, sizeof\(_pe\d+->str\)\);/, inner)
+  end
+
+  def test_emit_parent_path_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "emit_parent_path"
+  end
+
+  # ---------- emit_connect (packed network-connect event) ----------
+
+  def test_emit_connect_packs_one_atomic_record
+    c = emit_for("104_emit_connect")
+    inner = c[/tracepoint__sock__inet_sock_set_state_inner\(.*?\n\}/m]
+    refute_nil inner
+    # one packed conn_event record (no str-triple desync)
+    assert_includes c, "_conn_events SEC(\".maps\");"
+    assert_match(/bpf_ringbuf_reserve\(&u_104_emit_connect_conn_events/, inner)
+    assert_match(/->pid = \(__u32\)\(bpf_get_current_pid_tgid\(\) >> 32\);/, inner)
+    assert_match(/bpf_get_current_comm\(_ce\d+->comm/, inner)
+    # srtt_us from tcp_sock via CO-RE (untrusted skaddr -> BPF_CORE_READ)
+    assert_match(/->srtt_us = \(__s64\)BPF_CORE_READ\(\(struct tcp_sock \*\).*, srtt_us\);/, inner)
+    assert_includes c, "#include <bpf/bpf_core_read.h>"
+  end
+
+  def test_emit_connect_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "emit_connect"
+  end
+
+  # ---------- caps struct for >5-arg attach handlers ----------
+
+  def test_six_param_handler_uses_caps_struct
+    c = emit_for("112_caps_args")
+    fn = "tracepoint__sock__inet_sock_set_state"
+    # caps struct declared with one field per param, before the inner
+    assert_match(/struct #{fn}_args \{\n\s+__s64 p0;\n\s+__s64 p1;\n\s+__s64 p2;\n\s+__s64 p3;\n\s+__s64 p4;\n\s+__s64 p5;\n\};/, c)
+    # inner takes the struct pointer, not N scalar args
+    assert_match(/static __noinline __s64 #{fn}_inner\(struct #{fn}_args \*__a\)/, c)
+  end
+
+  def test_caps_inner_expands_params_to_locals
+    c = emit_for("112_caps_args")
+    inner = c[/static __noinline __s64 tracepoint__sock__inet_sock_set_state_inner\(struct.*?\n\}/m]
+    refute_nil inner
+    # prologue expands the packed args back to param-named locals
+    assert_includes inner, "__s64 skaddr = __a->p0;"
+    assert_includes inner, "__s64 oldstate = __a->p1;"
+    assert_includes inner, "__s64 family = __a->p5;"
+    # body still references the params by name (codegen unchanged)
+    assert_includes inner, "skaddr + oldstate + sport + dport + family"
+  end
+
+  def test_caps_wrapper_packs_extractors_and_passes_pointer
+    c = emit_for("112_caps_args")
+    wrap = c[/SEC\("tracepoint\/sock\/inet_sock_set_state"\)\n.*?\n\}/m]
+    refute_nil wrap
+    assert_includes wrap, "struct tracepoint__sock__inet_sock_set_state_args __a = {};"
+    assert_match(/__a\.p0 = \(__s64\)\(\(struct trace_event_raw_inet_sock_set_state \*\)ctx\)->skaddr;/, wrap)
+    assert_match(/__a\.p5 = \(__s64\)\(\(struct trace_event_raw_inet_sock_set_state \*\)ctx\)->family;/, wrap)
+    # inner is called with the struct pointer (1 reg), not 6 scalar args
+    assert_includes wrap, "tracepoint__sock__inet_sock_set_state_inner(&__a);"
+  end
+
+  def test_five_param_handler_stays_scalar
+    c = emit_for("113_scalar_args")
+    # nreg == 5 -> no caps: no args struct, inner takes the 5 scalars
+    refute_includes c, "_args {"
+    refute_includes c, "__a"
+    assert_match(/static __noinline __s64 tracepoint__sock__inet_sock_set_state_inner\(__s64 skaddr, __s64 oldstate, __s64 newstate, __s64 sport, __s64 dport\)/, c)
+  end
+
+  def test_conn_handler_carries_oldstate_and_ipv6_via_caps
+    # 104's conn handler is now 8-param (skaddr, daddr, dport, family, oldstate,
+    # newstate, daddr6_hi, daddr6_lo) -> caps form. emit_connect records oldstate
+    # (direction) and the IPv6 daddr halves (peer when family==AF_INET6).
+    c = emit_for("104_emit_connect")
+    # conn record: oldstate + daddr6 appended after cgid (cgid offset stays stable)
+    assert_match(/__u64 cgid;\s*__u32 oldstate;\s*__u64 daddr6_hi;\s*__u64 daddr6_lo;\s*\};/m, c)
+    # handler is caps (8 params far exceed the 5-arg limit): p0..p7
+    assert_match(/struct tracepoint__sock__inet_sock_set_state_args \{[^}]*__s64 p7;[^}]*\}/m, c)
+    # emit_connect writes oldstate + both IPv6 halves into the record
+    assert_match(/->oldstate = \(__u32\)\(oldstate\);/, c)
+    assert_match(/->daddr6_hi = \(__u64\)\(daddr6_hi\);/, c)
+    assert_match(/->daddr6_lo = \(__u64\)\(daddr6_lo\);/, c)
+    # IPv6 daddr comes from the tracepoint daddr_v6[16] array, copied into a stack
+    # buffer via bpf_probe_read_kernel (reading the 2nd half directly off ctx is
+    # rejected as a "modified ctx ptr"), then split into hi (_d6) / lo (_d6 + 8).
+    assert_match(%r{__a\.p6 = \(__s64\)\(\{ __u8 _d6\[16\] = \{\}; bpf_probe_read_kernel\(_d6, 16, \(\(struct trace_event_raw_inet_sock_set_state \*\)ctx\)->daddr_v6\); \*\(__u64 \*\)_d6; \}\);}, c)
+    assert_match(%r{__a\.p7 = .*\*\(__u64 \*\)\(_d6 \+ 8\); \}\);}, c)
+  end
+
+  # ---------- tracepoint named-field BTF automation ----------
+
+  def test_ipv6_split_is_convention_not_a_table_entry
+    # The hand-written ipv6hi/ipv6lo TRACEPOINT_FIELDS entries are gone; the
+    # <base>6_hi / <base>6_lo split convention now derives the kernel's <base>_v6
+    # __u8[16] field name (daddr6_hi -> daddr_v6), so ipv6 needs no per-event entry.
+    f = SpinelEbpf::CodegenBpf::TRACEPOINT_FIELDS["sock/inet_sock_set_state"]
+    refute f.key?("daddr6_hi"), "ipv6 table entry should be gone (convention drives it)"
+    refute f.key?("daddr6_lo"), "ipv6 table entry should be gone (convention drives it)"
+    # ...yet the daddr_v6 hi/lo split is still emitted for 104's daddr6_hi/lo params.
+    c = emit_for("104_emit_connect")
+    assert_match(%r{bpf_probe_read_kernel\(_d6, 16, \(\(struct trace_event_raw_inet_sock_set_state \*\)ctx\)->daddr_v6\); \*\(__u64 \*\)_d6; \}\);}, c)
+    assert_match(%r{->daddr_v6\); \*\(__u64 \*\)\(_d6 \+ 8\); \}\);}, c)
+  end
+
+  def test_ctx_forwarded_caps_inner_takes_ctx_first
+    # 67_memleak's kmalloc: 6 params + stack_id (ctx forwarded) = nreg 7 -> caps.
+    # The inner must take (void *ctx, struct ..._args *__a) so bpf_get_stackid
+    # still has ctx.
+    c = emit_for("67_memleak")
+    assert_match(/static __noinline __s64 tracepoint__kmem__kmalloc_inner\(void \*ctx, struct tracepoint__kmem__kmalloc_args \*__a\)/, c)
+    wrap = c[/SEC\("tracepoint\/kmem\/kmalloc"\)\n.*?\n\}/m]
+    assert_includes wrap, "tracepoint__kmem__kmalloc_inner(ctx, &__a);"
+    # kfree (2 params, ctx forwarded for the unit's stack traces) is nreg 3 <= 5,
+    # so it stays scalar (no caps struct), just with ctx first.
+    assert_match(/static __noinline __s64 tracepoint__kmem__kfree_inner\(void \*ctx, __s64 call_site, __s64 ptr\)/, c)
+    refute_includes c, "kfree_args"
+  end
+
+  # ---------- emit_dns (resolver-independent DNS query) ----------
+
+  def test_emit_dns_copies_raw_payload_from_msghdr
+    c = emit_for("105_emit_dns")
+    inner = c[/kprobe__udp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_includes c, "_dns_events SEC(\".maps\");"
+    # raw DNS payload read from msghdr's ubuf iovec (QNAME parsed in userspace)
+    assert_match(/BPF_CORE_READ\(\(struct msghdr \*\).*, msg_iter\.__ubuf_iovec\.iov_base\)/, inner)
+    assert_match(/bpf_probe_read_user\(_de\d+->raw, sizeof\(_de\d+->raw\)/, inner)
+    assert_includes c, "#include <bpf/bpf_core_read.h>"
+  end
+
+  def test_emit_dns_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "emit_dns"
+  end
+
+  # ---------- socket-keyed process correlation ----------
+
+  def test_sock_owner_set_populates_correlation_map
+    c = emit_for("106_sock_owner_correlate")
+    # connect kprobe (process ctx) records sock ptr -> {pid, comm}
+    inner = c[/kprobe__tcp_v4_connect_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_includes c, "_sock_owner SEC(\".maps\");"
+    assert_includes c, "BPF_MAP_TYPE_HASH"
+    assert_match(/bpf_map_update_elem\(&\w+_sock_owner, &_sok, &_soi, BPF_ANY\)/, inner)
+    assert_match(/bpf_get_current_comm\(_soi\.comm/, inner)
+  end
+
+  def test_emit_connect_correlates_when_sock_owner_used
+    c = emit_for("106_sock_owner_correlate")
+    est = c[/inet_sock_set_state_inner\(.*?\n\}/m]
+    refute_nil est
+    # emit_connect recovers the real owner by sock-ptr lookup (swapper/0 -> real)
+    assert_match(/bpf_map_lookup_elem\(&\w+_sock_owner, &_sok\)/, est)
+    assert_match(/->pid = _soi->pid;/, est)
+    assert_match(/__builtin_memcpy\(_ce\d+->comm, _soi->comm/, est)
+  end
+
+  def test_emit_connect_no_correlation_without_sock_owner
+    # backward compat: a probe without sock_owner_set must NOT emit a lookup
+    c = emit_for("104_emit_connect")
+    refute_includes c, "_sock_owner"
+    refute_match(/bpf_map_lookup_elem\(&\w+_sock_owner/, c)
+  end
+
+  def test_sock_owner_set_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "sock_owner_set"
+  end
+
+  # ---------- L7 request/response latency (send->recv correlation) ----------
+
+  def test_req_start_records_send_time_keyed_by_sock
+    c = emit_for("107_emit_l7")
+    send = c[/kprobe__tcp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil send
+    assert_includes c, "_req_start SEC(\".maps\");"
+    # first-send creates a clean 1-outstanding entry keyed by sock; a second send
+    # while one is still open marks the sock multiplexed.
+    assert_match(/struct \w+_req_state \*_rex = bpf_map_lookup_elem\(&\w+_req_start, &_rsk\);/, send)
+    assert_match(/_rst\.start_ns = bpf_ktime_get_ns\(\)/, send)
+    assert_match(/_rst\.outstanding = 1;/, send)
+  end
+
+  # Multiplexing guard — a second concurrent send poisons the sock (mux=1),
+  # and emit_l7 never emits a per-exchange latency for a poisoned sock.
+  def test_multiplexing_guard_on_req_state
+    c = emit_for("107_emit_l7")
+    assert_match(/struct \w+_req_state \{[^}]*__u32 outstanding;[^}]*__u32 mux;[^}]*\}/m, c)
+    send = c[/kprobe__tcp_sendmsg_inner\(.*?\n\}/m]
+    assert_match(/_rex->outstanding \+= 1;/, send)
+    assert_match(/_rex->mux = 1;/, send)
+    recv = c[/kprobe__tcp_cleanup_rbuf_inner\(.*?\n\}/m]
+    assert_match(/if \(\w+->mux\) \{/, recv)             # poisoned sock -> suppress
+    assert_match(/if \(\w+->outstanding > 0\) \w+->outstanding -= 1;/, recv)
+  end
+
+  def test_emit_l7_computes_duration_and_deletes
+    c = emit_for("107_emit_l7")
+    recv = c[/kprobe__tcp_cleanup_rbuf_inner\(.*?\n\}/m]
+    refute_nil recv
+    assert_includes c, "_l7_events SEC(\".maps\");"
+    # duration = now - start, peer read via CO-RE, entry deleted (next send = new req)
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - \w+->start_ns;/, recv)
+    assert_match(/BPF_CORE_READ\(\(struct sock \*\).*, __sk_common\.skc_daddr\)/, recv)
+    assert_match(/bpf_map_delete_elem\(&\w+_req_start, &_lsk\)/, recv)
+    assert_includes c, "#include <bpf/bpf_endian.h>"
+  end
+
+  def test_l7_builtins_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "req_start"
+    assert_includes GEN::BUILTIN_NAMES, "emit_l7"
+    assert_includes GEN::BUILTIN_NAMES, "i32"
+  end
+
+  def test_i32_truncates_and_sign_extends_32bit_arg
+    # i32(copied) reads a 32-bit kernel arg correctly (upper bits garbage on arm64)
+    c = emit_for("107_emit_l7")
+    recv = c[/kprobe__tcp_cleanup_rbuf_inner\(.*?\n\}/m]
+    refute_nil recv
+    assert_match(/\(__s64\)\(__s32\)\(copied\)/, recv)
+  end
+
+  # ---------- DNS request/response latency (txid-keyed) ----------
+
+  def test_dns_latency_maps_and_record
+    c = emit_for("111_dns_latency")
+    # dns_event gains duration_ns (0 = query-only, >0 = RTT); pending is txid-keyed LRU
+    assert_match(/struct \w+_dns_event \{[^}]*__u64 cgid;[^}]*__u64 duration_ns;[^}]*\}/m, c)
+    assert_match(/BPF_MAP_TYPE_LRU_HASH[^}]*\}\s*\w+_dns_pending SEC\(".maps"\);/m, c)
+    assert_includes c, "_dns_recv_stash SEC(\".maps\");"
+  end
+
+  def test_dns_req_start_keys_by_sock_and_txid
+    c = emit_for("111_dns_latency")
+    send = c[/kprobe__udp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil send
+    # txid = payload bytes 0..1 (be16); key = (sock<<16 | txid)
+    assert_match(/bpf_probe_read_user\(_dqid\d*, sizeof\(_dqid\d*\), _dqb\d*\)/, send)
+    assert_match(/\(__u64\)\(unsigned long\)\(sk\) << 16\) \| \(\(__u64\)_dqid\d*\[0\] << 8\) \| \(__u64\)_dqid\d*\[1\]/, send)
+    assert_match(/bpf_map_update_elem\(&\w+_dns_pending,/, send)
+  end
+
+  def test_dns_emit_correlates_and_sets_duration
+    c = emit_for("111_dns_latency")
+    recv = c[/kretprobe__udp_recvmsg_inner\(.*?\n\}/m]
+    refute_nil recv
+    # ret>0 guard (i32-style), response txid correlation, RTT into duration_ns
+    assert_match(/\(__s64\)\(__s32\)\(ret\)\) > 0/, recv)
+    assert_match(/bpf_map_lookup_elem\(&\w+_dns_pending, &_dkey\d*\)/, recv)
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - \*_dstart\d*;/, recv)
+    assert_match(/bpf_map_delete_elem\(&\w+_dns_pending, &_dkey\d*\)/, recv)
+  end
+
+  def test_emit_dns_query_only_sets_duration_zero
+    # emit_dns coexists: query-only record must zero duration_ns explicitly
+    c = emit_for("105_emit_dns")
+    assert_match(/->duration_ns = 0;/, c)
+  end
+
+  def test_dns_builtins_in_builtin_names
+    %w[dns_req_start dns_resp_stash dns_emit].each { |b| assert_includes GEN::BUILTIN_NAMES, b }
+  end
+
+  # ---------- zero-code HTTP L7 RED ----------
+
+  def test_http_req_start_reads_request_and_filters_method
+    c = emit_for("108_http_l7")
+    send = c[/kprobe__tcp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil send
+    assert_includes c, "_http_pending SEC(\".maps\");"
+    assert_includes c, "spnl_is_http_req"          # method filter (excludes non-HTTP + responses)
+    assert_match(/bpf_probe_read_user\(_hp\.req, sizeof\(_hp\.req\)/, send)
+    assert_match(/msg_iter\.__ubuf_iovec\.iov_base/, send)
+  end
+
+  def test_http_resp_stash_by_tid
+    c = emit_for("108_http_l7")
+    recv = c[/kprobe__tcp_recvmsg_inner\(.*?\n\}/m]
+    refute_nil recv
+    assert_includes c, "_http_recv_stash SEC(\".maps\");"
+    assert_match(/bpf_map_update_elem\(&\w+_http_recv_stash, &_rt, &_rs/, recv)
+  end
+
+  def test_http_emit_correlates_status_and_duration
+    c = emit_for("108_http_l7")
+    ret = c[/kretprobe__tcp_recvmsg_inner\(.*?\n\}/m]
+    refute_nil ret
+    assert_includes c, "_http_events SEC(\".maps\");"
+    # response looks-HTTP check + duration + i32-style ret guard + emit combined record
+    assert_match(/_resp\[0\]=='H' && _resp\[1\]=='T' && _resp\[2\]=='T' && _resp\[3\]=='P'/, ret)
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - _ep->start_ns;/, ret)
+    assert_match(/\(__s64\)\(__s32\)\(ret\)/, ret)
+  end
+
+  def test_http_builtins_in_builtin_names
+    %w[http_req_start http_resp_stash http_emit].each { |b| assert_includes GEN::BUILTIN_NAMES, b }
+  end
+
+  # ---------- Redis L7 RED ----------
+
+  def test_redis_emit_correlates_reply_and_duration
+    c = emit_for("119_redis_l7")
+    ret = c[/kretprobe__tcp_recvmsg_inner\(.*?\n\}/m]
+    refute_nil ret
+    assert_includes c, "_redis_events SEC(\".maps\");"
+    # RESP request sniff (dedicated filter, not HTTP) + reply-type guard + duration + i32 ret guard
+    assert_includes c, "spnl_is_redis_cmd"
+    assert_match(/_resp\[0\]=='\+' \|\| _resp\[0\]=='-' \|\| _resp\[0\]==':' \|\| _resp\[0\]=='\$' \|\| _resp\[0\]=='\*'/, ret)
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - _ep->start_ns;/, ret)
+    assert_match(/\(__s64\)\(__s32\)\(ret\)/, ret)
+    # reply read bounded to bytes received (short RESP replies like "+OK\r\n" would -EFAULT on fixed 16B)
+    assert_match(/_rn = .*if \(_rn > sizeof\(_resp\)\)/, ret)
+  end
+
+  def test_redis_req_start_bounds_read_to_send_length
+    # Redis messages are short; a fixed 64B read -EFAULTs past the send buffer. The read must be
+    # bounded to the actual send length (size = PARM3), like emit_tcp_stream.
+    c = emit_for("119_redis_l7")
+    snd = c[/kprobe__tcp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil snd
+    assert_match(/__u64 _dn = \(__u64\)\(size\);/, snd)
+    assert_match(/bpf_probe_read_user\(_dp\.req, _dn, _db\)/, snd)
+  end
+
+  def test_redis_builtins_in_builtin_names
+    %w[redis_req_start redis_resp_stash redis_emit].each { |b| assert_includes GEN::BUILTIN_NAMES, b }
+  end
+
+  # ---------- Go crypto/tls plaintext (go_tls_write) ----------
+
+  def test_go_tls_write_emits_request_span_from_go_slice
+    c = emit_for("120_go_tls_write")
+    inner = c[/uprobe__react0_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_includes c, "_http_events SEC(\".maps\");"     # reuses the HTTP path's http_events
+    assert_includes c, "spnl_is_http_req"                  # HTTP request filter
+    # length-bounded plaintext read + request-only emit (no sock -> https)
+    assert_match(/__u64 _gn = \(__u64\)\(len\);/, inner)
+    assert_match(/if \(_gn > 64\) _gn = 64;/, inner)
+    assert_match(/bpf_probe_read_user\(_greq, _gn, _gp\)/, inner)
+    assert_match(/->daddr = 0;/, inner)
+    # arm64 Go ABI: PARM1/2/3 = conn/ptr/len
+    assert_match(/uprobe__react0_inner\(\(__s64\)PT_REGS_PARM1\(ctx\), \(__s64\)PT_REGS_PARM2\(ctx\), \(__s64\)PT_REGS_PARM3\(ctx\)\)/, c)
+  end
+
+  def test_go_tls_write_in_builtin_names
+    assert_includes GEN::BUILTIN_NAMES, "go_tls_write"
+  end
+
+  def test_go_uret_synthesizes_uprobe_sec_prog
+    # go_uret shares the uprobe SEC/codegen (glue attaches at RET offsets); the .bpf.c is a
+    # plain SEC("uprobe") handler that reads PARM1 (=R0 = return value at the RET).
+    c = emit_for("121_go_uret")
+    assert_match(/^SEC\("uprobe"\)/m, c)
+    assert_match(/uprobe__react0_inner\(__s64 ret\)/, c)
+    assert_match(/uprobe__react0_inner\(\(__s64\)PT_REGS_PARM1\(ctx\)\)/, c)
+  end
+
+  # ---------- TLS plaintext span (SSL uprobe) ----------
+
+  def test_ssl_reuses_http_parser_maps_and_filter
+    c = emit_for("109_ssl_http_l7")
+    # reuses the HTTP path's shared maps + filter (no new struct/map)
+    assert_includes c, "_http_pending SEC(\".maps\");"
+    assert_includes c, "_http_events SEC(\".maps\");"
+    assert_includes c, "spnl_is_http_req"
+    assert_match(/^SEC\("uprobe"\)/m, c)
+    assert_match(/^SEC\("uretprobe"\)/m, c)
+  end
+
+  def test_ssl_req_start_reads_plaintext_buffer_direct
+    c = emit_for("109_ssl_http_l7")
+    w = c[/uprobe__SSL_write_inner\(.*?\n\}/m]
+    refute_nil w
+    # reads the plaintext buf (PARM2) directly (not via msghdr), keyed by SSL* (PARM1)
+    assert_match(/bpf_probe_read_user\(_sp\.req, sizeof\(_sp\.req\), _sb\)/, w)
+    refute_match(/msg_iter/, w)   # SSL path does not go through msghdr
+  end
+
+  def test_ssl_emit_marks_tls_no_sock
+    c = emit_for("109_ssl_http_l7")
+    r = c[/uretprobe__SSL_read_inner\(.*?\n\}/m]
+    refute_nil r
+    # TLS path carries no sock -> daddr/dport/family = 0 (userspace sets url.scheme=https)
+    assert_match(/->daddr = 0; \w+->dport = 0; \w+->family = 0;/, r)
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - _sep->start_ns;/, r)
+  end
+
+  def test_ssl_builtins_in_builtin_names
+    %w[ssl_req_start ssl_resp_stash ssl_emit].each { |b| assert_includes GEN::BUILTIN_NAMES, b }
+  end
+
+  # ---------- off-CPU correlated into the L7 span ----------
+
+  def test_offcpu_maps_and_window_struct
+    c = emit_for("110_offcpu_l7")
+    assert_includes c, "_offcpu_win SEC(\".maps\");"
+    assert_includes c, "_offcpu_events SEC(\".maps\");"
+    assert_includes c, "spnl_is_http_req"        # reuses the HTTP request filter
+    assert_match(/struct \w+_offcpu_win \{[^}]*offcpu_ns;[^}]*wait_stack;/m, c)
+  end
+
+  def test_sched_switch_accounts_voluntary_offcpu
+    c = emit_for("110_offcpu_l7")
+    sw = c[/sched_switch_inner\(void \*ctx.*?\n\}/m]
+    refute_nil sw   # ctx forwarded (for bpf_get_stackid)
+    # prev voluntary off-CPU (state != 0) records sleep + wait stack; next accumulates delta
+    assert_match(/if \(_opw && \(\(__s64\)\(prev_state\)\) != 0\)/, sw)
+    assert_match(/bpf_get_stackid\(ctx, &bpf_stacks, 0\)/, sw)
+    assert_match(/_onw->offcpu_ns \+= _onow - _onw->sleep_ts;/, sw)
+  end
+
+  def test_emit_carries_offcpu_and_duration
+    c = emit_for("110_offcpu_l7")
+    em = c[/kprobe__tcp_sendmsg_inner\(.*?\n\}/m]
+    refute_nil em
+    assert_match(/->duration_ns = bpf_ktime_get_ns\(\) - _ow->start_ns;/, em)
+    assert_match(/->offcpu_ns = _ow->offcpu_ns;/, em)
+    assert_match(/->wait_stack = _ow->wait_stack;/, em)
+  end
+
+  def test_offcpu_builtins_in_builtin_names
+    %w[offcpu_recv_stash offcpu_begin offcpu_account offcpu_emit].each { |b| assert_includes GEN::BUILTIN_NAMES, b }
   end
 
   # ---------- reactor per-handler PID kwarg ----------

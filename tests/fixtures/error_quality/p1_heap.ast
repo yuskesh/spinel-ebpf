@@ -1,0 +1,69 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/error_quality_p1_heap.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name map
+N 8 ArrayNode
+N 9 IntegerNode
+I 9 value 1
+N 10 IntegerNode
+I 10 value 2
+N 11 IntegerNode
+I 11 value 3
+A 8 elements 9,10,11
+R 7 receiver 8
+R 7 arguments -1
+N 12 BlockNode
+S 12 locals n
+N 13 BlockParametersNode
+N 14 ParametersNode
+N 15 RequiredParameterNode
+S 15 name n
+A 14 requireds 15
+A 14 optionals 
+A 14 keywords 
+A 14 posts 
+R 13 parameters 14
+R 12 parameters 13
+N 16 StatementsNode
+N 17 CallNode
+S 17 name *
+N 18 LocalVariableReadNode
+S 18 name n
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 2
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+A 16 body 17
+R 12 body 16
+R 7 block 12
+S 7 call_operator .
+N 21 InstanceVariableOperatorWriteNode
+S 21 name @count
+S 21 binary_operator +
+N 22 IntegerNode
+I 22 value 1
+R 21 value 22
+A 6 body 7,21
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

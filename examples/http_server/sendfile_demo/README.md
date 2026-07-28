@@ -1,16 +1,16 @@
-# sendfile_demo — sendfile(2) zero-copy static-file serving
+# sendfile_demo -- sendfile(2) zero-copy static-file serving
 
-A server that adds a single `GET /static` route to the HTTP/1.0 accept loop.
-Only `/static` streams its body straight from the file page cache to the socket
-with `sendfile(2)` (equivalent to nginx's `sendfile on`). HTTP framing stays in
-Ruby; only the body transfer drops into the kernel.
+The http-1.0-server accept loop with exactly one extra route, `GET /static`.
+Only `/static` streams its body straight from the **file page cache to the
+socket** with `sendfile(2)` (the equivalent of nginx's `sendfile on`). HTTP
+framing stays in Ruby; only the body transfer is pushed down into the kernel.
 
-| Route | Response | Path |
+| Route | Response | Path taken |
 |---|---|---|
-| `GET /static` | contents of `$SPINEL_STATIC_FILE` (200) / 404 if missing | header = `write`, body = **`sendfile`** |
-| `GET /` | `hello\n` (200) | `write` (for contrast) |
+| `GET /static` | contents of `$SPINEL_STATIC_FILE` (200), or 404 if absent | header=`write`, body=**`sendfile`** |
+| `GET /` | `hello\n` (200) | `write` (the control case) |
 | `GET /health` | `OK\n` (200) | `write` |
-| other / non-GET / invalid | 404 / 405 / 400 | `write` |
+| anything else / non-GET / malformed | 404 / 405 / 400 | `write` |
 
 ## Build + run (container)
 
@@ -28,15 +28,15 @@ container exec spnlbuild bash -c '
 '
 ```
 
-## Proof that sendfile is issued (strace)
+## Proving sendfile is actually issued (strace)
 
 ```bash
 strace -f -e trace=sendfile,sendto,write -o strace.log \
   env SPINEL_STATIC_FILE=/tmp/static.bin /tmp/sfd/server &
 # after curl /static:
-#   sendto(4, "HTTP/1.0 200 OK...", 103, ...) = 103      <- only the header goes via write
+#   sendto(4, "HTTP/1.0 200 OK...", 103, ...) = 103      <- only the header goes through write
 #   sendfile(4, 5, [0] => [1048576], 1048576) = 1048576  <- the 1MB body is kernel zero-copy
 ```
 
 Apart from the header (at most 103 bytes), the 1MB body never passes through
-`write` / `sendto`.
+`write`/`sendto` at all.

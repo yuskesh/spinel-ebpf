@@ -1,13 +1,13 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# Demangle spinel C symbols (`sp_<...>`) in a folded-stack file to Ruby names +
-# source location, using an upstream `--emit-symbol-map` JSON. Pairs the eBPF
-# self-profiler's user-stack flame graph with spinel's symbol map so frames read
-# `fib (app.rb:1)` instead of `sp_fib`.
+# Demangle spinel C symbols (`sp_<...>`) in a folded-stack file to
+# Ruby names + source location, using an upstream `--emit-symbol-map` JSON. Pairs
+# the eBPF self-profiler's user-stack flame graph with spinel's symbol map
+# so frames read `fib (app.rb:1)` instead of `sp_fib`.
 #
 #   build/spinel app.rb --emit-symbol-map -o syms.json   # (or build/<base>.symmap.json from --instrument)
-#   ./profiler ... > folded.txt                          # user-stack folded output
+#   ./profiler ... > folded.txt                          # user-stack folded output from the profiler
 #   ruby tools/demangle_folded.rb syms.json folded.txt > folded.ruby.txt
 #   flamegraph.pl < folded.ruby.txt > flame.svg
 #

@@ -4,9 +4,9 @@
 # Golden-snapshot regression gate.
 #
 # Replaces the Ruby byte-identity *lockstep*: now that the C codegen is the
-# production source of truth and is gaining structured emission (the C AST
-# emitter), pinning its output to the Ruby codegen forced every change to
-# drag Ruby along. Instead we pin the C codegen's output to committed goldens
+# production source of truth and is gaining structured emission (a C AST layer
+# instead of raw string building), pinning its output to the Ruby codegen forced
+# every change to drag Ruby along. Instead we pin the C codegen's output to committed goldens
 # under tests/golden/. The C codegen is free to evolve — an intentional output
 # change is a reviewable golden diff (regenerate with --update). The Ruby codegen
 # (tools/cgen_oracle.rb) is retired from the gate; it stays only as a historical
@@ -24,6 +24,19 @@ FIX  = File.join(ROOT, "tests/fixtures")
 GOLD = File.join(ROOT, "tests/golden")
 CC   = File.join(ROOT, "build/codegen_c/spinel_ebpf_cc")
 abort "C codegen not built: #{CC}\n  (cc -O2 -o #{CC} src/codegen_c/spinel_ebpf_cc.c)" unless File.executable?(CC)
+
+# Preflight: +x is not enough. build/ is shared with the container via the bind
+# mount, so a container build can leave a Linux ELF here (or vice versa) that this
+# host cannot exec. Every fixture then "fails" and lands in the no-ebpf skip bucket,
+# which used to report `PASS=0 ... skip(no-ebpf)=99` and **exit 0** — a green that
+# proves nothing ran. A working binary prints its usage line when given no args.
+_pre_out, _pre_err, _pre_st = Open3.capture3(CC)
+unless "#{_pre_out}#{_pre_err}".include?("usage:")
+  abort "golden: #{CC} exists but does not run here (no usage line; exit " \
+        "#{_pre_st.exitstatus.inspect}).\n" \
+        "  Likely built for the other platform (build/ is bind-mounted into the container).\n" \
+        "  Rebuild for this host: cc -O2 -o #{CC} src/codegen_c/spinel_ebpf_cc.c"
+end
 
 update = !ARGV.delete("--update").nil?
 only   = ARGV[0]
@@ -67,6 +80,16 @@ end
 puts "-" * 60
 puts "PASS=#{pass}  DIFF=#{diff}  MISSING=#{miss}  skip(no-ebpf)=#{skip}" \
      "#{update ? '   (goldens written)' : ''}"
+
+# A gate that compared nothing is not a pass. The skip bucket is meant for the few
+# fixtures with no eBPF-eligible method; if it swallowed *everything*, the codegen is
+# broken, not the corpus. (Belt-and-braces with the preflight above: that catches a
+# non-runnable binary, this catches any other way the whole run turns into skips.)
+if pass + diff + miss == 0
+  abort "\ngolden: nothing was compared — all #{skip} fixtures skipped.\n" \
+        "  That is a broken gate, not a pass: the C codegen rejected every fixture.\n" \
+        "  Check that #{CC} is current and runs on this host."
+end
 
 if only && diffs.any?
   b, golden, cout = diffs.first

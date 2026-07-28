@@ -1,22 +1,22 @@
 # examples/http_server/ws_echo.rb
 #
 # WebSocket echo server, **frame handling written entirely in Ruby** (spinel
-# subset) — no sp_ws_* C shims. This is the payoff of `:binstr`: client WS
-# frames are masked binary and routinely contain 0x00 bytes, so the frame
+# subset) -- no sp_ws_* C shims. This is the payoff of `:binstr`: client
+# WS frames are masked binary and routinely contain 0x00 bytes, so the frame
 # read MUST be binary-safe. `sp_net_rl_recv_some` declared `:binstr` builds the
 # String from sp_net_bin_len bytes (not strlen), so embedded NULs survive; the
 # echo is written with `sp_net_write_bytes` (explicit length, NUL-safe). With
 # the old `:str` mode the frame would truncate at the first NUL.
 #
-# This is the first stage of the WebSocket+PTY terminal plan: prove the WS layer
-# (RFC 6455 handshake + frame parse/unmask/build/mask) in Ruby before adding PTY.
+# This is stage S1 of the WebSocket+PTY terminal plan: prove the WS layer (RFC
+# 6455 handshake + frame parse/unmask/build/mask) in Ruby before adding PTY.
 #
 #   GET / (Upgrade: websocket) -> 101 -> echo every text/binary frame back
 #   ping -> pong, close -> close (then drop the connection)
 #
 # build: bin/spinel-ebpf compile examples/http_server/ws_echo.rb --native-only --build -o build
 # run:   SPINEL_HTTP_PORT=8090 ./build/ws_echo
-#   then connect with wscat -c ws://127.0.0.1:8090/ (or a raw masked frame)
+#   then connect with wscat -c ws://127.0.0.1:8090/, or send a raw masked frame
 
 module Crypto
   ffi_func :sp_crypto_websocket_accept, [:str],       :str

@@ -38,6 +38,7 @@ A 12 elements 13
 A 10 arguments 11,12
 R 9 arguments 10
 N 16 BlockNode
+S 16 locals sid
 N 17 StatementsNode
 N 18 LocalVariableWriteNode
 S 18 name sid
@@ -47,6 +48,7 @@ R 19 receiver -1
 R 19 arguments -1
 R 19 block -1
 S 19 call_operator .
+I 19 vcall 1
 R 18 value 19
 N 20 IfNode
 N 21 CallNode

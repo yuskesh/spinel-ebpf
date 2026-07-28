@@ -1,20 +1,21 @@
 # frozen_string_literal: true
 #
-# The spinel-ebpf *plugin* layer — declaration semantics, manifest discovery,
-# and ABI validation.
+# the spinel-ebpf *plugin* layer — declaration semantics,
+# manifest discovery, and ABI validation.
 #
 # A source declares its plugin dependency with `use_plugin :ebpf`. The CLI:
 #   - discovers the plugin by convention + search path (no central registry),
 #   - validates the manifest's abi_version,
 #   - errors fast when a declared plugin is not installed / abi mismatches,
 #   - errors (strict) / warns when the BPF namespace is used WITHOUT a
-#     declaration (no silent native fallback).
+#     declaration (— no silent native fallback).
 #
 # spinel's native codegen (`-c`) rejects a top-level `use_plugin :ebpf`
 # ("unsupported call"), so the directive is stripped (-> comment, line count
 # preserved) before any spinel/in-process invocation. Detection runs on the
 # original source. This layer adds NO upstream patch; the faithful "spinel is
-# the entry that delegates" reversal is deferred to a future upstream PR.
+# the entry that delegates" reversal is deferred to a future
+# an upstream pull request.
 
 module SpinelEbpf
   module Plugin
@@ -25,8 +26,8 @@ module SpinelEbpf
     # Raised for an installed-but-incompatible plugin (abi mismatch / malformed
     # manifest) and for a declared-but-missing plugin.
     class LoadError < StandardError; end
-    # Raised by the build-time arbiter when multiple declared plugins conflict
-    # (e.g. claim the same namespace).
+    # raised by the build-time arbiter when multiple declared
+    # plugins conflict (e.g. claim the same namespace). .
     class ArbitrationError < StandardError; end
     # Raised when the BPF namespace is used without `use_plugin` and strict mode
     # is on (SPNL_STRICT_PLUGINS=1).
@@ -35,15 +36,15 @@ module SpinelEbpf
     Manifest = Struct.new(:name, :abi_version, :entrypoint, :owns_namespace,
                           :link_libs, :lifecycle, :drive, :root, keyword_init: true)
 
-    # Drive model: who owns the userland run loop.
+    # drive model: who owns the userland run loop.
     #   passive       — no loop (kernel-driven, e.g. pure-XDP slice)
     #   source        — registers fd/timer/ringbuf to the program's loop, owns none
     #   loop-owning   — supplies the main loop (e.g. libuv). At most ONE per build.
     DRIVE_MODELS = %w[passive source loop-owning].freeze
 
-    # Fixed lifecycle phase buckets, in deterministic order. A manifest's
-    # `lifecycle` maps hook name -> phase (e.g. init=pre_main); the arbiter
-    # orders hooks by this bucket, tie-broken by declaration order.
+    # fixed lifecycle phase buckets, in deterministic order. A
+    # manifest's `lifecycle` maps hook name -> phase (e.g. init=pre_main); the
+    # arbiter orders hooks by this bucket, tie-broken by declaration order.
     LIFECYCLE_PHASES = %w[pre_main before_fork after_fork detach].freeze
 
     module_function
@@ -115,11 +116,11 @@ module SpinelEbpf
       raise LoadError, "malformed plugin manifest #{path}: #{e.message}"
     end
 
-    # Build-time arbiter. Given the manifests for all declared plugins, enforce
-    # cross-plugin invariants. Foundation: **namespace exclusivity** — a
-    # namespace token (owns_namespace entry) has exactly one owner; two plugins
-    # claiming the same token is a hard error. (Lifecycle ordering / single
-    # run-loop owner await a real second plugin to exercise.)
+    # build-time arbiter. Given the manifests
+    # for all declared plugins, enforce cross-plugin invariants. Foundation:
+    # **namespace exclusivity** — a namespace token (owns_namespace entry) has
+    # exactly one owner; two plugins claiming the same token is a hard error.
+    # (Lifecycle ordering / single run-loop owner are documented in # and await a real second plugin to exercise.)
     def arbitrate!(manifests)
       # (1) namespace exclusivity — a namespace token has exactly one owner.
       owner = {} # namespace token -> claiming plugin name
@@ -129,8 +130,8 @@ module SpinelEbpf
           if prev && prev != m.name
             raise ArbitrationError,
                   "plugin namespace conflict: `#{ns}` is claimed by both " \
-                  "'#{prev}' and '#{m.name}' — a namespace has exactly one owner. " \
-                  "Resolve by narrowing one plugin's owns_namespace."
+                  "'#{prev}' and '#{m.name}' — a namespace has exactly one owner " \
+                  ". Resolve by narrowing one plugin's owns_namespace."
           end
           owner[ns] = m.name
         end
@@ -148,11 +149,11 @@ module SpinelEbpf
       manifests
     end
 
-    # Deterministic lifecycle plan across declared plugins — hooks grouped into
-    # fixed phase buckets (LIFECYCLE_PHASES order), tie-broken by declaration
-    # order. Returns [[phase, plugin_name, hook_name], ...]. This is the order a
-    # driver fires init/fork/fini hooks; foundation for real multi-plugin
-    # composition (single-plugin = its own hooks in phase order).
+    # deterministic lifecycle plan across declared plugins —
+    # hooks grouped into fixed phase buckets (LIFECYCLE_PHASES order), tie-broken
+    # by declaration order. Returns [[phase, plugin_name, hook_name], ...]. This
+    # is the order a driver fires init/fork/fini hooks; foundation for real
+    # multi-plugin composition (single-plugin = its own hooks in phase order).
     def lifecycle_order(manifests)
       plan = []
       LIFECYCLE_PHASES.each do |phase|

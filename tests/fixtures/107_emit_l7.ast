@@ -1,0 +1,90 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/107_emit_l7.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name size
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name req_start
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name sk
+A 9 arguments 10
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 11 IntegerNode
+I 11 value 0
+A 7 body 8,11
+R 2 body 7
+R 2 receiver -1
+N 12 DefNode
+S 12 name kprobe__tcp_cleanup_rbuf
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name sk
+N 15 RequiredParameterNode
+S 15 name copied
+A 13 requireds 14,15
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 16 StatementsNode
+N 17 IfNode
+N 18 CallNode
+S 18 name >
+N 19 CallNode
+S 19 name i32
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name copied
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 receiver 19
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 0
+A 22 arguments 23
+R 18 arguments 22
+R 18 block -1
+S 18 call_operator .
+R 17 predicate 18
+N 24 StatementsNode
+N 25 CallNode
+S 25 name emit_l7
+R 25 receiver -1
+N 26 ArgumentsNode
+N 27 LocalVariableReadNode
+S 27 name sk
+A 26 arguments 27
+R 25 arguments 26
+R 25 block -1
+S 25 call_operator .
+A 24 body 25
+R 17 statements 24
+R 17 subsequent -1
+N 28 IntegerNode
+I 28 value 0
+A 16 body 17,28
+R 12 body 16
+R 12 receiver -1
+A 1 body 2,12
+R 0 statements 1

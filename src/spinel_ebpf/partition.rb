@@ -3,7 +3,7 @@
 # Partition algorithm — Phase 2 (per-method walk + flags) and Phase 3
 # (call-graph fix-point + tag decision).
 #
-# Per design in docs/research/partition_algorithm_design.md.
+
 # Consumes the parsed IR and AST.
 
 require_relative "parse_spinel_ir"
@@ -12,7 +12,7 @@ require_relative "kernel_cache"
 
 module SpinelEbpf
   module Partition
-    # Raised when a construct *names* the BPF plugin namespace
+    # raised when a construct *names* the BPF plugin namespace
     # — `class Foo < BPF::X`, `include BPF::X`, or reactor `on :kind` — but the
     # specific member is unknown. The BPF namespace is declarative (the tables
     # below ARE its definition); an unrecognised member is a hard error rather
@@ -45,7 +45,7 @@ module SpinelEbpf
       "BPF_SkMsg"       => "sk_msg__",
     }.freeze
 
-    # Same lookup but keyed on the constant-path array form
+    # same lookup but keyed on the constant-path array form
     # (so `include BPF::TcpCC` produces `%w[BPF TcpCC]` -> "tcp_cc__").
     # Derived once at load time so adding a new BPF DSL parent in
     # BPF_DSL_PARENT_TO_PREFIX also gets the module form for free.
@@ -64,14 +64,14 @@ module SpinelEbpf
     # requires extending the `on` form to take a target string.
     BPF_EVENT_LOOP_PATH = %w[BPF EventLoop].freeze
 
-    # Per-`on :kind` description. `arity` is the number of extra **string**
-    # arguments expected after the symbol; the synthesized method name is
-    # `<prefix>` for arity 0 (already includes "main") or
+    # A description per `on :kind`. `arity` is the number of
+    # extra **string** arguments expected after the symbol; the synthesized
+    # method name is `<prefix>` for arity 0 (already includes "main") or
     # `<prefix><target>` / `<prefix><target1>__<target2>` for arity 1/2.
     #
-    # Besides the 4 arity-0 kinds there are the per-target attach kinds
-    # (kprobe/kretprobe/fentry/fexit/tracepoint), which need a target function
-    # or tracepoint name encoded into the SEC().
+    # The four arity-0 kinds came first; the per-target attach
+    # kinds (kprobe/kretprobe/fentry/fexit/tracepoint) which need a target
+    # function or tracepoint name encoded into the SEC().
     EventLoopKind = Struct.new(:prefix, :arity, :joiner, keyword_init: true)
 
     BPF_EVENT_LOOP_KINDS = {
@@ -93,7 +93,7 @@ module SpinelEbpf
       # arity is 0 string-arg-wise; the interval is parsed separately from
       # the call's KeywordHashNode (every:). 1 module 1 timer (MVP).
       "timer"      => EventLoopKind.new(prefix: "spnl_timer__main", arity: 0),
-      # Reactor form of the userspace probes. Target binary path
+      # the reactor form of the userspace probes. Target binary path
       # contains '/' and ':' that aren't valid in Ruby method names, so we
       # synthesize names like `uprobe__react<N>` and stash the real target
       # in MethodInfo (dsl_uprobe_binary etc.). glue.c reads a per-prog
@@ -107,6 +107,13 @@ module SpinelEbpf
       # enumerator's main loop short-circuits these kinds.
       "uprobe"     => EventLoopKind.new(prefix: "uprobe__react",    arity: 1),
       "uretprobe"  => EventLoopKind.new(prefix: "uretprobe__react", arity: 1),
+      # Go return-probe. uretprobe is unusable on Go (movable stack
+      # corrupts the return-address trampoline), so the handler is a plain
+      # SEC("uprobe") (shares the "uprobe" prefix/codegen) that glue.c attaches
+      # at every RET instruction offset of the function (found by scanning the
+      # target ELF for the arm64 `ret` = 0xd65f03c0). At a RET, PARM1 (=R0) is
+      # the function's return value.
+      "go_uret"    => EventLoopKind.new(prefix: "uprobe__react",    arity: 1),
       "usdt"       => EventLoopKind.new(prefix: "usdt__react__",    arity: 3),
       # perf_event sampling. `on :perf_event, hz: 99 do … end`. arity 0
       # for the symbol args; frequency is parsed from a trailing
@@ -114,7 +121,7 @@ module SpinelEbpf
       "perf_event" => EventLoopKind.new(prefix: "perf_event__main", arity: 0),
     }.freeze
 
-    # Parse the `every: N.<unit>` keyword in `on :timer, every: 5.seconds do…`.
+    # parse `every: N.<unit>` keyword in `on :timer, every: 5.seconds do…`.
     # Returns nanoseconds at compile time, or nil if the AST shape doesn't
     # match (e.g. wrong unit / non-literal interval).
     BPF_TIMER_UNIT_NS = {
@@ -131,11 +138,11 @@ module SpinelEbpf
       "ns"           => 1,
     }.freeze
 
-    # Back-compat alias — older tests read this map directly. Holds
+    # Backward-compatible alias: older tests read this map directly. Holds
     # only the arity-0 attach kinds whose prefix is `<attach_prefix>main`
     # AND whose bare prefix is one of the BPF_DSL_PARENT_TO_PREFIX values
-    # (so xdp / sock_ops / tc_*). The user_cmd kind has its own unique
-    # method name (`user_ringbuf__cmd_handler`) and the timer kind is also
+    # (so xdp / sock_ops / tc_*). user_cmd has its own unique
+    # method name (`user_ringbuf__cmd_handler`) and the timer is also
     # a special-shape kind; both are excluded.
     BPF_EVENT_LOOP_KIND_TO_PREFIX = BPF_EVENT_LOOP_KINDS.each_with_object({}) do |(k, info), h|
       next unless info.arity == 0 && info.prefix.end_with?("main")
@@ -221,14 +228,14 @@ module SpinelEbpf
       :body_id,         # Integer (AST node id)
       :flags,           # MethodFlags
       :tag,             # :ebpf | :native | :error  (filled in Phase 3)
-      # When a method came from a `class Foo < BPF::Bar` block we
+      # when a method came from a `class Foo < BPF::Bar` block we
       # synthesize a top-level entry with method_name = "<prefix>__<orig>".
       # These hints let method_params look up the original spinel
       # @cls_meth_params slot (params live in the class table, not the
       # top-level table) without touching the rest of the pipeline.
       :dsl_class_idx,   # Integer index into @cls_names, or nil
       :dsl_orig_name,   # Original (unprefixed) method name, or nil
-      # Same idea for `module Foo; include BPF::Bar; end`. spinel's
+      # same idea for `module Foo; include BPF::Bar; end`. spinel's
       # IR doesn't track module-defined methods (@cls_* arrays are empty
       # for them), so we point straight at the DefNode in the AST and
       # codegen falls back to AST-driven param extraction.
@@ -238,7 +245,7 @@ module SpinelEbpf
       # timer arm prog with the right interval and to bake the re-arm
       # constant into the callback. nil for non-timer methods.
       :dsl_timer_interval_ns,
-      # Reactor-form uprobe/USDT target info. For uprobe / uretprobe
+      # reactor-form uprobe/USDT target info. For uprobe / uretprobe
       # the binary + func come from a single colon-separated string arg
       # (`"/usr/bin/bash:readline"`); for USDT three string args
       # (binary, provider, probe). glue.c reads these from a per-prog
@@ -247,13 +254,14 @@ module SpinelEbpf
       :dsl_uprobe_binary,   # String — binary path for any reactor uprobe/USDT
       :dsl_uprobe_func,     # String — function name for uprobe/uretprobe
       :dsl_uprobe_retprobe, # Boolean — true for uretprobe
+      :dsl_uprobe_go_ret,   # Boolean -- true for go_uret (attach at every RET offset)
       :dsl_usdt_provider,   # String — for usdt
       :dsl_usdt_name,       # String — for usdt
-      # Per-handler PID for reactor uprobe/USDT (`on :uprobe, "...",
+      # per-handler PID for reactor uprobe/USDT (`on :uprobe, "...",
       # pid: 12345`). nil = system-wide (libbpf attach with pid=-1). Falls
       # through to env $SPNL_*_PID if also unset there.
       :dsl_attach_pid,
-      # Sampling frequency (Hz) for `on :perf_event, hz: 99 do ... end`.
+      # sampling frequency (Hz) for `on :perf_event, hz: 99 do ... end`.
       # nil for flat-form (def perf_event__<name>) — glue.c uses $SPNL_PERF_HZ
       # (default 49). Integer for reactor form.
       :dsl_perf_event_hz,
@@ -394,7 +402,7 @@ module SpinelEbpf
         end
       end
 
-      # Top-level `module Foo; include BPF::Bar; def ...; end; end`.
+      # top-level `module Foo; include BPF::Bar; def ...; end; end`.
       # spinel does not surface module-defined methods in @cls_*, so we
       # walk the AST directly. Append results before the <main> scope so
       # ordering with class-derived methods is roughly source-order.
@@ -415,7 +423,7 @@ module SpinelEbpf
       results
     end
 
-    # Walk the AST root for top-level `module Foo; include BPF::Bar;
+    # walk the AST root for top-level `module Foo; include BPF::Bar;
     # def name(...); ...; end; end` blocks and synthesize MethodInfo
     # entries with `<prefix>__<name>` so the rest of the pipeline treats
     # them as flat-prefix top-level methods. spinel's IR doesn't expose
@@ -466,7 +474,7 @@ module SpinelEbpf
                 end
               end
             elsif cname == "on"
-              # Collect `on :kind do ... end` calls for later
+              # collect `on :kind do ... end` calls for later
               # processing once we know this module is an EventLoop.
               on_calls << bn
             end
@@ -487,7 +495,7 @@ module SpinelEbpf
             kind = sym.attrs.fetch("value", "")
             info = event_loop_kind!(kind)
 
-            # Collect target arguments (StringNode) for arity 1/2
+            # collect target arguments (StringNode) for arity 1/2
             # forms like `on :kprobe, "sys_open"` or
             # `on :tracepoint, "sched", "sched_switch"`.
             targets = []
@@ -501,23 +509,24 @@ module SpinelEbpf
             end
             next if targets.length != info.arity
 
-            # Reactor uprobe / uretprobe / usdt — split target string(s)
+            # reactor uprobe / uretprobe / usdt — split target string(s)
             # into binary path + func / provider + probe and synthesize a
             # generic method name (`uprobe__react0` etc.) whose attach metadata
             # is carried via MethodInfo's dsl_uprobe_* fields. glue.c reads
             # those at attach time so the SEC merely says "uprobe" / "usdt"
             # and libbpf doesn't have to parse paths out of program names.
-            # Also parse a trailing `pid: N` KeywordHashNode for per-handler
+            # also parse trailing `pid: N` KeywordHashNode for per-handler
             # PID restriction.
             dsl_uprobe_binary   = nil
             dsl_uprobe_func     = nil
             dsl_uprobe_retprobe = nil
+            dsl_uprobe_go_ret   = nil   # attach at every RET offset (Go return-probe)
             dsl_usdt_provider   = nil
             dsl_usdt_name       = nil
             dsl_attach_pid      = nil
-            reactor_uprobe_kind = (kind == "uprobe" || kind == "uretprobe" || kind == "usdt")
+            reactor_uprobe_kind = (kind == "uprobe" || kind == "uretprobe" || kind == "usdt" || kind == "go_uret")
             if reactor_uprobe_kind
-              # Look for a trailing KeywordHashNode `pid: N` after the
+              # look for a trailing KeywordHashNode `pid: N` after the
               # positional target args. Optional; nil means system-wide.
               kw_id = arg_ids[info.arity + 1]
               dsl_attach_pid = parse_attach_pid(ast, kw_id) if kw_id
@@ -540,6 +549,7 @@ module SpinelEbpf
                 dsl_uprobe_binary   = spec[0...idx]
                 dsl_uprobe_func     = spec[(idx + 1)..]
                 dsl_uprobe_retprobe = (kind == "uretprobe")
+                dsl_uprobe_go_ret   = (kind == "go_uret")   # the glue attaches at RET offsets
               end
             end
 
@@ -562,7 +572,7 @@ module SpinelEbpf
                             "#{info.prefix}#{n}"
                           end
 
-            # For `on :timer`, look for a trailing `every: N.<unit>`
+            # for `on :timer`, look for a trailing `every: N.<unit>`
             # KeywordHashNode in the arguments list and resolve it to ns.
             interval_ns = nil
             if kind == "timer"
@@ -576,7 +586,7 @@ module SpinelEbpf
               end
             end
 
-            # For `on :perf_event`, look for a trailing `hz: N`
+            # for `on :perf_event`, look for a trailing `hz: N`
             # KeywordHashNode. Optional; nil means glue.c falls back to
             # $SPNL_PERF_HZ (default 49).
             perf_hz = nil
@@ -604,6 +614,7 @@ module SpinelEbpf
               dsl_uprobe_binary: dsl_uprobe_binary,
               dsl_uprobe_func: dsl_uprobe_func,
               dsl_uprobe_retprobe: dsl_uprobe_retprobe,
+              dsl_uprobe_go_ret:   dsl_uprobe_go_ret,
               dsl_usdt_provider: dsl_usdt_provider,
               dsl_usdt_name: dsl_usdt_name,
               dsl_attach_pid: dsl_attach_pid,
@@ -629,7 +640,7 @@ module SpinelEbpf
       out
     end
 
-    # Parse a `every: N.<unit>` keyword from the `on :timer` args.
+    # parse a `every: N.<unit>` keyword from the `on :timer` args.
     # `kw_id` should point at the KeywordHashNode containing the `every:`
     # assoc. Returns the interval in nanoseconds (Integer) or nil if the
     # shape doesn't match (missing key, non-literal interval, unknown unit).
@@ -669,7 +680,7 @@ module SpinelEbpf
       nil
     end
 
-    # Parse `hz: N` from a KeywordHashNode (the trailing kwarg of
+    # parse `hz: N` from a KeywordHashNode (the trailing kwarg of
     # `on :perf_event, hz: 99 do ... end`). Returns the Integer hz, or nil
     # if the shape doesn't match. Values <= 0 are coerced to nil (let
     # glue.c fall back to env / default).
@@ -696,7 +707,7 @@ module SpinelEbpf
       nil
     end
 
-    # Parse `pid: N` from a KeywordHashNode (the trailing kwarg of a
+    # parse `pid: N` from a KeywordHashNode (the trailing kwarg of a
     # reactor uprobe/USDT `on` call). Returns the Integer pid, or nil if
     # the shape doesn't match. Negative values map to nil (meaning
     # "system-wide" — equivalent to libbpf's pid=-1).
@@ -812,7 +823,7 @@ module SpinelEbpf
         # `loop do ... end` is an unbounded Kernel#loop. Codegen has no
         # way to lower it (no static bound), so partition must keep methods
         # using it on the :native side. (`n.times { }` is the bounded form
-        # and stays :ebpf via bpf_loop lowering.)
+        # and stays :ebpf by lowering to bpf_loop.)
         if name == "loop" && recv < 0
           flags.uses_unbounded_loop = true
         end
@@ -926,7 +937,7 @@ module SpinelEbpf
       # main(); spinel-ebpf keeps it native so the host can orchestrate
       # calls into the :ebpf methods (cannot offload main itself).
       return mi.tag = :native if mi.scope == :main
-      # Synthesized userspace consumer / driver / named-handler methods
+      # synthesized userspace consumer / driver / named-handler methods
       # (the `on_emit` / `on_emit :name` DSL lowered by SpinelEbpf::Consumer) are
       # always native — they run in userspace draining the emit ringbuf, even
       # though the body may look eBPF-eligible (int + top-level ivar).
@@ -945,7 +956,7 @@ module SpinelEbpf
       methods = enumerate_methods(ir, ast)
       methods.each do |mi|
         analyze_method(mi, ast)
-        # Even when the body has no FloatNode literal, spinel's signature
+        # even when body has no FloatNode literal, spinel's signature
         # inference can tell us a param or return is float. Mark uses_float
         # accordingly so partition sees indirect float usage.
         refine_flags_from_signature(mi, ir)
@@ -973,11 +984,11 @@ module SpinelEbpf
       )
     end
 
-    # Pull per-method signature (param types + return type) from IR and
-    # toggle ebpf-impossible flags for any non-int type. Also flag
-    # string / array / hash / poly etc. as unsupported_type — codegen_bpf
-    # can't lower these as BPF parameters, so partition must keep such
-    # methods :native instead of letting codegen blow up.
+    # pull per-method signature (param types + return type) from IR and
+    # toggle ebpf-impossible flags for any non-int type.
+    # widen to flag string / array / hash / poly etc. as unsupported_type
+    # — codegen_bpf can't lower these as BPF parameters, so partition must
+    # keep such methods :native instead of letting codegen blow up.
     SUPPORTED_EBPF_SIGNATURE_TYPES = %w[int bool void nil].freeze
 
     def refine_flags_from_signature(mi, ir)
@@ -986,7 +997,7 @@ module SpinelEbpf
       # before it is a parameter type.
       last = types.length - 1
       types.each_with_index do |t, i|
-        # Nullability (`int?`, `float?`, `string?`, ...) is orthogonal
+        # nullability (`int?`, `float?`, `string?`, ...) is orthogonal
         # to eBPF type-eligibility — spinel widens a type to nullable for any
         # value that can be nil, and crucially infers `int?` for any method
         # whose body is `if … end` without an explicit `else` (the implicit
@@ -995,7 +1006,7 @@ module SpinelEbpf
         # __s64 (nil -> 0). Judge by the base type so `int?` stays eligible,
         # `string?` stays rejected, and `float?` is still attributed to float.
         base = t.end_with?("?") ? t[0..-2] : t
-        # The C compiler's analyzer types empty-body / builtin-stub
+        # the C compiler's analyzer types empty-body / builtin-stub
         # methods' RETURN as `poly` where the legacy Ruby analyzer said `nil`
         # (e.g. `def spnl_emit(x); end`), and callers inherit it. A `poly`
         # RETURN is discarded for attach handlers and lowers to void otherwise,
@@ -1021,7 +1032,7 @@ module SpinelEbpf
         # ir.sa() already splits the IR's "|"-separated payload AND pads with
         # empties via split_strs_n. Re-applying flat_map(split("|", -1)) drops
         # empty entries because Ruby's "".split("|", -1) == [] in some versions,
-        # which silently misaligns idx → wrong types per method.
+        # which silently misaligns idx and yields wrong types per method.
         names = ir.sa("@meth_names") || []
         idx = names.index(mi.method_name)
         return [] unless idx

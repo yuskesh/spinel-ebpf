@@ -24,6 +24,7 @@ R 9 receiver -1
 R 9 arguments -1
 R 9 block -1
 S 9 call_operator .
+I 9 vcall 1
 R 8 value 9
 N 10 IfNode
 N 11 CallNode
@@ -54,6 +55,7 @@ R 19 receiver -1
 R 19 arguments -1
 R 19 block -1
 S 19 call_operator .
+I 19 vcall 1
 R 18 value 19
 A 15 body 16,18
 R 10 statements 15

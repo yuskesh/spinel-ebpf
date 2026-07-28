@@ -1,7 +1,7 @@
 # examples/http_server/pure-xdp-tcp-slice/ruby_slice.rb
 #
-# The pure-XDP TCP slice written as a PLAIN Ruby xdp__ method, using the DSL
-# builtins (instead of the C template emit_tcp_slice_bundle):
+# The pure-XDP TCP slice written as a PLAIN Ruby xdp__ method, using DSL
+# builtins instead of the C template emit_tcp_slice_bundle:
 #
 #   #1 pkt.tcp.seq / pkt.tcp.ack
 #   #2 flow_get / flow_set
@@ -10,8 +10,8 @@
 #   #5a payload_starts
 #   #5b tcp_reply_data
 #
-# The control flow (if/elsif state machine) lowers via the structured CIf/CBlock
-# codegen; packet/ref ownership is the linear-use pass's domain.
+# The control flow (an if/elsif state machine) lowers via the structured
+# CIf/CBlock codegen; packet/ref ownership is the linear-use pass's domain.
 #
 # Build / run (in a Linux container on the spinel kernel):
 #   bin/spinel-ebpf compile examples/http_server/pure-xdp-tcp-slice/ruby_slice.rb -o build/rbslice --build
@@ -22,22 +22,24 @@
 #   $ curl http://127.0.0.1:8080/hello   ->   HTTP 200, body "hello"
 # This Ruby slice (synack_cookie + flow map + payload match + reply_data, all DSL
 # builtins) completes the SYN-cookie 3-way handshake and serves the response
-# entirely in XDP — no kernel listener on :8080, no worker process. Two fixes got
-# here, both found via the C-inspection + BPF-counter methodology (no big
-# flat-subprog rewrite needed):
+# entirely in XDP -- no kernel listener on :8080, no worker process. Two fixes
+# were needed to get here, both found by inspecting the generated C and adding
+# BPF counters (no big flat-subprog rewrite was required):
 #  1. A compiler barrier (`asm volatile("" ::: "memory")`) after the synack
 #     bpf_xdp_adjust_tail grow, so clang re-reads ctx->data_end with a clean LDX
-#     instead of `ctx+4` (the verifier's "modified ctx ptr"). This one-line barrier
-#     — the standard post-adjust_tail idiom — makes the full slice load with the
+#     instead of `ctx+4` (which the verifier treats as a modified ctx pointer).
+#     Reshaping the C more cheaply did not help; this one-line barrier -- the
+#     standard post-adjust_tail idiom -- makes the full slice load with the
 #     existing __noinline structure.
 #  2. Verdicts: every handled :8080 packet is CONSUMED (XDP::DROP), never PASS.
 #     There is no kernel listener, so PASSing the bare handshake-ACK made the stack
-#     emit a RST that killed the connection. The bundle DROPs these; matching that
-#     is what turns load+attach into a real 200.
+#     emit a RST that killed the connection. The C template DROPs these too;
+#     matching that is what turns load+attach into a real 200.
 
-# NOTE: the spinel-ebpf eBPF codegen is EXPRESSION-style — no early `return`,
+# NOTE: the spinel-ebpf eBPF codegen is EXPRESSION-style -- no early `return`,
 # no `unless`. Each branch evaluates to the XDP verdict; the method value is the
-# trailing if/elsif/else expression (UnlessNode / early-return are not lowerable).
+# trailing if/elsif/else expression. (UnlessNode and early returns are not
+# lowerable.)
 def xdp__rbslice
   if pkt.l4.proto != IP::Proto::TCP
     XDP::PASS
@@ -46,8 +48,8 @@ def xdp__rbslice
   else
     flags = pkt.tcp.flags
     if (flags & TCP::Flag::SYN) != 0 && (flags & TCP::Flag::ACK) == 0
-      # SYN -> SYN-ACK with a stateless SYN cookie + MSS option, the handshake
-      # bundle sequence in one builtin (grow-to-60, gen, build, shrink).
+      # SYN -> SYN-ACK with a stateless SYN cookie + MSS option, the same
+      # sequence in one builtin (grow-to-60, gen, build, shrink) — #4b'.
       if tcp_synack_cookie < 0
         XDP::ABORTED
       else

@@ -21,6 +21,7 @@ R 7 receiver -1
 R 7 arguments -1
 R 7 block -1
 S 7 call_operator .
+I 7 vcall 1
 A 6 body 7
 R 2 body 6
 R 2 receiver -1
@@ -45,6 +46,7 @@ R 14 receiver -1
 R 14 arguments -1
 R 14 block -1
 S 14 call_operator .
+I 14 vcall 1
 A 13 arguments 14
 R 12 arguments 13
 R 12 block -1

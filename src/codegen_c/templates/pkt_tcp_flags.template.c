@@ -1,8 +1,8 @@
 /* TCP flag byte (host-order), 0 if not TCP or truncated.
- * RFC 793 section 3.1: flags live in the 13th byte of the TCP header
+ * RFC 793 §3.1: flags live in the 13th byte of the TCP header
  * (offset of data_offset|reserved|flags). We mask off the data
  * offset upper nibble so the caller sees a clean 8-bit field.
- * IPv6 is handled too (extension headers out of scope). */
+ * IPv6 branch added (extension headers out of scope). */
 static __noinline __s64 @SIG@
 {
     void *data     = (void *)(long)ctx->data;

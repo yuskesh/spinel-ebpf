@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT OR Apache-2.0
+/* SPDX-License-Identifier: GPL-2.0
  *
  * spinel-ebpf host-side runtime — libbpf wrapper. Implements spnl_runtime.h.
  *
@@ -42,6 +42,44 @@ struct spnl_runtime {
     struct bpf_link *links[SPNL_MAX_LINKS];   /* keeps kprobe etc. attached */
     int link_count;
 };
+
+/* ---- event-boxed one-shot (SPNL_MAX_EVENTS) --------------------------
+ * A process-global tally of emitted events/spans, shared by every drain path
+ * (spnl_stream in glue.c, the OTLP span/trace/log push funnels in otlp_agent.c,
+ * and spnl_runtime_ringbuf_drain below). The K limit is read once, lazily, from
+ * SPNL_MAX_EVENTS; K<=0/unset disables the feature (unlimited = legacy). See
+ * spnl_runtime.h for the full contract. */
+static unsigned long g_spnl_event_count = 0;
+
+static long spnl_oneshot_limit(void)
+{
+    static long k = -1;   /* -1 = not yet read */
+    if (k == -1) {
+        const char *e = getenv("SPNL_MAX_EVENTS");
+        long v = (e && e[0]) ? atol(e) : 0;
+        k = (v > 0) ? v : 0;   /* 0 = unlimited */
+    }
+    return k;
+}
+
+int spnl_oneshot_add(long n)
+{
+    if (n > 0) g_spnl_event_count += (unsigned long)n;
+    long k = spnl_oneshot_limit();
+    return (k > 0 && g_spnl_event_count >= (unsigned long)k) ? 1 : 0;
+}
+
+unsigned long spnl_oneshot_count(void) { return g_spnl_event_count; }
+
+void spnl_oneshot_exit(void)
+{
+    fprintf(stderr, "[oneshot] SPNL_MAX_EVENTS reached: %lu events -> clean exit\n",
+            g_spnl_event_count);
+    fflush(NULL);
+    /* Clean exit: runs the glue __attribute__((destructor)) that detaches every
+     * BPF prog/link; fd-GC is the kernel-side backstop. Same as time-boxed. */
+    exit(0);
+}
 
 static int default_libbpf_print(enum libbpf_print_level level, const char *fmt, va_list args)
 {
@@ -202,6 +240,9 @@ int spnl_runtime_ringbuf_drain(spnl_runtime *rt,
     struct ring_buffer *rb = ring_buffer__new(fd, rb_trampoline, &slot, NULL);
     if (!rb) return -errno;
     int n = ring_buffer__poll(rb, timeout_ms);
+    /* after this cycle's records were delivered to cb (lossless), honour
+     * SPNL_MAX_EVENTS. Reaching K exits cleanly (destructors detach BPF). */
+    if (n > 0 && spnl_oneshot_add(n)) { ring_buffer__free(rb); spnl_oneshot_exit(); }
     ring_buffer__free(rb);
     return n;
 }
@@ -297,7 +338,7 @@ int spnl_print_log2_hist_obj(struct bpf_object *obj,
     return 0;
 }
 
-/* backward-compat wrapper. */
+/* Backward-compatible wrapper. */
 int spnl_runtime_print_log2_hist(spnl_runtime *rt,
                                  const char *map_name,
                                  const char *label,
@@ -334,7 +375,7 @@ int spnl_log2_hist_percentile_obj(struct bpf_object *obj,
     return _spnl_hist_percentile_counts(counts, n, percentile, value_out);
 }
 
-/* backward-compat wrapper. */
+/* Backward-compatible wrapper. */
 int spnl_runtime_log2_hist_percentile(spnl_runtime *rt,
                                       const char *map_name,
                                       double percentile,
@@ -345,7 +386,7 @@ int spnl_runtime_log2_hist_percentile(spnl_runtime *rt,
 }
 
 /* keyed log2 histogram readers (bpf_hist_keyed: HASH u64 -> u64[64]).
- * Used by --instrument to report per-method duration. Look up the 64-slot
+ * Used by --instrument S2 to report per-method duration. Look up the 64-slot
  * bucket array for `key` and reuse the shared renderer/percentile core. */
 static int _spnl_hist_keyed_lookup(struct bpf_object *obj, const char *map_name,
                                    __u64 key, __u64 counts[64])
@@ -388,7 +429,7 @@ int spnl_log2_hist_percentile_keyed_obj(struct bpf_object *obj, const char *map_
 }
 
 /* total sample count in the keyed log2 hist under `key` (= per-method
- * call count for --instrument; overflow-immune, unlike a ringbuf rate). */
+ * call count for --instrument S2; overflow-immune, unlike a ringbuf rate). */
 int spnl_log2_hist_count_keyed_obj(struct bpf_object *obj, const char *map_name,
                                    unsigned long long key, __u64 *count_out)
 {
@@ -400,6 +441,14 @@ int spnl_log2_hist_count_keyed_obj(struct bpf_object *obj, const char *map_name,
     for (int i = 0; i < 64; i++) total += counts[i];
     *count_out = total;
     return 0;
+}
+
+/* OTLP S2: copy the raw 64-slot bucket array (for an OTLP ExponentialHistogram). */
+int spnl_hist_buckets_keyed_obj(struct bpf_object *obj, const char *map_name,
+                                unsigned long long key, __u64 out[64])
+{
+    if (!obj || !map_name || !out) return -EINVAL;
+    return _spnl_hist_keyed_lookup(obj, map_name, (__u64)key, out);
 }
 
 /* dump a linear histogram (caller-bucketed). `slot_label_fmt` is
@@ -454,7 +503,7 @@ int spnl_print_linear_hist_obj(struct bpf_object *obj,
     return 0;
 }
 
-/* backward-compat wrapper. */
+/* Backward-compatible wrapper. */
 int spnl_runtime_print_linear_hist(spnl_runtime *rt,
                                    const char *map_name,
                                    const char *slot_label_fmt,
@@ -745,8 +794,8 @@ out:
 
 /* best-effort user-space symbol resolver. Maps a user PC in process
  * `pid` to "<sym>+0xoff [binary]" using /proc/<pid>/maps + the mapped ELF.
- * bcc's BPF_STACK_TRACE user-symbolization equivalent (the kernel side stays
- * on /proc/kallsyms). Returns 0 on a resolved symbol, -1 otherwise (out
+ * bcc's BPF_STACK_TRACE user-symbolization equivalent (kernel side stays
+ * /proc/kallsyms). Returns 0 on a resolved symbol, -1 otherwise (out
  * is still filled with the hex address). */
 int spnl_sym_user(int pid, unsigned long pc, char *out, size_t outlen)
 {
@@ -1070,7 +1119,7 @@ int spnl_dump_leaks_obj(struct bpf_object *obj,
  * u64 count (spinel-ebpf's bpf_lock_edges, written by lock_edge): a was held
  * when b was acquired. A cycle a->b AND b->a (observed on different threads) is
  * a lock-order inversion = potential deadlock. We read every edge and report
- * each such 2-cycle once. (Handles 2-lock inversions; the classic AB-BA bug.) */
+ * each such 2-cycle once. (MVP: 2-lock inversions; the classic AB-BA bug.) */
 struct _spnl_edge { __u64 a, b, count; };
 
 int spnl_dump_deadlocks_obj(struct bpf_object *obj,

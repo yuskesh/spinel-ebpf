@@ -3,7 +3,7 @@
 #
 # spinel-ebpf — wrapper around matz/spinel that adds eBPF partition codegen.
 #
-# Usage:
+# Modes:
 #   spinel-ebpf compile foo.rb                  # eBPF-mixed (default)
 #   spinel-ebpf compile foo.rb --native-only    # equivalent to plain spinel
 #   spinel-ebpf compile foo.rb --ebpf-mixed     # explicit (same as default)
@@ -20,21 +20,25 @@ $LOAD_PATH.unshift(File.expand_path("../src", __dir__))
 require "optparse"
 require "fileutils"
 require "tmpdir"
+require "open3"
 require "spinel_ebpf/parse_spinel_ir"
 require "spinel_ebpf/parse_spinel_ast"
 require "spinel_ebpf/partition"
 require "spinel_ebpf/codegen_bpf"
+require "spinel_ebpf/validate"
+require "spinel_ebpf/check"
 require "spinel_ebpf/dispatch_shim"
 require "spinel_ebpf/plugin"
 require "spinel_ebpf/consumer"
 require "spinel_ebpf/introspect"
+require "spinel_ebpf/capabilities"
 require "spinel_ebpf/instrument"
 
 VERSION = "0.0.1"
 PROJECT_ROOT = File.expand_path("..", __dir__)
 SPINEL_DIR   = ENV["SPINEL_DIR"] || File.join(PROJECT_ROOT, "deps/spinel")
 
-# Resolve mode from CLI flags + environment, applying this precedence:
+# Resolve mode from CLI flags + environment, in this order of precedence:
 # explicit --native-only > explicit --ebpf-mixed > SPINEL_EBPF_MODE env > default eBPF.
 # Conflicting explicit flags (both --native-only and --ebpf-mixed) are an error.
 def resolve_mode(opts)
@@ -65,13 +69,13 @@ def run!(cmd, env = {})
   system(env, *cmd) or abort "error: command failed: #{cmd.inspect}"
 end
 
-# The upstream compiler is now the single C `spinel` binary (the Ruby
+# the upstream compiler is now the single C `spinel` binary (the Ruby
 # spinel_parse/analyze/codegen moved to legacy/). Prefer it when present; the
 # co-process reads the same .ast/.ir it always did (C emits the legacy format
 # via --dump-ast --no-line-map / --emit-ir). Falls back to the legacy 3-binary
 # pipeline for an un-migrated tree.
 def c_spinel
-  # Prefer the current upstream target `bin/spinel` ($(SPINEL), built by
+  # prefer the current upstream target `bin/spinel` ($(SPINEL), built by
   # `make`) over the legacy `build/spinel` path. The latter is a stale fossil on
   # current upstream (no Makefile rule builds it) and lagged real fixes (e.g. the
   # FFI `:binstr` return lowering), which made spinel-ebpf emit wrong C while the
@@ -82,7 +86,7 @@ def c_spinel
   cands.find { |p| File.executable?(p) }
 end
 
-# The in-process eBPF codegen binary. Built from the upstream
+# the in-process eBPF codegen binary. Built from the upstream
 # compiler objects (minus main.o) + tools/spinel_ebpf_inproc.c (which #includes
 # the codegen TU with -DSPNL_INPROCESS). It reads the analyzed Compiler struct
 # directly and emits both the SPINEL-IR (.ir, via cc_build_ir_text) and the
@@ -118,12 +122,12 @@ def run_spinel_to_ir(input_rb, build_dir)
     # upstream, not a patch.)
     File.write(ast, IO.popen([cs, "--dump-ast", "--no-line-map", input_rb], &:read))
     abort "error: spinel --dump-ast failed" unless $?.success?
-    # Produce the .ir in-process (cc_build_ir_text, no --emit-ir;
+    # produce the .ir in-process (cc_build_ir_text, no --emit-ir;
     # Patch A was removed upstream). The in-process binary is built from the
     # spinel compiler objects, so it's available wherever build/spinel is.
     icc = inproc_codegen_bin or
       abort "error: in-process codegen binary unavailable (build spinel first: " \
-            "make -C #{SPINEL_DIR}); --emit-ir is no longer available"
+            "make -C #{SPINEL_DIR}); the compiler no longer offers --emit-ir"
     File.write(ir, IO.popen([icc, input_rb, base, "--ir"], &:read))
     abort "error: in-process IR emit failed for #{input_rb}" unless $?.success?
   else
@@ -169,8 +173,19 @@ def cmd_compile(argv)
           "Skip eBPF partition. Output is identical to plain spinel.") { opts[:native_only] = true }
     op.on("--ebpf-mixed",
           "Partition Ruby into (native C + eBPF C). [default]") { opts[:ebpf_mixed] = true }
+    op.on("--target TARGET",
+          "codegen target. 'linux' (default) or 'amp-m7' (i.MX95 M7 via micro-bpf AOT)") { |t|
+      abort "error: unknown --target '#{t}' (expected 'linux' or 'amp-m7')" unless %w[linux amp-m7].include?(t)
+      opts[:amp_m7] = (t == "amp-m7")
+    }
     op.on("--build",
           "also compile/link into single binary (requires Linux + clang + libbpf-dev + bpftool)") { opts[:build] = true }
+    op.on("--amp-service-name NAME",
+          "OTLP service.name written to the amp-m7 manifest (default spinel-amp-m7)") { |n| opts[:amp_service_name] = n }
+    op.on("--amp-otlp-endpoint URL",
+          "OTLP endpoint written to the amp-m7 manifest (default http://127.0.0.1:4318)") { |u| opts[:amp_otlp_endpoint] = u }
+    op.on("--amp-helper-base HEX",
+          "override the helper-table base baked into the blob (default = header AMP_HELPER_BASE; QEMU uses SRAM)") { |h| opts[:amp_helper_base] = Integer(h) }
     op.on("--ebpf-dispatch",
           "route :ebpf method calls from main through bpf_prog_test_run (requires --build)") {
       opts[:ebpf_dispatch] = true
@@ -196,6 +211,14 @@ def cmd_compile(argv)
     op.on("--instrument-port N", Integer,
           "Prometheus /metrics port (default 9100; env SPINEL_HTTP_PORT overrides at run)") { |n|
       opts[:instrument_port] = n
+    }
+    op.on("--instrument-otlp ENDPOINT",
+          "push per-method RED as OTLP/HTTP+protobuf to ENDPOINT (e.g. http://127.0.0.1:4318); needs --instrument-self") { |e|
+      opts[:instrument_otlp] = e
+    }
+    op.on("--instrument-otlp-traces",
+          "push the method call tree as OTLP traces (spans) instead of metrics (with --instrument-otlp)") {
+      opts[:instrument_otlp_traces] = true
     }
     op.on("--instrument-self",
           "single self-attaching binary (workload + agent in one; no sidecar)") {
@@ -253,8 +276,8 @@ def cmd_compile(argv)
     warn "[spinel-ebpf] use_plugin :#{name} -> #{m.root}/plugin.toml (abi #{m.abi_version})" if opts[:verbose]
     m
   end
-  # Build-time arbiter — declared plugins must not conflict
-  # (namespace exclusivity). No-op for a single plugin.
+  # build-time arbiter — declared plugins must not conflict
+  # (plugins may not claim the same namespace). No-op for a single plugin.
   begin
     SpinelEbpf::Plugin.arbitrate!(manifests)
   rescue SpinelEbpf::Plugin::ArbitrationError => e
@@ -270,7 +293,14 @@ def cmd_compile(argv)
   #  - lower `on_emit`/`consume_events` consumer DSL to plain Ruby (Consumer)
   transformed = src_text
   transformed = SpinelEbpf::Plugin.strip_declarations(transformed) unless declared.empty?
-  transformed = SpinelEbpf::Consumer.transform(transformed)
+  # The typed record consumer rejects an unknown `ev.<prop>` (and an
+  # ambiguous `on_emit :<name>`) right here, before spinel sees the source.
+  # loud + actionable, not a Ruby backtrace.
+  begin
+    transformed = SpinelEbpf::Consumer.transform(transformed)
+  rescue SpinelEbpf::Consumer::Error => e
+    abort "error: #{e.message}"
+  end
   if transformed != src_text
     base0 = File.basename(input, ".rb")
     san = File.join(Dir.mktmpdir("spnl-src"), "#{base0}.rb")
@@ -302,10 +332,21 @@ def cmd_compile(argv)
 
   print_partition_table(result, base)
 
-  # Using the BPF namespace requires `use_plugin :ebpf`
-  # (no silent native fallback). Strict (SPNL_STRICT_PLUGINS=1)
+  # Fail loudly, before code generation runs, on the gaps between partitioning
+  # and codegen: an attach handler that would silently fall back to native, an
+  # unknown builtin (usually a typo), or an incomplete set of required calls (a
+  # probe that exits 0 having emitted no span). This only adds error paths; the
+  # code generated for a probe that does compile is untouched.
+  begin
+    SpinelEbpf::Validate.validate!(ast, result)
+  rescue SpinelEbpf::Validate::Error => e
+    abort "error: #{e.message}"
+  end
+
+  # using the BPF namespace requires `use_plugin :ebpf`
+  # (there is no silent native fallback). Strict (SPNL_STRICT_PLUGINS=1)
   # makes it a hard error; default warns so the existing example corpus keeps
-  # building during migration.
+  # building during migration (Phase 3 scope note).
   if SpinelEbpf::Plugin.uses_bpf_namespace?(result) && !declared.include?(:ebpf)
     n = result.methods.count { |m| m.tag == :ebpf }
     msg = "BPF namespace used without `use_plugin :ebpf` (#{n} eBPF method(s)); " \
@@ -317,7 +358,7 @@ def cmd_compile(argv)
     end
   end
 
-  # With --ebpf-dispatch, collect the :ebpf top-level methods eligible for
+  # with --ebpf-dispatch, collect the :ebpf top-level methods eligible for
   # transparent dispatch and ask spinel to emit them as extern declarations.
   # Without --ebpf-dispatch, spinel keeps its default (static inline body) and
   # main calls the native version locally — no BPF round-trip.
@@ -328,7 +369,7 @@ def cmd_compile(argv)
 
   # Always emit native C (the host side runs the :native methods + loads :ebpf skeletons).
   c_path = run_spinel_to_c(input, opts[:output_dir], ast_path, ir_path, extern_methods: extern_methods)
-  # Self-instrument keeps the workload methods native (--self-targets)
+  # self-instrument keeps the workload methods native (--self-targets)
   # and needs their real C symbols (--noinline-symbols, from --emit-symbol-map) to
   # survive -O2 so the self-uprobe can attach.
   if opts[:noinline_symbols] && !opts[:noinline_symbols].empty?
@@ -336,22 +377,30 @@ def cmd_compile(argv)
   end
   puts "[spinel-ebpf] ebpf-mixed: wrote #{c_path}"
 
-  # Emit .bpf.c for ebpf-tagged methods (if any).
+  # emit .bpf.c for ebpf-tagged methods (if any).
+  # --target amp-m7 emits an h2.c-shaped .bpf.c (ivar -> static memory,
+  # spnl_emit -> amp_emit) for the micro-bpf ARMv7E-M host-AOT; the C codegen
+  # selects handlers via cc_method_eligible, so force emission regardless of tags.
   ebpf_count = result.methods.count { |m| m.tag == :ebpf }
-  if ebpf_count > 0
+  if ebpf_count > 0 || opts[:amp_m7]
     bpf_path = File.join(opts[:output_dir], "#{base}.bpf.c")
-    # Emit .bpf.c via the in-process C codegen (byte-identical
+    # emit .bpf.c via the in-process C codegen (byte-identical
     # to the Ruby CodegenBpf, which is now retained as the regression oracle).
     if (icc = inproc_codegen_bin)
       # --self-targets excludes the workload methods from the eBPF IR
       # (cc_is_consumer_fn reads SPNL_EBPF_EXCLUDE), so a self-instrument unit
       # keeps them native while still emitting the uprobe progs.
       icc_env = {}
+      icc_env["SPNL_AMP_M7"] = "1" if opts[:amp_m7]   # amp-m7 codegen path
       icc_env["SPNL_EBPF_EXCLUDE"] = opts[:self_targets].join(",") if opts[:self_targets] && !opts[:self_targets].empty?
       File.write(bpf_path, IO.popen(icc_env, [icc, input, base], &:read))
       abort "error: in-process eBPF codegen failed for #{input}\n" \
             "       (re-run with --native-only to skip eBPF emission)" unless $?.success?
-      puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs, in-process)"
+      if opts[:amp_m7]
+        puts "[spinel-ebpf] amp-m7: wrote #{bpf_path} (clang -target bpf -> micro-bpf ARMv7E-M AOT)"
+      else
+        puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs, in-process)"
+      end
     else
       begin
         bpf_text = SpinelEbpf::CodegenBpf.emit(ir, ast, result, base_name: base)
@@ -366,7 +415,7 @@ def cmd_compile(argv)
     warn "[spinel-ebpf] ebpf-mixed: no eBPF programs to emit (all methods are :native)"
   end
 
-  # Emit the dispatch shim file alongside .bpf.c. It only takes effect at
+  # emit the dispatch shim file alongside .bpf.c. It only takes effect at
   # link time (build_binary picks it up when both --ebpf-dispatch and --build).
   dispatch_path = nil
   if opts[:ebpf_dispatch] && extern_methods && !extern_methods.empty?
@@ -378,14 +427,20 @@ def cmd_compile(argv)
   # --build does the full toolchain. Native-only short-circuits to plain
   # spinel build; eBPF-mixed runs the full Ruby -> binary pipeline.
   if opts[:build]
-    # With --ebpf-dispatch the native side calls into eBPF (__s64 wrap), so
-    # default the native overflow mode to wrap for consistency unless overridden.
-    eff_overflow = opts[:int_overflow] || (opts[:ebpf_dispatch] ? "wrap" : nil)
-    warn "[spinel-ebpf] --ebpf-dispatch: native int overflow -> wrap (match eBPF; override with --int-overflow=raise)" if eff_overflow == "wrap" && opts[:int_overflow].nil?
-    bin_path = build_binary(base, opts[:output_dir], ebpf_count > 0,
-                            dispatch_path: dispatch_path, verbose: opts[:verbose],
-                            partition_result: result, int_overflow: eff_overflow)
-    puts "[spinel-ebpf] build: wrote #{bin_path}"
+    if opts[:amp_m7]
+      # amp-m7 output is blob + manifest (M7 and A55 are separate cores =
+      # separate artifacts), NOT the Linux single binary. Separate build path.
+      build_amp(base, opts[:output_dir], opts)
+    else
+      # with --ebpf-dispatch the native side calls into eBPF (__s64 wrap), so
+      # default the native overflow mode to wrap for consistency unless overridden.
+      eff_overflow = opts[:int_overflow] || (opts[:ebpf_dispatch] ? "wrap" : nil)
+      warn "[spinel-ebpf] --ebpf-dispatch: native int overflow -> wrap (match eBPF; override with --int-overflow=raise)" if eff_overflow == "wrap" && opts[:int_overflow].nil?
+      bin_path = build_binary(base, opts[:output_dir], ebpf_count > 0,
+                              dispatch_path: dispatch_path, verbose: opts[:verbose],
+                              partition_result: result, int_overflow: eff_overflow)
+      puts "[spinel-ebpf] build: wrote #{bin_path}"
+    end
   end
   0
 end
@@ -398,9 +453,9 @@ end
 #   3. generate a sidecar uprobe agent (Instrument.generate_agent) and build
 #      it through the normal compile pipeline (consumer DSL + uprobe codegen).
 # Output is two binaries; the agent attaches to the target via SPNL_UPROBE_BINARY
-# (sidecar model — single-binary self-attach is --instrument-self). Default agent
-# is a long-lived Prometheus /metrics server; --instrument-dump gives a one-shot dump.
-# Authoritative method -> C symbol map via upstream `--emit-symbol-map`.
+# (sidecar model — single-binary self-attach is S4). Default agent is a long-lived
+# Prometheus /metrics server (S3); --instrument-dump gives the S2 one-shot dump.
+# authoritative method -> C symbol map via upstream `--emit-symbol-map`.
 def instrument_symbol_map(target_input, build_dir)
   cs = c_spinel or abort "error: --instrument needs the C spinel binary (build/spinel)"
   base = File.basename(target_input, ".rb")
@@ -423,7 +478,13 @@ def cmd_instrument(target_input, opts)
   abort "error: --instrument: no instrumentable methods in #{target_input}" if records.empty?
   puts "[spinel-ebpf] instrument: #{records.length} method(s): #{records.map { |r| r[:ruby] }.join(', ')}"
 
-  # Single self-attaching binary (workload + agent in one).
+  # OTLP push observes the workload in-process (one-shot after it runs),
+  # so it requires the self-attaching single binary. No silent fallback.
+  if opts[:instrument_otlp] && !opts[:instrument_self]
+    abort "error: --instrument-otlp requires --instrument-self (the workload is observed in-process and pushed from there)"
+  end
+
+  # single self-attaching binary (workload + agent in one).
   return cmd_instrument_self(target_input, base, records, opts) if opts[:instrument_self]
 
   csyms = records.map { |r| r[:c] }
@@ -463,7 +524,7 @@ def cmd_instrument(target_input, opts)
   0
 end
 
-# Single self-attaching binary — the workload + the agent compiled into
+# single self-attaching binary — the workload + the agent compiled into
 # one unit. The workload methods are forced native + noinline (--self-targets) so
 # their sp_<name> symbols survive; the uprobes self-attach to /proc/self/exe at
 # the own pid. The workload runs in-process (firing the self-uprobes), then the
@@ -473,7 +534,9 @@ def cmd_instrument_self(target_input, base, records, opts)
   port = opts[:instrument_port] || 9100
   target_source = File.read(target_input, encoding: "UTF-8")
   combined = SpinelEbpf::Instrument.generate_self_agent(records, target_source, port: port,
-                                                        depth_collapse: opts[:instrument_depth_collapse])
+                                                        depth_collapse: opts[:instrument_depth_collapse],
+                                                        otlp_endpoint: opts[:instrument_otlp],
+                                                        otlp_traces: opts[:instrument_otlp_traces])
   combined_rb = File.join(build_dir, "#{base}_self.rb")
   File.write(combined_rb, combined)
   puts "[spinel-ebpf] instrument-self: combined source -> #{combined_rb}"
@@ -507,11 +570,176 @@ def which(name)
   nil
 end
 
+# the `clang -target bpf -c <bpf.c> -o <bpf.o>` argv, factored so both
+# build_binary (via run!) and `spinel-ebpf check` (via Open3.capture3) drive the
+# identical command. Pure (no side effects) — reads bpf_c only to decide -mcpu.
+def bpf_clang_argv(clang, bpf_c, bpf_o, build_dir)
+  arch_macro = RbConfig::CONFIG["host_cpu"] =~ /aarch64|arm64/ ? "-D__TARGET_ARCH_arm64" : "-D__TARGET_ARCH_x86"
+    # <bpf/usdt.bpf.h> transitively pulls in <linux/errno.h> -> <asm/errno.h>,
+  # which lives under /usr/include/<triplet>/asm/ on debian-style toolchains.
+  arch_inc_flags = Dir.glob("/usr/include/*-linux-gnu").reject(&:empty?).flat_map { |p| ["-I", p] }
+  # bpf_arena uses the address-space cast, only emitted at ISA v3+. Add
+  # -mcpu=v3 only when the program references the arena address space.
+  cpu_flags = (File.exist?(bpf_c) && File.read(bpf_c).include?("address_space(1)")) ? ["-mcpu=v3"] : []
+  [clang, "-O2", "-g", "-target", "bpf", arch_macro, *cpu_flags,
+   *arch_inc_flags,
+   "-I", build_dir, "-I", File.join(PROJECT_ROOT, "include"),
+   "-c", bpf_c, "-o", bpf_o]
+end
+
+# build (and cache) the load-only verifier probe (tools/spnl_load_check.c).
+# Returns the binary path, or nil when it can't be built here (non-Linux host,
+# missing cc / libbpf-dev). Cached at build/spnl_load_check with an mtime check
+# and a runnability preflight (build/ is bind-mounted, so a host-built binary can
+# be un-execable in the container and vice-versa — mirror tools/golden.rb).
+def load_check_bin
+  return @load_check_bin if defined?(@load_check_bin)
+  src = File.join(PROJECT_ROOT, "tools/spnl_load_check.c")
+  return @load_check_bin = nil unless File.exist?(src) && SpinelEbpf::Check.linux?
+  out = File.join(PROJECT_ROOT, "build/spnl_load_check")
+  FileUtils.mkdir_p(File.dirname(out))
+  if !File.exist?(out) || File.mtime(src) > File.mtime(out)
+    cc = ENV["CC"] || which("cc") || "cc"
+    ok = system(cc, "-O2", src, "-lbpf", "-lelf", "-lz", "-o", out,
+                out: File::NULL, err: File::NULL)
+    return @load_check_bin = nil unless ok
+  end
+  # Preflight: no-arg run prints usage and exits 2. system returns nil only when
+  # exec itself failed (wrong-platform ELF) — treat that as unavailable.
+  return @load_check_bin = nil if system(out, out: File::NULL, err: File::NULL).nil?
+  @load_check_bin = out
+rescue StandardError
+  @load_check_bin = nil
+end
+
+# amp-m7 --build. Unlike the Linux --build (single binary), amp-m7 emits
+# TWO artifacts (M7 and A55 are separate cores):
+#   <base>.blob     — the Thumb blob (single-pass; helper call -> AMP_HELPER_SLOT(id),
+#                     no firmware nm). id 1 = amp_emit, id 2 = amp_ktime.
+#   <base>.manifest — abi_version / ivars_size / triggers (from codegen, via the
+#                     manifest dumper) + service.name / otlp.endpoint (deployment
+#                     config, NOT baked into the blob).
+def build_amp(base, build_dir, opts)
+  bpf_c = File.join(build_dir, "#{base}.bpf.c")
+  bpf_o = File.join(build_dir, "#{base}.bpf.o")
+  abort "error: amp-m7 --build: missing #{bpf_c} (codegen step did not run)" unless File.exist?(bpf_c)
+
+  clang = which("clang") or abort "error: amp-m7 --build needs clang (-target bpf)"
+  run! [clang, "-O2", "-target", "bpf", "-c", bpf_c, "-o", bpf_o]
+
+  driver = amp_aot_driver or abort <<~MSG
+    error: amp-m7 --build needs the micro-bpf host AOT driver (bytecode -> Thumb).
+      build it:  (cd tools/amp_aot_driver && cargo build --release)
+      or set:    SPNL_AMP_AOT_DRIVER=/path/to/aot-driver
+  MSG
+
+  hbase  = opts[:amp_helper_base] || amp_abi_const("AMP_HELPER_BASE")   # 0x0003FF00 (real board)
+  sbytes = amp_abi_const("AMP_HELPER_SLOT_BYTES")                       # 8
+  blob = File.join(build_dir, "#{base}.blob")
+  env = { "AMP_HELPER_1" => format("0x%08x", hbase),
+          "AMP_HELPER_2" => format("0x%08x", hbase + sbytes) }
+  run! [driver, bpf_o, blob], env
+
+  manifest = File.join(build_dir, "#{base}.manifest")
+  write_amp_manifest(manifest, bpf_c, build_dir, opts)
+
+  puts "[spinel-ebpf] amp-m7 --build: wrote #{blob} + #{manifest}"
+  puts "[spinel-ebpf] amp-m7: blob -> M7 staging (a55_stage), manifest -> A55 fixed drain " \
+       "(amp_a55_drain). Two cores = blob + manifest, not one binary."
+end
+
+# Locate the host AOT driver binary (external Rust tool over rbpf-for-microcontrollers).
+def amp_aot_driver
+  cands = [ENV["SPNL_AMP_AOT_DRIVER"],
+           File.join(PROJECT_ROOT, "tools/amp_aot_driver/target/release/aot-driver")].compact
+  cands.find { |p| File.executable?(p) }
+end
+
+# Read a `#define <NAME> <int>` from the fixed ABI header (single source of truth:
+# the CLI greps the same header the runtime/codegen mirror use, not a duplicate).
+def amp_abi_const(name)
+  hdr = File.join(PROJECT_ROOT, "include/spnl/amp_abi_imx95m7.h")
+  # the header carries UTF-8 (Japanese) comments; read as UTF-8 so the ASCII regex
+  # doesn't choke on multibyte bytes under a US-ASCII default external encoding.
+  m = File.read(hdr, encoding: "UTF-8")[/^\s*#define\s+#{Regexp.escape(name)}\s+(0x[0-9A-Fa-f]+|\d+)u?\b/, 1]
+  abort "error: #{name} not found in #{hdr}" unless m
+  Integer(m)
+end
+
+# Pack <base>.manifest: codegen fields (via the dumper that #includes the .bpf.c)
+# + deployment config (service.name / otlp.endpoint). probe-specific info lives in
+# the manifest, never baked into the blob.
+def write_amp_manifest(path, bpf_c, build_dir, opts)
+  dumper_src = File.join(PROJECT_ROOT, "src/runtime/amp/amp_manifest_dump.c")
+  cc = ENV["CC"] || which("cc") || "cc"
+  dumper = File.join(build_dir, "amp_manifest_dump")
+  run! [cc, "-O2", "-Wno-int-conversion",
+        %(-DAMP_BPF_C="#{File.expand_path(bpf_c)}"),
+        "-I", File.join(PROJECT_ROOT, "include"),
+        dumper_src, "-o", dumper]
+  fields = IO.popen([dumper], &:read)
+  abort "error: amp manifest dump failed" unless $?.success?
+
+  service  = opts[:amp_service_name]  || "spinel-amp-m7"
+  endpoint = opts[:amp_otlp_endpoint] || "http://127.0.0.1:4318"
+  File.write(path,
+             "# spinel-ebpf amp-m7 manifest\n" \
+             "service.name=#{service}\n" \
+             "otlp.endpoint=#{endpoint}\n" \
+             "#{fields}")
+end
+
+# turn the cryptic `undefined reference to eu_search_tree_init' link failure
+# into an actionable message. elfutils < 0.195 installs a libelf.a whose elf_begin.o
+# references eu_search_tree_* / eu_tsearch but ships no definition — the defining
+# objects live in the internal libeu.a, which upstream marks `noinst` so no distro
+# packages it (NOT a Debian-specific quirk). 0.195 merges them via libelf_a_LIBADD.
+# Only aborts when the breakage is POSITIVELY detected; a missing nm or an archive
+# we cannot locate is not an error (never block a link that would have worked).
+def static_libelf_path(clang, elf_dir)
+  return File.join(elf_dir, "libelf.a") if elf_dir && !elf_dir.empty?
+  p = `#{clang} -print-file-name=libelf.a 2>/dev/null`.strip
+  return p if !p.empty? && File.file?(p)
+  # clang's -print-file-name does not search the multiarch dirs; fall back to them.
+  Dir.glob("/usr/lib/*-linux-*/libelf.a").first || "/usr/lib/libelf.a"
+end
+
+def check_static_libelf!(clang, elf_dir)
+  path = static_libelf_path(clang, elf_dir)
+  return unless path && File.file?(path)
+  nm = which("nm") or return
+  out = `#{nm} #{path} 2>/dev/null`
+  return if out.empty?
+  undefined = out.lines.grep(/^\s+U eu_/).map { |l| l.split.last }.uniq
+  return if undefined.empty?
+  defined_here = out.lines.grep(/^[0-9a-fA-F]+\s+[A-Za-z]\s+eu_/).map { |l| l.split.last }
+  missing = undefined - defined_here
+  return if missing.empty?
+  abort <<~MSG
+    error: SPNL_STATIC=1 but this libelf.a cannot satisfy a static link:
+             #{path}
+           It references #{missing.sort.first(3).join(", ")}#{missing.length > 3 ? ", ..." : ""} with no definition in the archive.
+           elfutils < 0.193 leaves those in its internal libeu.a, which upstream never
+           installs (`noinst_LIBRARIES`), so no distro ships them. Fixed upstream in 0.193.
+
+           Fix (easiest) -- install elfutils >= 0.193 from your distro; then plain
+           SPNL_STATIC=1 works and SPNL_STATIC_ELF_DIR is not needed:
+             Debian trixie    : apt install -t trixie-backports libelf-dev  # 0.195-1~bpo13+1
+             Debian sid/forky : apt install libelf-dev                      # 0.195-1
+             Alpine / Fedora  : current elfutils-dev / elfutils-libelf-devel-static is 0.195
+           Fix (no newer package available) -- build elfutils and point at its libelf.a:
+             ./configure --disable-debuginfod --disable-libdebuginfod --disable-werror
+             make -C lib && make -C libelf libelf.a
+             SPNL_STATIC=1 SPNL_STATIC_ELF_DIR=<elfutils-src>/libelf spinel-ebpf compile ... --build
+           Or drop SPNL_STATIC=1 to build a dynamic binary (needs matching .so on the target).
+  MSG
+end
+
 def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false, partition_result: nil, int_overflow: nil)
   abort "error: --build only supported on Linux (got #{RbConfig::CONFIG["host_os"]})" unless RbConfig::CONFIG["host_os"] =~ /linux/i
   clang   = which("clang")   || abort("error: clang not found in PATH")
   bpftool = with_ebpf ? (which("bpftool") || abort("error: bpftool not found")) : nil
-  # Int overflow mode is a compile-time define in spinel's runtime
+  # int overflow mode is a compile-time define in spinel's runtime
   # (sp_runtime.h). spinel-ebpf compiles the native .c itself, so we pass the
   # -D here (raise = no define = default; wrap matches the eBPF __s64 side).
   ov_flag = case int_overflow
@@ -523,7 +751,7 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
   c_file  = File.join(build_dir, "#{base}.c")
   out_bin = File.join(build_dir, base)
 
-  # Link against the runtime that MATCHES the compiler in use. The C
+  # link against the runtime that MATCHES the compiler in use. The C
   # `spinel` emits native C referencing its (newer) runtime (sp_runtime.h +
   # libspinel_rt.a), so when it drives codegen we must use its sibling lib/ dir,
   # not the legacy pin's.
@@ -535,13 +763,32 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
     end
   abort "error: spinel lib not found at #{spinel_lib}" unless File.directory?(spinel_lib)
 
-  # Link libspinel_rt.a (sp_net / sp_crypto / sp_bigint runtime).
+  # link libspinel_rt.a (sp_net / sp_crypto / sp_bigint runtime).
   spinel_rt = File.join(spinel_lib, "libspinel_rt.a")
   rt_link   = File.exist?(spinel_rt) ? [spinel_rt] : []
 
   include_args = ["-I", spinel_lib, "-I", File.join(PROJECT_ROOT, "include")]
   # -lutil: forkpty(3) for the PTY/WebSocket interactive terminal (sp_pty_* / sp_ws_*).
-  link_args    = rt_link + ["-lm", "-lutil"]
+  # -lcrypt: String#crypt lowers to libc crypt(3), which glibc keeps in libcrypt
+  # (macOS has it in libSystem). libspinel_rt.a carries an undefined `crypt` since
+  # a recent upstream sync, so the link fails without this. Mirrors upstream
+  # spinel's common.mk, which gates the same flag on Linux.
+  crypt_link   = RbConfig::CONFIG["host_os"] =~ /linux/ ? ["-lcrypt"] : []
+  link_args    = rt_link + ["-lm", "-lutil"] + crypt_link
+  cflags_extra = []  # -DOTLP_WITH_TLS is appended here, and only when TLS is used
+
+  # Link the OTLP exporter only when the generated .c references an spnl_otlp_* FFI.
+  # The OTLP core (otlp_http/grpc/metrics/traces/logs/json/httpspan + nanopb) does
+  # not depend on libbpf, so it links into both native builds (an HTTP server span,
+  # say) and eBPF ones. otlp_agent.c drains bpf maps, so it is eBPF-only.
+  c_src       = File.exist?(c_file) ? File.read(c_file) : ""
+  # A typed consumer's accessors are named spnl_rec_*, so a consumer that never
+  # sends (one that only counts records, or writes them out in another format)
+  # contains no spnl_otlp_ symbol at all. Those accessors still live in
+  # otlp_agent.c, so the record FFI has to trigger the link as well.
+  otlp_on     = c_src.include?("spnl_otlp_") || c_src.include?("spnl_rec_")
+  # An https:// or grpcs:// endpoint pulls in mbedTLS (gated by OTLP_WITH_TLS).
+  otlp_tls_on = otlp_on && (c_src.include?("https://") || c_src.include?("grpcs://"))
 
   if with_ebpf
     # The skeleton's struct name comes from the bpf.o file's base name; if the
@@ -560,27 +807,16 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
       abort "error: vmlinux.h generation failed" if File.empty?(vmlinux)
     end
 
-    arch_macro = RbConfig::CONFIG["host_cpu"] =~ /aarch64|arm64/ ? "-D__TARGET_ARCH_arm64" : "-D__TARGET_ARCH_x86"
-    # <bpf/usdt.bpf.h> transitively pulls in <linux/errno.h> -> <asm/errno.h>,
-    # which lives under /usr/include/<triplet>/asm/ on debian-style toolchains.
-    # Include that triplet path when present so USDT compiles work; harmless
-    # otherwise.
-    arch_inc_paths = Dir.glob("/usr/include/*-linux-gnu").reject(&:empty?)
-    arch_inc_flags = arch_inc_paths.flat_map { |p| ["-I", p] }
-    # bpf_arena uses the address-space cast, which the BPF backend only
-    # emits at ISA v3+. Add -mcpu=v3 only when the program references the arena
-    # address space, so non-arena programs keep their existing default codegen.
-    cpu_flags = File.read(bpf_c).include?("address_space(1)") ? ["-mcpu=v3"] : []
-    run! [clang, "-O2", "-g", "-target", "bpf", arch_macro, *cpu_flags,
-          *arch_inc_flags,
-          "-I", build_dir, "-I", File.join(PROJECT_ROOT, "include"),
-          "-c", bpf_c, "-o", bpf_o]
+    # the `clang -target bpf` invocation is shared with `spinel-ebpf check`
+    # (which captures its output instead of aborting). bpf_clang_argv builds the
+    # exact same argv, so build_binary's behaviour is byte-identical.
+    run! bpf_clang_argv(clang, bpf_c, bpf_o, build_dir)
     # `name <sanitized>` overrides the struct prefix in the generated skel.h.
     File.write(skel_h, `#{bpftool} gen skeleton #{bpf_o} name #{skel_name}`)
     abort "error: bpftool gen skeleton failed" if File.empty?(skel_h)
-    # Collect reactor uprobe/USDT targets from MethodInfo so glue.c
+    # collect reactor uprobe/USDT targets from MethodInfo so glue.c
     # can emit a per-prog target table.
-    # Also collect reactor perf_event progs with their Hz frequency.
+    # also collect reactor perf_event progs with their Hz frequency.
     reactor_uprobes     = []
     reactor_usdts       = []
     reactor_perf_events = []
@@ -588,7 +824,7 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
       partition_result.methods.each do |mi|
         next unless mi.scope == :top_level && mi.tag == :ebpf
         if mi.respond_to?(:dsl_uprobe_binary) && mi.dsl_uprobe_binary
-          # Prefer per-handler `pid:` kw arg, fall through to -1
+          # prefer per-handler `pid:` kw arg, fall through to -1
           # (= libbpf's "all processes"). glue.c also lets env override
           # -1 entries via $SPNL_*_PID.
           pid = (mi.respond_to?(:dsl_attach_pid) && mi.dsl_attach_pid) ? mi.dsl_attach_pid : -1
@@ -606,11 +842,12 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
               binary:    mi.dsl_uprobe_binary,
               func:      mi.dsl_uprobe_func,
               retprobe:  mi.dsl_uprobe_retprobe ? 1 : 0,
+              go_ret:    mi.dsl_uprobe_go_ret ? 1 : 0,   # attach at every RET offset
               pid:       pid,
             }
           end
         end
-        # Reactor perf_event progs carry the sampling frequency in
+        # reactor perf_event progs carry the sampling frequency in
         # dsl_perf_event_hz. Hz <= 0 means "use env / default". Flat-form
         # `def perf_event__<name>` doesn't set this field; glue.c picks up
         # those programs by SEC name and uses env / default Hz.
@@ -622,7 +859,7 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
         end
       end
     end
-    # Declared kernel_cache paths (declaration order = XDP slots),
+    # declared kernel_cache paths (declaration order = XDP slots),
     # read back from the .ast we produced, so the sp_kc_set glue can resolve
     # path -> slot.
     kc_ast_file = File.join(build_dir, "#{base}.ast")
@@ -633,15 +870,72 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
                                     reactor_uprobes: reactor_uprobes,
                                     reactor_usdts: reactor_usdts,
                                     reactor_perf_events: reactor_perf_events,
-                                    kernel_cache_paths: kc_paths))
+                                    kernel_cache_paths: kc_paths,
+                                    with_otlp: otlp_on))
 
     include_args.concat(["-I", build_dir, "-I", File.join(PROJECT_ROOT, "src/runtime")])
     extra_sources = [glue_c, File.join(PROJECT_ROOT, "src/runtime/spnl_runtime.c")]
-    # Dispatch shim file (sp_<name> implementations that call bpf_prog_test_run).
+    # dispatch shim file (sp_<name> implementations that call bpf_prog_test_run).
     extra_sources << dispatch_path if dispatch_path
     link_args = ["-lbpf", "-lelf", "-lz"] + link_args
+    # otlp_agent.c (draining the bpf maps behind auto-instrumented RED metrics)
+    # and otlp_metric.c (generic keyed metrics from any probe) both read bpf maps,
+    # so they depend on libbpf and are eBPF-only. The libbpf-independent OTLP core
+    # is linked in the shared block below.
+    if otlp_on
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_agent.c")
+      # Resolves a cgroup id to the Kubernetes pod that owns it; called by the
+      # packed-record span pushes in otlp_agent.c. It is pure C and needs no
+      # libbpf, but its only caller is eBPF-only, so it is linked here.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_k8s.c")
+      # Resolves a destination IP to a peer pod, Service, or external address;
+      # called by the connection span push.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_peer.c")
+      # Resolves a cgroup id to the real container name reported by the CRI,
+      # replacing the container id in k8s.container.name with a readable name.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_cri.c")
+      # The enricher registry: otlp_agent.c calls the k8s / CRI / peer resolvers
+      # through otlp_enrich_run rather than one by one.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_enrich.c")
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_metric.c")
+      # Cross-layer lookup: reads L3/L4 metrics keyed by connection 4-tuple out of
+      # a bpf map, so a userspace span can carry what the kernel measured.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_xlayer.c")
+    end
   else
     extra_sources = []
+  end
+
+  # The OTLP core (no libbpf dependency): linked into native and eBPF builds alike.
+  if otlp_on
+    otlp_dir = File.join(PROJECT_ROOT, "src/runtime/otlp")
+    nanopb   = File.join(PROJECT_ROOT, "src/runtime/otlp/nanopb")
+    include_args.concat(["-I", otlp_dir, "-I", File.join(otlp_dir, "pb"), "-I", nanopb])
+    extra_sources.concat([File.join(otlp_dir, "otlp_http.c"),
+                          File.join(otlp_dir, "otlp_grpc.c"),
+                          File.join(otlp_dir, "otlp_metrics.c"),
+                          File.join(otlp_dir, "otlp_traces.c"),
+                          File.join(otlp_dir, "otlp_logs.c"),
+                          File.join(otlp_dir, "otlp_json.c"),     # OTLP/HTTP+JSON
+                          File.join(otlp_dir, "otlp_httpspan.c"), # HTTP server span + traceparent
+                          File.join(nanopb, "pb_encode.c"),
+                          File.join(nanopb, "pb_common.c")])
+    extra_sources.concat(Dir[File.join(otlp_dir, "pb/opentelemetry/**/*.pb.c")].sort)
+    # -lz is for gzip in otlp_http.c. The eBPF link args already carry it; a
+    # native build has to add it explicitly.
+    link_args << "-lz" unless link_args.include?("-lz")
+    # Sending straight to an https:// or grpcs:// endpoint links mbedTLS; a
+    # plain-http build does not link it at all.
+    if otlp_tls_on
+      mbedtls = File.join(PROJECT_ROOT, "deps/mbedtls")
+      run!(["sh", File.join(PROJECT_ROOT, "scripts/build-mbedtls.sh")])  # idempotent: guarded by an arch stamp
+      cflags_extra << "-DOTLP_WITH_TLS"
+      include_args.concat(["-I", File.join(mbedtls, "include")])
+      extra_sources << File.join(otlp_dir, "otlp_tls.c")
+      extra_sources.concat([File.join(mbedtls, "library/libmbedtls.a"),
+                            File.join(mbedtls, "library/libmbedx509.a"),
+                            File.join(mbedtls, "library/libmbedcrypto.a")])
+    end
   end
 
   # spinel-ebpf's own sp_net extensions (read_line / sendfile /
@@ -659,7 +953,23 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
   # static libbpf.a pulls in ZSTD (compressed BTF) — add it explicitly (after
   # -lbpf so the static linker resolves the reference). Harmless when dynamic.
   static_libs = ENV["SPNL_STATIC"] == "1" ? ["-lzstd"] : []
-  cmd = [clang, "-O2", *ov_flag, *static_flag, *include_args, c_file, *extra_sources, *link_args, *static_libs, "-o", out_bin]
+  # a static link needs a libelf.a that CARRIES the elfutils libeu objects.
+  # elfutils merged them in 0.195 (libelf/Makefile.am: libelf_a_LIBADD); 0.192 and
+  # earlier ship an archive whose elf_begin.o references eu_search_tree_* with no
+  # definition anywhere, and libeu.a is `noinst` upstream so no distro packages it.
+  # $SPNL_STATIC_ELF_DIR points at a directory holding a good libelf.a (e.g. a
+  # self-built elfutils >= 0.195). Gated on SPNL_STATIC because in a dynamic link
+  # an -L dir holding only libelf.a would silently win over the system libelf.so.
+  static_ldirs = []
+  if ENV["SPNL_STATIC"] == "1"
+    if (elf_dir = ENV["SPNL_STATIC_ELF_DIR"]) && !elf_dir.empty?
+      abort "error: SPNL_STATIC_ELF_DIR=#{elf_dir} has no libelf.a" \
+        unless File.exist?(File.join(elf_dir, "libelf.a"))
+      static_ldirs = ["-L", elf_dir]
+    end
+    check_static_libelf!(clang, ENV["SPNL_STATIC_ELF_DIR"])
+  end
+  cmd = [clang, "-O2", *ov_flag, *cflags_extra, *static_flag, *include_args, c_file, *extra_sources, *static_ldirs, *link_args, *static_libs, "-o", out_bin]
   warn "[spinel-ebpf] linking: #{cmd.join(" ")}" if verbose
   run! cmd
   out_bin
@@ -672,8 +982,191 @@ end
 # linkage so the generated <base>_dispatch.c TU can reach it.
 def build_glue_c(base, skel_name, with_dispatch: false,
                  reactor_uprobes: [], reactor_usdts: [], reactor_perf_events: [],
-                 kernel_cache_paths: [])
+                 kernel_cache_paths: [], with_otlp: false)
   storage = with_dispatch ? "" : "static "
+
+  # OTLP push FFI shims. Reads the per-unit emit ringbuf / keyed-hist via the
+  # loaded skeleton's obj and hands it to the generic exporter (otlp_agent.c). Emitted only
+  # when the unit uses it (so non-OTLP glue is unchanged). Map names come from the
+  # code generator's own naming helpers, so the glue never re-spells them by hand.
+  _hist_map  = SpinelEbpf::CodegenBpf::HISTOGRAM_KEYED_MAP_NAME
+  _emit4_map = SpinelEbpf::CodegenBpf.emit_n_map_name(skel_name, 4)
+  _int_map   = SpinelEbpf::CodegenBpf.emit_int_map_name(skel_name)
+  _str_map   = SpinelEbpf::CodegenBpf.emit_str_map_name(skel_name)
+  _conn_map  = SpinelEbpf::CodegenBpf.emit_conn_map_name(skel_name)
+  _dns_map   = SpinelEbpf::CodegenBpf.emit_dns_map_name(skel_name)
+  _l7_map    = SpinelEbpf::CodegenBpf.emit_l7_map_name(skel_name)
+  _http_map  = SpinelEbpf::CodegenBpf.emit_http_map_name(skel_name)
+  _redis_map = SpinelEbpf::CodegenBpf.emit_redis_map_name(skel_name)
+  _offcpu_map = SpinelEbpf::CodegenBpf.emit_offcpu_map_name(skel_name)
+  otlp_push_shim = with_otlp ? <<~SHIM : ""
+    /* OTLP metrics push (resolves the ffi_func :spnl_otlp_push). */
+    extern int spnl_otlp_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_push_obj(_spnl_skel->obj, "#{_hist_map}", endpoint);
+    }
+    /* Generic keyed metrics push: arbitrary labels, independent of --instrument.
+       hist_observe_by(key, val) plus spnl_otlp_series_label(key, ...) turns
+       measurements taken by any probe into OTLP metrics. */
+    extern int spnl_otlp_metric_push_obj(struct bpf_object *obj, const char *map_name,
+                                         const char *metric_name, const char *endpoint);
+    int spnl_otlp_metric_push(const char *metric_name, const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint || !metric_name) return -1;
+        return spnl_otlp_metric_push_obj(_spnl_skel->obj, "#{_hist_map}", metric_name, endpoint);
+    }
+    /* OTLP traces push (resolves the ffi_func :spnl_otlp_trace_push).
+       Drains the per-unit emit4 ringbuf (enter/exit span events). */
+    extern int spnl_otlp_trace_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_trace_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_trace_push_obj(_spnl_skel->obj, "#{_emit4_map}", endpoint);
+    }
+    /* OTLP logs push — drain the per-unit emit ringbuf (int / str) as LogRecords. */
+    extern int spnl_otlp_log_push_obj(struct bpf_object *obj, const char *map_name, int is_str, const char *endpoint);
+    int spnl_otlp_log_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_log_push_obj(_spnl_skel->obj, "#{_int_map}", 0, endpoint);
+    }
+    int spnl_otlp_log_push_str(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_log_push_obj(_spnl_skel->obj, "#{_str_map}", 1, endpoint);
+    }
+    /* Live audit spans: drains the [file, comm, parent] triple from the string
+       ringbuf and sends an OTLP audit span, using the kernel ktime of the event
+       as the span timestamp rather than the time the drain happened. */
+    extern int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_audit_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_audit_span_push_obj(_spnl_skel->obj, "#{_str_map}", endpoint);
+    }
+    /* Network audit spans: drains the connection ringbuf and turns each record
+       (process, remote peer, smoothed RTT) into a span. */
+    extern int spnl_otlp_conn_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_conn_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_conn_span_push_obj(_spnl_skel->obj, "#{_conn_map}", endpoint);
+    }
+    /* DNS query spans: drains the DNS ringbuf, parses the QNAME out of the raw
+       packet bytes in userspace, and emits a "resolve <name>" span. */
+    extern int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_dns_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_dns_span_push_obj(_spnl_skel->obj, "#{_dns_map}", endpoint);
+    }
+    /* Typed-consumer drain: reads the records that `on_emit :dns do |ev| ... end`
+       consumes out of the ringbuf into an array, returning the count. The
+       ev.<field> accessors and to_span/send need no shim of their own -- they
+       work off in-process state. Only the drain needs to know the map name. */
+    extern int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms);
+    int spnl_rec_dns_drain(int timeout_ms)
+    {
+        if (!_spnl_skel) return -1;
+        return spnl_rec_dns_drain_obj(_spnl_skel->obj, "#{_dns_map}", timeout_ms);
+    }
+    /* The same drain shim for every channel that opts in to typed consumers, so
+       one program can consume several channels; the generated driver drains each
+       channel in turn. */
+    extern int spnl_rec_l7_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms);
+    int spnl_rec_l7_drain(int timeout_ms)
+    {
+        if (!_spnl_skel) return -1;
+        return spnl_rec_l7_drain_obj(_spnl_skel->obj, "#{_l7_map}", timeout_ms);
+    }
+    extern int spnl_rec_http_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms);
+    int spnl_rec_http_drain(int timeout_ms)
+    {
+        if (!_spnl_skel) return -1;
+        return spnl_rec_http_drain_obj(_spnl_skel->obj, "#{_http_map}", timeout_ms);
+    }
+    extern int spnl_rec_conn_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms);
+    int spnl_rec_conn_drain(int timeout_ms)
+    {
+        if (!_spnl_skel) return -1;
+        return spnl_rec_conn_drain_obj(_spnl_skel->obj, "#{_conn_map}", timeout_ms);
+    }
+    /* The off-CPU drain is the one that also takes a stack map name: `ev.wait_kind`
+       (the spnl.wait.kind attribute) classifies a wait by resolving the stack *id*
+       stored in the record against that object's bpf_stacks map. The one-call form
+       below (spnl_otlp_offcpu_span_push) is handed the same pair. */
+    extern int spnl_rec_offcpu_drain_obj(struct bpf_object *obj, const char *map_name, const char *stacks_map, int timeout_ms);
+    int spnl_rec_offcpu_drain(int timeout_ms)
+    {
+        if (!_spnl_skel) return -1;
+        return spnl_rec_offcpu_drain_obj(_spnl_skel->obj, "#{_offcpu_map}", "bpf_stacks", timeout_ms);
+    }
+    /* L7 latency spans: drains the l7 ringbuf into spans carrying process, peer and
+       duration. The span duration is a real request/response round trip (send to
+       recv), unlike a connection span, whose duration is zero by construction. */
+    extern int spnl_otlp_l7_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_l7_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_l7_span_push_obj(_spnl_skel->obj, "#{_l7_map}", endpoint);
+    }
+    /* HTTP RED spans: drains the http ringbuf into spans with method, path, status
+       and duration; a status of 500 or above marks the span as an error. The
+       kernel copies raw bytes; method/path/status are parsed in userspace. */
+    extern int spnl_otlp_http_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_http_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_http_span_push_obj(_spnl_skel->obj, "#{_http_map}", endpoint);
+    }
+    /* Redis RED spans: drains the redis ringbuf into db.* spans with command,
+       error and duration; a RESP -ERR reply marks the span as an error. The RESP
+       parsing happens in userspace. */
+    extern int spnl_otlp_redis_span_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
+    int spnl_otlp_redis_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_redis_span_push_obj(_spnl_skel->obj, "#{_redis_map}", endpoint);
+    }
+    /* Off-CPU spans: drains the offcpu ringbuf and adds spnl.offcpu_ns,
+       spnl.oncpu_ns and spnl.wait.kind (classified from the captured kernel
+       stacks) on top of method, path, status and duration -- so a slow span
+       says what it was waiting on. */
+    extern int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name, const char *stacks_map, const char *endpoint);
+    int spnl_otlp_offcpu_span_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_offcpu_span_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "bpf_stacks", endpoint);
+    }
+    /* Multi-source request tree: correlates the off-CPU request window (the parent)
+       with DNS and connection records (the children) by thread group id and time
+       window, producing a parent/child span tree. A unit without a dns or conn
+       map simply contributes no children from that source. */
+    extern int spnl_otlp_request_tree_push_obj(struct bpf_object *obj, const char *offcpu_map, const char *dns_map, const char *conn_map, const char *stacks_map, const char *endpoint);
+    int spnl_otlp_request_tree_push(const char *endpoint)
+    {
+        if (!_spnl_skel || !endpoint) return -1;
+        return spnl_otlp_request_tree_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "#{_dns_map}", "#{_conn_map}", "bpf_stacks", endpoint);
+    }
+    /* Cross-layer correlation: looks up L3/L4 metrics for an accepted client fd by
+       deriving the same 4-tuple key the tracepoint used, so userspace can join what
+       the kernel counted onto an application-level span. A miss returns -1.
+       metric_id: 1 = state changes (all transitions), 2 = established only. */
+    extern long spnl_otlp_xlayer_l34_count_obj(struct bpf_object *obj, const char *map_name,
+                                               int fd, unsigned long long metric_id);
+    int spnl_otlp_xlayer_state_changes(int fd)
+    {
+        if (!_spnl_skel) return -1;
+        return (int)spnl_otlp_xlayer_l34_count_obj(_spnl_skel->obj, "#{_hist_map}", fd, 1);
+    }
+    int spnl_otlp_xlayer_established(int fd)
+    {
+        if (!_spnl_skel) return -1;
+        return (int)spnl_otlp_xlayer_l34_count_obj(_spnl_skel->obj, "#{_hist_map}", fd, 2);
+    }
+  SHIM
 
   # kernel_cache path->slot table (declaration order matches the
   # XDP match_route() slots). sp_kc_set(path, body) resolves the path to its slot.
@@ -687,11 +1180,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
       "    static const int _spnl_kc_npaths = #{kernel_cache_paths.length};"
     end
 
-  # Emit a const array of reactor uprobe/USDT targets. _spnl_uprobe_attach_all
+  # emit a const array of reactor uprobe/USDT targets. _spnl_uprobe_attach_all
   # and _spnl_usdt_attach_all consult it (by program name) and fall back to env
   # vars when the prog name isn't in the table (legacy flat-form attach).
   uprobe_table = reactor_uprobes.map do |t|
-    "    { \"#{t[:prog_name]}\", \"#{t[:binary]}\", \"#{t[:func]}\", #{t[:retprobe]}, #{t[:pid] || -1} },"
+    "    { \"#{t[:prog_name]}\", \"#{t[:binary]}\", \"#{t[:func]}\", #{t[:retprobe]}, #{t[:pid] || -1}, #{t[:go_ret] || 0} },"
   end.join("\n")
   uprobe_table_decl =
     if reactor_uprobes.empty?
@@ -718,7 +1211,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
       "static const int _spnl_reactor_usdts_count = #{reactor_usdts.length};"
     end
 
-  # Per-prog Hz table for reactor perf_event programs.
+  # per-prog Hz table for reactor perf_event programs.
   pe_table = reactor_perf_events.map do |t|
     "    { \"#{t[:prog_name]}\", #{t[:hz]} },"
   end.join("\n")
@@ -734,7 +1227,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     end
 
   <<~GLUE
-    /* SPDX-License-Identifier: MIT OR Apache-2.0
+    /* SPDX-License-Identifier: GPL-2.0
      * GENERATED by spinel-ebpf. Auto-loads, attaches kprobe/
      * tracepoint programs via libbpf-skeleton, plus an explicit XDP attach
      * pass that reads $SPNL_XDP_IFACE for the target interface.
@@ -745,6 +1238,9 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     #include <errno.h>
     #include <fcntl.h>          /* open() for cgroup attach */
     #include <unistd.h>         /* close() */
+    #include <elf.h>            /* Go RET-offset scan (Elf64) */
+    #include <sys/mman.h>       /* mmap the target ELF */
+    #include <sys/stat.h>       /* fstat */
     #include <net/if.h>
     #include <sys/socket.h>     /* setsockopt for SO_ATTACH_REUSEPORT_EBPF */
     #include <sys/syscall.h>    /* __NR_perf_event_open */
@@ -757,7 +1253,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
 
     #{storage}struct #{skel_name} *_spnl_skel;
 
-    /* Track XDP-attached interfaces so the destructor can detach. */
+    /* track XDP-attached interfaces so the destructor can detach. */
     static int  _spnl_xdp_ifindex = 0;
     static int  _spnl_xdp_attached = 0;
 
@@ -777,6 +1273,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         const char *func;
         int retprobe;
         int pid;          /* -1 = system-wide */
+        int go_ret;       /* 1 = attach at every RET offset (Go return-probe) */
     };
     struct spnl_reactor_usdt {
         const char *prog_name;
@@ -1020,6 +1517,230 @@ def build_glue_c(base, skel_name, with_dispatch: false,
      * Flat form: fall back to $SPNL_UPROBE_BINARY + the prog name
      *   suffix as the function name.
      * pid for both: $SPNL_UPROBE_PID (default -1). */
+    /* Go return-probe support. uretprobe corrupts Go's movable stack,
+     * so we attach a plain uprobe at every RET instruction of the function. Scan
+     * the target ELF: resolve `func` in .symtab/.dynsym -> {st_value, st_size},
+     * map st_value (vaddr) to a file offset via PT_LOAD, read the function's bytes,
+     * and collect the offsets (relative to func start) of the arm64 `ret` opcode
+     * 0xd65f03c0 (4-byte fixed; arm64 only -- amd64 would need a length decoder).
+     * Returns the RET count (fills offs[]), or -1 on error. */
+    /* resolve a Go func's entry vaddr + size from `.gopclntab` (works when stripped
+     * removed `.symtab`). Parses the pcHeader (Go 1.18=0xfffffff0 / 1.20+=0xfffffff1, ptrSize=8) +
+     * walks the functab ([nfunc+1] of {uint32 entryoff, uint32 funcoff}); each _func at
+     * pclntable[funcoff] has {entryOff uint32, nameOff int32}. Returns 1 on match. */
+    static int _spnl_go_pcln_vaddr(void *base, long total, const char *func,
+                                   unsigned long *vaddr, unsigned long *vsize)
+    {
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)base;
+        if ((long)(eh->e_shoff + (unsigned long)eh->e_shnum * sizeof(Elf64_Shdr)) > total) return 0;
+        Elf64_Shdr *sh = (Elf64_Shdr *)((char *)base + eh->e_shoff);
+        if (eh->e_shstrndx >= eh->e_shnum) return 0;
+        const char *shstr = (const char *)base + sh[eh->e_shstrndx].sh_offset;
+        const unsigned char *pcln = NULL; unsigned long pclnsz = 0, text_vaddr = 0;
+        for (int s = 0; s < eh->e_shnum; s++) {
+            const char *sn = shstr + sh[s].sh_name;
+            if (strcmp(sn, ".gopclntab") == 0) { pcln = (const unsigned char *)base + sh[s].sh_offset; pclnsz = sh[s].sh_size; }
+            else if (strcmp(sn, ".text") == 0) { text_vaddr = sh[s].sh_addr; }
+        }
+        if (!pcln || pclnsz < 72) return 0;
+        unsigned int magic = pcln[0] | (pcln[1]<<8) | (pcln[2]<<16) | ((unsigned)pcln[3]<<24);
+        if (magic != 0xfffffff1u && magic != 0xfffffff0u) return 0;   /* Go 1.20+ / 1.18-1.19 */
+        if (pcln[7] != 8) return 0;   /* ptrSize: 64-bit only */
+        #define _RD8(o) ((unsigned long)pcln[o] | ((unsigned long)pcln[(o)+1]<<8) | ((unsigned long)pcln[(o)+2]<<16) | \
+                         ((unsigned long)pcln[(o)+3]<<24) | ((unsigned long)pcln[(o)+4]<<32) | ((unsigned long)pcln[(o)+5]<<40) | \
+                         ((unsigned long)pcln[(o)+6]<<48) | ((unsigned long)pcln[(o)+7]<<56))
+        #define _RD4(p) ((unsigned int)(p)[0] | ((unsigned int)(p)[1]<<8) | ((unsigned int)(p)[2]<<16) | ((unsigned int)(p)[3]<<24))
+        unsigned long nfunc       = _RD8(8);
+        unsigned long textStart   = _RD8(24);
+        unsigned long funcnameOff = _RD8(32);
+        unsigned long pclnOff     = _RD8(64);   /* functab */
+        if (textStart == 0) textStart = text_vaddr;   /* pcHeader.textStart is 0 in some builds -> use .text vaddr (= runtime.text) */
+        if (pclnOff + (nfunc + 1) * 8 > pclnsz || funcnameOff > pclnsz) return 0;
+        const unsigned char *functab = pcln + pclnOff;
+        const char *funcnametab = (const char *)pcln + funcnameOff;
+        for (unsigned long i = 0; i < nfunc; i++) {
+            unsigned int entryoff = _RD4(functab + i*8);
+            unsigned int funcoff  = _RD4(functab + i*8 + 4);
+            /* _func lives at pclntable[pclnOffset + funcoff] (funcoff is relative to the functab base). */
+            if (pclnOff + funcoff + 8 > pclnsz) continue;
+            int nameOff = (int)_RD4(pcln + pclnOff + funcoff + 4);   /* _func.nameOff (int32 at +4) */
+            if (funcnameOff + (unsigned long)nameOff >= pclnsz) continue;
+            if (strcmp(funcnametab + nameOff, func) == 0) {
+                unsigned int nextoff = _RD4(functab + (i+1)*8);
+                *vaddr = textStart + entryoff;
+                *vsize = (nextoff > entryoff) ? (nextoff - entryoff) : 0;
+                return *vsize ? 1 : 0;
+            }
+        }
+        return 0;
+        #undef _RD8
+        #undef _RD4
+    }
+
+    /* x86-64 instruction-length decoder. amd64 `ret` is a single byte 0xc3 at a variable
+     * position (naive scan false-positives on 0xc3 bytes inside operands), so we linearly decode
+     * instructions to find RET at true boundaries. Verified against `go tool objdump` (199/200 Go
+     * funcs; the 1 miss is an AVX512/EVEX asm func, never a uprobe target). Returns the instruction
+     * length and its 1-byte opcode (0 for 2-byte 0x0F opcodes). arm64 uses the 4-byte scan instead. */
+    static int _x86_has_modrm(unsigned char op) {
+        /* arith block 0x00-0x3B: forms with low 3 bits 0-3 are r/m<->reg (ModRM);
+         * 4,5 are AL/eAX,imm and 6,7 are seg push/pop (no ModRM here). */
+        if (op <= 0x3B && (op & 7) <= 3) return 1;
+        if (op==0x62||op==0x63||op==0x69||op==0x6B) return 1;
+        if (op>=0x80 && op<=0x83) return 1;
+        if (op>=0x84 && op<=0x8F) return 1;
+        if (op==0xC0||op==0xC1||op==0xC6||op==0xC7) return 1;
+        if (op>=0xD0 && op<=0xD3) return 1;
+        if (op>=0xD8 && op<=0xDF) return 1;
+        if (op==0xF6||op==0xF7||op==0xFE||op==0xFF) return 1;
+        return 0;
+    }
+    static int _x86_imm1(unsigned char op, int opsz, int rexW) {
+        if (op==0x04||op==0x0C||op==0x14||op==0x1C||op==0x24||op==0x2C||op==0x34||op==0x3C||
+            op==0x6A||op==0xA8||op==0xCD||op==0xEB||op==0x80||op==0x83||op==0x6B||op==0xC0||op==0xC1||op==0xC6) return 1;
+        if (op>=0x70 && op<=0x7F) return 1;
+        if (op>=0xB0 && op<=0xB7) return 1;
+        if (op>=0xE0 && op<=0xE3) return 1;
+        if (op==0x05||op==0x0D||op==0x15||op==0x1D||op==0x25||op==0x2D||op==0x35||op==0x3D||
+            op==0x68||op==0xA9||op==0xE8||op==0xE9||op==0x69||op==0x81||op==0xC7) return opsz ? 2 : 4;
+        if (op==0xC2||op==0xCA) return 2;
+        if (op>=0xB8 && op<=0xBF) return rexW ? 8 : (opsz ? 2 : 4);
+        return 0;
+    }
+    static unsigned long _spnl_x86_ilen(const unsigned char *code, unsigned long n, unsigned long pos, unsigned char *op_out) {
+        unsigned long p = pos; int opsz = 0;
+        while (p < n) { unsigned char b = code[p];
+            if (b==0xF0||b==0xF2||b==0xF3||b==0x2E||b==0x36||b==0x3E||b==0x26||b==0x64||b==0x65||b==0x66||b==0x67) { if (b==0x66) opsz=1; p++; } else break; }
+        if (p >= n) { *op_out=0; return n - pos; }
+        int rexW = 0;
+        if (code[p] >= 0x40 && code[p] <= 0x4F) { rexW = (code[p] & 8) != 0; p++; }
+        if (p >= n) { *op_out=0; return n - pos; }
+        unsigned char op = code[p++]; int modrm = 0, imm = 0;
+        if (op == 0x0F) {
+            if (p >= n) { *op_out=0; return n - pos; }
+            unsigned char op2 = code[p++];
+            if (op2==0x38 || op2==0x3A) { p++; modrm=1; if (op2==0x3A) imm=1; }
+            else if (op2>=0x80 && op2<=0x8F) imm=4;
+            else if (op2==0xA4||op2==0xAC||op2==0xBA||op2==0x70||op2==0x71||op2==0x72||op2==0x73||op2==0xC2||op2==0xC4||op2==0xC5||op2==0xC6) { modrm=1; imm=1; }
+            else modrm=1;
+            op = 0;   /* 2-byte opcode is not a 1-byte RET */
+        } else {
+            modrm = _x86_has_modrm(op);
+            imm   = _x86_imm1(op, opsz, rexW);
+        }
+        if (modrm) {
+            if (p >= n) { *op_out=op; return n - pos; }
+            unsigned char mrm = code[p++]; int mod = mrm>>6, rm = mrm&7, disp = 0;
+            if (mod != 3 && rm == 4) { if (p < n) { unsigned char sib = code[p++]; if (mod==0 && (sib&7)==5) disp=4; } }
+            if (mod==1) disp=1; else if (mod==2) disp=4; else if (mod==0 && rm==5) disp=4;
+            p += disp;
+            if (op==0xF6) imm = (((mrm>>3)&7) < 2) ? 1 : 0;
+            else if (op==0xF7) imm = (((mrm>>3)&7) < 2) ? (opsz ? 2 : 4) : 0;
+        }
+        p += imm;
+        *op_out = op;
+        return (p > pos) ? (p - pos) : 1;
+    }
+
+    static int _spnl_go_ret_offsets(const char *binary, const char *func,
+                                    unsigned long *offs, int max)
+    {
+        int fd = open(binary, O_RDONLY);
+        if (fd < 0) return -1;
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_size < (long)sizeof(Elf64_Ehdr)) { close(fd); return -1; }
+        void *base = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (base == MAP_FAILED) return -1;
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)base;
+        if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) { munmap(base, st.st_size); return -1; }
+        Elf64_Shdr *sh = (Elf64_Shdr *)((char *)base + eh->e_shoff);
+        unsigned long fval = 0, fsize = 0; int found = 0;
+        for (int s = 0; s < eh->e_shnum && !found; s++) {
+            if (sh[s].sh_type != SHT_SYMTAB && sh[s].sh_type != SHT_DYNSYM) continue;
+            Elf64_Sym *syms = (Elf64_Sym *)((char *)base + sh[s].sh_offset);
+            long nsyms = sh[s].sh_size / sizeof(Elf64_Sym);
+            const char *strs = (const char *)base + sh[sh[s].sh_link].sh_offset;
+            for (long k = 0; k < nsyms; k++) {
+                if (syms[k].st_name == 0 || syms[k].st_value == 0) continue;
+                if (strcmp(strs + syms[k].st_name, func) == 0) {
+                    fval = syms[k].st_value; fsize = syms[k].st_size; found = 1; break;
+                }
+            }
+        }
+        /* stripped binaries have no .symtab -> resolve via .gopclntab. */
+        if (!found || fsize == 0)
+            found = _spnl_go_pcln_vaddr(base, st.st_size, func, &fval, &fsize);
+        if (!found || fsize == 0) { munmap(base, st.st_size); return -1; }
+        Elf64_Phdr *ph = (Elf64_Phdr *)((char *)base + eh->e_phoff);
+        unsigned long foff = 0; int mapped = 0;
+        for (int p = 0; p < eh->e_phnum; p++) {
+            if (ph[p].p_type != PT_LOAD) continue;
+            if (fval >= ph[p].p_vaddr && fval < ph[p].p_vaddr + ph[p].p_filesz) {
+                foff = fval - ph[p].p_vaddr + ph[p].p_offset; mapped = 1; break;
+            }
+        }
+        if (!mapped || foff + fsize > (unsigned long)st.st_size) { munmap(base, st.st_size); return -1; }
+        int n = 0;
+        const unsigned char *code = (const unsigned char *)base + foff;
+        if (eh->e_machine == 62 /* EM_X86_64 */) {
+            /* amd64 `ret`=0xc3 is single-byte at a variable position -> length-decode to find
+             * it at true instruction boundaries. Scan-verified vs go tool objdump. */
+            for (unsigned long i = 0; i < fsize && n < max; ) {
+                unsigned char op;
+                unsigned long len = _spnl_x86_ilen(code, fsize, i, &op);
+                if (op == 0xC3) offs[n++] = foff + i;   /* ABSOLUTE file offset of the RET */
+                if (!len) break;
+                i += len;
+            }
+        } else {   /* arm64 (EM_AARCH64): fixed 4-byte RET = 0xd65f03c0 */
+            for (unsigned long i = 0; i + 4 <= fsize && n < max; i += 4) {
+                unsigned int w = code[i] | (code[i+1]<<8) | (code[i+2]<<16) | ((unsigned)code[i+3]<<24);
+                if (w == 0xd65f03c0u) offs[n++] = foff + i;   /* ABSOLUTE file offset (works stripped) */
+            }
+        }
+        munmap(base, st.st_size);
+        return n;
+    }
+
+    /* resolve a func's ENTRY file offset via .symtab/.dynsym, else .gopclntab. Used as a
+     * fallback when libbpf's func_name attach fails (stripped Go). Returns the file offset, or 0. */
+    static unsigned long _spnl_go_func_fileoff(const char *binary, const char *func)
+    {
+        int fd = open(binary, O_RDONLY);
+        if (fd < 0) return 0;
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_size < (long)sizeof(Elf64_Ehdr)) { close(fd); return 0; }
+        void *base = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (base == MAP_FAILED) return 0;
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)base;
+        unsigned long fval = 0, fsize = 0, foff = 0; int found = 0;
+        if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0) {
+            Elf64_Shdr *sh = (Elf64_Shdr *)((char *)base + eh->e_shoff);
+            for (int s = 0; s < eh->e_shnum && !found; s++) {
+                if (sh[s].sh_type != SHT_SYMTAB && sh[s].sh_type != SHT_DYNSYM) continue;
+                Elf64_Sym *syms = (Elf64_Sym *)((char *)base + sh[s].sh_offset);
+                long nsyms = sh[s].sh_size / sizeof(Elf64_Sym);
+                const char *strs = (const char *)base + sh[sh[s].sh_link].sh_offset;
+                for (long k = 0; k < nsyms; k++)
+                    if (syms[k].st_name && syms[k].st_value && strcmp(strs + syms[k].st_name, func) == 0) {
+                        fval = syms[k].st_value; fsize = syms[k].st_size; found = 1; break;
+                    }
+            }
+            if (!found) found = _spnl_go_pcln_vaddr(base, st.st_size, func, &fval, &fsize);
+            if (found) {
+                Elf64_Phdr *ph = (Elf64_Phdr *)((char *)base + eh->e_phoff);
+                for (int p = 0; p < eh->e_phnum; p++)
+                    if (ph[p].p_type == PT_LOAD && fval >= ph[p].p_vaddr && fval < ph[p].p_vaddr + ph[p].p_filesz) {
+                        foff = fval - ph[p].p_vaddr + ph[p].p_offset; break;
+                    }
+            }
+        }
+        munmap(base, st.st_size);
+        return foff;
+    }
+
     static void _spnl_uprobe_attach_all(void)
     {
         struct bpf_program *prog;
@@ -1075,6 +1796,30 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             } else {
                 continue;
             }
+            /* Go return-probe — attach one uprobe per RET offset of func
+             * (uretprobe is unusable on Go). func_name resolves the function start;
+             * func_offset = each RET's offset within it. */
+            if (rt && rt->go_ret) {
+                unsigned long ret_offs[64];
+                int nr = _spnl_go_ret_offsets(binary, func, ret_offs, 64);
+                if (nr <= 0) {
+                    fprintf(stderr, "[spinel-ebpf] go_uret: no RET offsets for %s:%s (nr=%d)\\n",
+                            binary, func, nr);
+                    continue;
+                }
+                int attached = 0;
+                for (int r = 0; r < nr && _spnl_uprobe_link_count < SPNL_UPROBE_MAX; r++) {
+                    /* ret_offs[r] is an ABSOLUTE file offset (resolved via .symtab or .gopclntab),
+                     * so attach with func_name=NULL — works on stripped binaries too. */
+                    LIBBPF_OPTS(bpf_uprobe_opts, gopts, .retprobe = 0);
+                    struct bpf_link *glink = bpf_program__attach_uprobe_opts(
+                        prog, pid, binary, ret_offs[r], &gopts);
+                    if (glink) { _spnl_uprobe_links[_spnl_uprobe_link_count++] = glink; attached++; }
+                }
+                fprintf(stderr, "[spinel-ebpf] go_uret attached: %s -> %s:%s at %d/%d RET offsets (pid=%d)\\n",
+                        name, binary, func, attached, nr, pid);
+                continue;
+            }
             if (_spnl_uprobe_link_count >= SPNL_UPROBE_MAX) {
                 fprintf(stderr, "[spinel-ebpf] too many uprobe programs (>%d)\\n", SPNL_UPROBE_MAX);
                 break;
@@ -1084,6 +1829,15 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                         .func_name  = func);
             struct bpf_link *link = bpf_program__attach_uprobe_opts(
                 prog, pid, binary, 0 /* func_offset resolved by func_name */, &opts);
+            if (!link) {
+                /* func_name resolution fails on stripped Go (no .symtab). Fall back to the
+                 * .gopclntab-resolved absolute file offset (func_name=NULL). */
+                unsigned long gfoff = _spnl_go_func_fileoff(binary, func);
+                if (gfoff) {
+                    LIBBPF_OPTS(bpf_uprobe_opts, gopts2, .retprobe = retprobe);
+                    link = bpf_program__attach_uprobe_opts(prog, pid, binary, gfoff, &gopts2);
+                }
+            }
             if (!link) {
                 fprintf(stderr, "[spinel-ebpf] bpf_program__attach_uprobe(%s, %s:%s, pid=%d): %s\\n",
                         retprobe ? "retprobe" : "probe", binary, func, pid, strerror(errno));
@@ -1569,7 +2323,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         *out = (unsigned long long)v;
         return rc;
     }
-    /* keyed-hist variants (bpf_hist_keyed[key]) for --instrument
+    /* keyed-hist variants (bpf_hist_keyed[key]) for --instrument S2
      * per-method duration. key selects the per-method 64-slot log2 hist.
      * count/percentile return the value directly (spinel FFI is pointer-averse). */
     int spnl_dump_log2_hist_keyed(const char *map_name, long long key, const char *label)
@@ -1594,7 +2348,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                                                 (unsigned long long)key, percentile, &v)) return -1;
         return (long long)v;
     }
-
+    #{otlp_push_shim}
     /* dump a stack trace (kallsyms-symbolized if symbolize_kernel != 0)
      * to stderr. Spinel-emitted main can declare:
      *   module Stack
@@ -1684,13 +2438,67 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         while (polls != 0) {
             int n = ring_buffer__poll(rb, 200);
             if (n < 0 && n != -EINTR) break;
+            /* event-boxed one-shot. Each polled record is 1 event; once the
+             * SPNL_MAX_EVENTS=K tally is reached, exit cleanly (records already
+             * printed = lossless; destructor detaches BPF, fd-GC backstop). */
+            if (n > 0 && spnl_oneshot_add(n)) { ring_buffer__free(rb); spnl_oneshot_exit(); }
             if (polls > 0) polls--;
         }
         ring_buffer__free(rb);
         return 0;
     }
 
-    /* userspace consumer drain. Collects int emit events from the
+    /* sock-keyed L7 stream drain. Drains the <unit>_l7stream_events ringbuf
+     * (packed record {hdr, __u64 sock, __u32 len, char raw[128]}) and prints each
+     * record as a line userspace can parse for per-connection reassembly:
+     *     L7 <sock_hex> <len_decimal> <raw[0..len]_in_hex>
+     * Hex avoids the CRLF/NUL mangling that makes the plain str %s path unusable for
+     * byte-exact reassembly. The probe declares it and calls it instead of sleep:
+     *   module Stream
+     *     ffi_func :spnl_l7stream_drain, [:int], :int   # arg = seconds (0 = forever)
+     *   end
+     *   Stream.spnl_l7stream_drain(0) */
+    static int _spnl_l7stream_cb(void *c, void *d, size_t n) {
+        (void)c;
+        /* field offsets: hdr(16) | sock(u64 @16) | len(u32 @24) | raw(@28) */
+        if (n < sizeof(struct _spnl_evt_hdr) + 12) return 0;
+        unsigned long long sock = *(unsigned long long *)((char *)d + sizeof(struct _spnl_evt_hdr));
+        unsigned int len = *(unsigned int *)((char *)d + sizeof(struct _spnl_evt_hdr) + 8);
+        const unsigned char *raw = (const unsigned char *)d + sizeof(struct _spnl_evt_hdr) + 12;
+        if (len > 128) len = 128;
+        if (sizeof(struct _spnl_evt_hdr) + 12 + len > n) len = (unsigned int)(n - sizeof(struct _spnl_evt_hdr) - 12);
+        printf("L7 %llx %u ", sock, len);
+        for (unsigned int i = 0; i < len; i++) printf("%02x", raw[i]);
+        printf("\\n"); fflush(stdout);
+        return 0;
+    }
+    int spnl_l7stream_drain(int duration_secs)
+    {
+        if (!_spnl_skel) return -1;
+        struct ring_buffer *rb = NULL;
+        struct bpf_map *map;
+        bpf_object__for_each_map(map, _spnl_skel->obj) {
+            if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
+            const char *nm = bpf_map__name(map);
+            if (!strstr(nm, "_l7stream_events")) continue;
+            int fd = bpf_map__fd(map);
+            if (!rb) rb = ring_buffer__new(fd, _spnl_l7stream_cb, NULL, NULL);
+            else     ring_buffer__add(rb, fd, _spnl_l7stream_cb, NULL);
+        }
+        if (!rb) { fprintf(stderr, "[spinel-ebpf] spnl_l7stream_drain: no l7stream ringbuf found\\n"); return -1; }
+        int polls = duration_secs > 0 ? duration_secs * 5 : -1;   /* 200ms polls */
+        while (polls != 0) {
+            int n = ring_buffer__poll(rb, 200);
+            if (n < 0 && n != -EINTR) break;
+            /* event-boxed one-shot (SPNL_MAX_EVENTS=K). */
+            if (n > 0 && spnl_oneshot_add(n)) { ring_buffer__free(rb); spnl_oneshot_exit(); }
+            if (polls > 0) polls--;
+        }
+        ring_buffer__free(rb);
+        return 0;
+    }
+
+    /* Userspace consumer drain. Collects int emit events from the
      * <unit>_events ringbuf into a static buffer so the spinel-Ruby side can
      * iterate them (spnl_cget) and process each in Ruby. spinel->glue FFI
      * direction (the consumer method itself is a normal static spinel function
@@ -1769,7 +2577,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
 
     /* persistent consumer ring_buffer for epoll-multiplexed draining.
      * Created once over all emit ringbufs; its epoll fd joins the program's
-     * run loop (source-contributing), so events drain as they arrive
+     * run loop, so events drain as they arrive
      * (not only on scrape -> no overflow between scrapes). spnl_consume_poll
      * fills the same static buffers as spnl_cdrain*; getters/counts read them. */
     static struct ring_buffer *_spnl_consumer_rb;
@@ -1940,6 +2748,185 @@ def build_glue_c(base, skel_name, with_dispatch: false,
   GLUE
 end
 
+# --- subcommand: check ---
+#
+# spinel-ebpf check <file.rb> [--json]
+#
+# Run a probe through partition -> codegen -> clang(-target bpf) -> load+verifier,
+# stopping at the first failing stage, and return {stage, ok, error, detail} for
+# each. This closes the AI-authoring read-write-fix-verify loop:
+# the AI gets a machine-readable "here is the one thing to fix next", including a
+# clean *kernel verifier* verdict (the second, kernel-side harness) — the piece
+# the pre-compile checks don't reach.
+#
+# `check` is a light path: it stops at the .bpf.o and load-only verification. It
+# does NOT link the full binary (no glue.c / runtime / OTLP), does NOT attach, and
+# does NOT run the workload. Stages gracefully *skip* (ok:null + reason) where the
+# environment can't run them — notably the verifier on a host with no kernel/BTF.
+def cmd_check(argv)
+  opts = { json: false, output_dir: nil, verbose: false }
+  parser = OptionParser.new do |op|
+    op.banner = "Usage: spinel-ebpf check <file.rb> [--json]"
+    op.on("--json", "Emit the structured result { file, ok, failed_stage, stages:[...] }") { opts[:json] = true }
+    op.on("-o DIR", "--output DIR", "Work directory (default: a temp dir; artifacts are throwaway)") { |d| opts[:output_dir] = d }
+    op.on("-v", "--verbose", "Verbose output") { opts[:verbose] = true }
+    op.on("-h", "--help", "Show this message") { puts op; exit 0 }
+  end
+  files = parser.parse!(argv)
+  abort parser.help if files.length != 1
+  input = files[0]
+  abort "error: #{input} not found" unless File.exist?(input)
+
+  build_dir = opts[:output_dir] || Dir.mktmpdir("spnl-check")
+  FileUtils.mkdir_p(build_dir)
+  ctx = { verbose: opts[:verbose] }
+
+  stages = []
+  failed = false
+  run_stage = lambda do |name, &blk|
+    st = failed ? SpinelEbpf::Check.skip_stage(name, "upstream stage failed") : blk.call
+    stages << st
+    failed = true if st[:ok] == false
+  end
+
+  run_stage.call("partition") { check_stage_partition(input, build_dir, ctx) }
+  run_stage.call("codegen")   { check_stage_codegen(build_dir, ctx) }
+  run_stage.call("clang")     { check_stage_clang(build_dir, ctx) }
+  run_stage.call("verifier")  { check_stage_verifier(ctx) }
+
+  result = SpinelEbpf::Check.assemble(input, stages)
+  puts(opts[:json] ? SpinelEbpf::Check.to_json(result) : SpinelEbpf::Check.human(result))
+  result[:ok] ? 0 : 1
+end
+
+# Stage 1: frontend (spinel -> .ast/.ir) + parse + partition + the validate gate.
+# The frontend is a Linux binary, so on a non-Linux host this stage skips (the AI
+# should run `check` in the build container). A Validate violation is a probe
+# failure carrying that gate's loud message.
+def check_stage_partition(input, build_dir, ctx)
+  cs = c_spinel
+  unless SpinelEbpf::Check.linux? && cs
+    return SpinelEbpf::Check.skip_stage("partition",
+      "frontend requires Linux + the spinel binary (spinel is a Linux ELF; run check in the build container)")
+  end
+
+  # Mirror compile's source sanitize so the frontend accepts the same programs
+  # (strip use_plugin, lower the consumer DSL). No-op for a plain probe.
+  src = File.read(input, encoding: "UTF-8")
+  declared = SpinelEbpf::Plugin.detect_declarations(src)
+  transformed = src
+  transformed = SpinelEbpf::Plugin.strip_declarations(transformed) unless declared.empty?
+  begin
+    transformed = SpinelEbpf::Consumer.transform(transformed)   # loud on a bad ev.<prop>
+  rescue SpinelEbpf::Consumer::Error => e
+    abort "error: #{e.message}"
+  end
+  real_input = input
+  if transformed != src
+    real_input = File.join(build_dir, File.basename(input))
+    File.write(real_input, transformed)
+  end
+
+  base = File.basename(real_input, ".rb")
+  ast_path = File.join(build_dir, "#{base}.ast")
+  ir_path  = File.join(build_dir, "#{base}.ir")
+
+  out, err, st = Open3.capture3(cs, "--dump-ast", "--no-line-map", real_input)
+  return SpinelEbpf::Check.fail_stage("partition", "spinel --dump-ast failed", detail: err.strip) unless st.success?
+  File.write(ast_path, out)
+
+  icc = inproc_codegen_bin
+  return SpinelEbpf::Check.skip_stage("partition", "in-process codegen unavailable (build spinel first)") unless icc
+  irout, irerr, irst = Open3.capture3(icc, real_input, base, "--ir")
+  return SpinelEbpf::Check.fail_stage("partition", "in-process IR emit failed", detail: irerr.strip) unless irst.success?
+  File.write(ir_path, irout)
+
+  begin
+    ir  = SpinelEbpf::ParseSpinelIR.parse_file(ir_path)
+    ast = SpinelEbpf::ParseSpinelAst.parse_file(ast_path)
+    result = SpinelEbpf::Partition.classify(ir, ast)
+  rescue StandardError => e
+    return SpinelEbpf::Check.fail_stage("partition", "partition failed: #{e.message}")
+  end
+
+  verdict = SpinelEbpf::Check.partition_verdict(ast, result)
+  if verdict[:ok]
+    ctx[:base] = base
+    ctx[:input] = real_input
+    ctx[:result] = result
+    ctx[:ebpf_count] = result.methods.count { |m| m.tag == :ebpf }
+  end
+  verdict
+end
+
+# Stage 2: in-process C eBPF codegen (.bpf.c). No eBPF methods -> nothing to
+# compile (skip, not a failure).
+def check_stage_codegen(build_dir, ctx)
+  return SpinelEbpf::Check.skip_stage("codegen", "no partition output") unless ctx[:result]
+  if ctx[:ebpf_count].to_i.zero?
+    return SpinelEbpf::Check.skip_stage("codegen", "no eBPF programs (all methods are :native)")
+  end
+  icc = inproc_codegen_bin
+  return SpinelEbpf::Check.skip_stage("codegen", "in-process codegen unavailable") unless icc
+  bpf_c = File.join(build_dir, "#{ctx[:base]}.bpf.c")
+  out, err, st = Open3.capture3(icc, ctx[:input], ctx[:base])
+  return SpinelEbpf::Check.fail_stage("codegen", "in-process eBPF codegen failed", detail: err.strip) unless st.success?
+  File.write(bpf_c, out)
+  ctx[:bpf_c] = bpf_c
+  SpinelEbpf::Check.ok_stage("codegen", detail: "wrote #{File.basename(bpf_c)} (#{ctx[:ebpf_count]} programs)")
+end
+
+# Stage 3: clang -target bpf -> .bpf.o. Needs Linux clang + bpftool-generated
+# vmlinux.h; skips gracefully when the toolchain is absent.
+def check_stage_clang(build_dir, ctx)
+  return SpinelEbpf::Check.skip_stage("clang", "no .bpf.c (upstream produced none)") unless ctx[:bpf_c]
+  clang = which("clang")
+  return SpinelEbpf::Check.skip_stage("clang", "clang with bpf target unavailable (needs Linux clang)") unless clang && SpinelEbpf::Check.linux?
+
+  vmlinux = File.join(build_dir, "vmlinux.h")
+  unless File.exist?(vmlinux)
+    bpftool = which("bpftool")
+    return SpinelEbpf::Check.skip_stage("clang", "bpftool not found (needed to generate vmlinux.h)") unless bpftool
+    dump = `#{bpftool} btf dump file #{SpinelEbpf::Check.default_btf_path} format c 2>/dev/null`
+    return SpinelEbpf::Check.skip_stage("clang", "vmlinux.h generation failed (no BTF at #{SpinelEbpf::Check.default_btf_path})") if dump.strip.empty?
+    File.write(vmlinux, dump)
+  end
+
+  bpf_o = File.join(build_dir, "#{ctx[:base]}.bpf.o")
+  argv  = bpf_clang_argv(clang, ctx[:bpf_c], bpf_o, build_dir)
+  warn "[spinel-ebpf] check clang: #{argv.join(' ')}" if ctx[:verbose]
+  _out, err, st = Open3.capture3(*argv)
+  unless st.success?
+    first = err.lines.find { |l| l =~ /error:/i }&.strip
+    return SpinelEbpf::Check.fail_stage("clang", first || "clang -target bpf failed", detail: err.strip)
+  end
+  ctx[:bpf_o] = bpf_o
+  SpinelEbpf::Check.ok_stage("clang", detail: "wrote #{File.basename(bpf_o)}")
+end
+
+# Stage 4: load-only kernel verification (libbpf bpf_object__load — the second,
+# kernel-side harness). No kernel/BTF -> skip. On rejection, surface the verifier
+# verdict + a trimmed log tail.
+def check_stage_verifier(ctx)
+  # Kernel/BTF is the most fundamental precondition — report it first so a host
+  # without a kernel (e.g. macOS) cleanly says "no kernel/BTF" regardless of what
+  # upstream produced.
+  unless SpinelEbpf::Check.verifier_available?
+    return SpinelEbpf::Check.skip_stage("verifier",
+      "no kernel/BTF (host=#{RbConfig::CONFIG["host_os"]}; needs Linux + #{SpinelEbpf::Check.default_btf_path})")
+  end
+  return SpinelEbpf::Check.skip_stage("verifier", "no .bpf.o (upstream produced none)") unless ctx[:bpf_o]
+  loader = load_check_bin
+  return SpinelEbpf::Check.skip_stage("verifier", "load-only loader unavailable (libbpf-dev / cc missing)") unless loader
+  _out, err, st = Open3.capture3(loader, ctx[:bpf_o])
+  if st.success?
+    SpinelEbpf::Check.ok_stage("verifier", detail: "load-only OK (bpf_object__load accepted all programs)")
+  else
+    short, detail = SpinelEbpf::Check.summarize_verifier_log(err)
+    SpinelEbpf::Check.fail_stage("verifier", short, detail: detail)
+  end
+end
+
 def print_partition_table(result, base)
   ebpf   = result.methods.count { |m| m.tag == :ebpf }
   native = result.methods.count { |m| m.tag == :native }
@@ -1972,12 +2959,55 @@ def cmd_describe(argv)
   0
 end
 
+# `spinel-ebpf capabilities [file.rb]`
+#   no arg  -> full domain registry (all builtins grouped by domain + context gates)
+#   file.rb -> just the domains that file's probe uses
+# `spinel-ebpf capabilities --json`
+#   -> machine-readable affordance contract (builtin signatures + attach kinds +
+#      Ruby subset + layer-2 enrichers), meant to be read by a program -- an AI
+#      writing a probe, say. It does not affect generated code.
+#   -> also reports record_channels: the byte layout each packed-record emit
+#      writes into its ringbuf, and the OTLP attributes those bytes end up as.
+#      Both are derived from src/codegen_c/record_schema.h, which is the one
+#      place that layout is declared.
+def cmd_capabilities(argv)
+  if argv.include?("--json")
+    puts SpinelEbpf::Capabilities.affordance_json
+    return 0
+  end
+  file = argv[0]
+  if file
+    abort "error: #{file} not found" unless File.exist?(file)
+    doms = SpinelEbpf::Introspect.builtin_domains(File.read(file, encoding: "UTF-8"))
+    puts "spinel-ebpf capabilities used by #{file}:"
+    puts "  (none)" if doms.empty?
+    doms.each do |dom, blts|
+      puts format("  %-14s %s", dom, blts.join(" "))
+      blts.each do |b|
+        # Show a call-syntax example next to each builtin the probe actually uses,
+        # so the reference is where the author is already looking.
+        ex = SpinelEbpf::Capabilities.builtin_entry(b)[:example]
+        puts format("    %-20s e.g. %s", b, ex) if ex
+        g = SpinelEbpf::Capabilities.gate_for(b)
+        puts format("      ! only valid in: %s", g[:valid_secs].join(" | ")) if g
+      end
+    end
+  else
+    print SpinelEbpf::Capabilities.catalog_report
+  end
+  0
+end
+
 argv = ARGV.dup
 case argv.shift
 when "compile"
   exit cmd_compile(argv)
+when "check"
+  exit cmd_check(argv)
 when "describe"
   exit cmd_describe(argv)
+when "capabilities"
+  exit cmd_capabilities(argv)
 when "--version", "-V"
   puts "spinel-ebpf #{VERSION}"
   exit 0
@@ -1989,13 +3019,30 @@ when "--help", "-h", nil
       spinel-ebpf compile <file.rb> [--ebpf-mixed | --native-only] [-o DIR]
 
     Subcommands:
-      compile     Compile a Ruby source file
-      describe    Show emit sites <-> on_emit consumers binding
-      --version   Show version
+      compile      Compile a Ruby source file
+      check        Fast verify loop: run partition -> codegen -> clang ->
+                   load+verifier and report {stage, ok, error} for each, stopping
+                   at the first failure. --json for machine-readable output.
+      describe     Show emit sites <-> on_emit consumers binding, plus the
+                   packed-record channels a probe writes and the OTLP attributes
+                   they turn into
+      capabilities Show the builtin domain registry (or just what a file uses).
+                   --json emits the machine-readable affordance contract
+                   (builtin signatures + attach kinds + Ruby subset + record
+                   channels/egress attributes) for AI authoring
+      --version    Show version
 
     Environment:
       SPINEL_DIR        Path to deps/spinel (default: $project/deps/spinel)
       SPINEL_EBPF_MODE  Override default mode: "ebpf-mixed" or "native-only"
+      SPNL_STATIC=1     Link a fully static binary (--build). Runs on a host with no
+                        matching glibc/libbpf/libelf — even a different libc.
+      SPNL_STATIC_ELF_DIR
+                        Directory holding a libelf.a that carries the elfutils libeu
+                        objects (elfutils >= 0.195). Needed with SPNL_STATIC=1 when the
+                        system libelf.a is older; spinel-ebpf checks and explains if so.
+
+    See docs/architecture.md for how the partitioning pipeline fits together.
   HELP
   exit 0
 else

@@ -1,3 +1,5 @@
+# examples/observability/tcp_cc_reno.rb
+#
 # Reno-like TCP congestion control written in Ruby.
 #
 # Uses the dot-accessor sugar so the math reads like ordinary Ruby
@@ -17,39 +19,44 @@
 #   echo spnl_cc > /proc/sys/net/ipv4/tcp_congestion_control
 #   # generate some TCP traffic; watch cwnd grow via `ss -tin`
 
-def tcp_cc__init(sk)
-  0
-end
-
-def tcp_cc__ssthresh(sk)
-  half = sk.snd_cwnd / 2
-  if half < 2
-    2
-  else
-    half
+# A struct_ops implementation must be written as a class. The flat form,
+# `def tcp_cc__<member>`, lowers to a syscall program and is never registered;
+# only the class form is registered as a tcp_congestion_ops.
+class RenoCC < BPF::TcpCC
+  def init(sk)
+    0
   end
-end
 
-def tcp_cc__undo_cwnd(sk)
-  sk.prior_cwnd
-end
-
-def tcp_cc__cong_avoid(sk, ack, acked)
-  if sk.snd_cwnd < sk.snd_ssthresh
-    sk.snd_cwnd += acked
-  else
-    cnt = sk.snd_cwnd_cnt + acked
-    if cnt >= sk.snd_cwnd
-      sk.snd_cwnd += 1
-      sk.snd_cwnd_cnt = 0
+  def ssthresh(sk)
+    half = sk.snd_cwnd / 2
+    if half < 2
+      2
     else
-      sk.snd_cwnd_cnt = cnt
+      half
     end
   end
-end
 
-def tcp_cc__set_state(sk, new_state)
-  0
+  def undo_cwnd(sk)
+    sk.prior_cwnd
+  end
+
+  def cong_avoid(sk, ack, acked)
+    if sk.snd_cwnd < sk.snd_ssthresh
+      sk.snd_cwnd += acked
+    else
+      cnt = sk.snd_cwnd_cnt + acked
+      if cnt >= sk.snd_cwnd
+        sk.snd_cwnd += 1
+        sk.snd_cwnd_cnt = 0
+      else
+        sk.snd_cwnd_cnt = cnt
+      end
+    end
+  end
+
+  def set_state(sk, new_state)
+    0
+  end
 end
 
 puts "Reno-like Ruby CC loaded (spnl_cc). echo spnl_cc > /proc/sys/net/ipv4/tcp_congestion_control"

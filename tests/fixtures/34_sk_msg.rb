@@ -7,8 +7,8 @@
 #
 # Bodies must return SK_PASS / SK_DROP (kernel enum: SK_DROP=0, SK_PASS=1).
 # Attach for these program types requires bpf_prog_attach() against a
-# BPF_MAP_TYPE_SOCKMAP/SOCKHASH map fd — deferred to the fast-path response
-# demo that wires everything together. This fixture only validates
+# BPF_MAP_TYPE_SOCKMAP/SOCKHASH map fd -- that is done where the actual
+# fast-path response demo wires everything together. This fixture only validates
 # that the codegen pattern produces verifier-loadable programs.
 
 SK_PASS = 1

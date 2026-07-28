@@ -1,18 +1,18 @@
 # examples/http_server/l7-path-counter/server.rb
 #
-# HTTP/1.0 server augmented with an L7 per-path counter that lives entirely
-# in a BPF map. Every served request invokes `record_path_hit(path_key)`,
-# which is partition-tagged :ebpf and so (with --ebpf-dispatch) routes
-# through bpf_prog_test_run() into the `bpf_path_counts` HASH map. From
-# userspace, the metric is observable via
+# The HTTP/1.0 server augmented with an L7 per-path counter that
+# lives entirely in a BPF map. Every served request invokes
+# `record_path_hit(path_key)`, which is partition-tagged :ebpf and so
+# (with --ebpf-dispatch) routes through bpf_prog_test_run() into the
+# `bpf_path_counts` HASH map. From userspace, the metric is observable via
 #   bpftool map dump name bpf_path_counts
 # and can be scraped by a future spnl_runtime exporter.
 #
 # Build:
 #   spinel-ebpf compile examples/http_server/l7-path-counter/server.rb \
-#       -o build/l7_server --build --ebpf-dispatch
+#       -o build/l7_counter_server --build --ebpf-dispatch
 # Run:
-#   ./build/l7_server/server &
+#   ./build/l7_counter_server/server &
 #   curl http://127.0.0.1:8080/
 #   bpftool map dump name bpf_path_counts
 

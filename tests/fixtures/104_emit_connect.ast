@@ -1,0 +1,76 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/104_emit_connect.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name tracepoint__sock__inet_sock_set_state
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name skaddr
+N 5 RequiredParameterNode
+S 5 name daddr
+N 6 RequiredParameterNode
+S 6 name dport
+N 7 RequiredParameterNode
+S 7 name family
+N 8 RequiredParameterNode
+S 8 name oldstate
+N 9 RequiredParameterNode
+S 9 name newstate
+N 10 RequiredParameterNode
+S 10 name daddr6_hi
+N 11 RequiredParameterNode
+S 11 name daddr6_lo
+A 3 requireds 4,5,6,7,8,9,10,11
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 12 StatementsNode
+N 13 IfNode
+N 14 CallNode
+S 14 name ==
+N 15 LocalVariableReadNode
+S 15 name newstate
+R 14 receiver 15
+N 16 ArgumentsNode
+N 17 IntegerNode
+I 17 value 1
+A 16 arguments 17
+R 14 arguments 16
+R 14 block -1
+S 14 call_operator .
+R 13 predicate 14
+N 18 StatementsNode
+N 19 CallNode
+S 19 name emit_connect
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name skaddr
+N 22 LocalVariableReadNode
+S 22 name daddr
+N 23 LocalVariableReadNode
+S 23 name dport
+N 24 LocalVariableReadNode
+S 24 name family
+N 25 LocalVariableReadNode
+S 25 name oldstate
+N 26 LocalVariableReadNode
+S 26 name daddr6_hi
+N 27 LocalVariableReadNode
+S 27 name daddr6_lo
+A 20 arguments 21,22,23,24,25,26,27
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+A 18 body 19
+R 13 statements 18
+R 13 subsequent -1
+N 28 IntegerNode
+I 28 value 0
+A 12 body 13,28
+R 2 body 12
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

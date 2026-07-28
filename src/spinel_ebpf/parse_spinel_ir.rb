@@ -102,7 +102,7 @@ module SpinelEbpf
         ParseSpinelIR.split_ints_n(rec.payload, rec.count)
       end
 
-      # Decoded per-method-body local-scope type table. spinel analyze
+      # decoded per-method-body local-scope type table. spinel analyze
       # emits two scope records per method body node — SN (local variable names)
       # and ST (their inferred spinel types), both "|"-joined then %-escaped and
       # keyed by the body node id. Returns { body_nid => [[name, spinel_type], ...] }.

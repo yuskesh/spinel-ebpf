@@ -1,0 +1,106 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/106_sock_owner_correlate.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_v4_connect
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name uaddr
+N 6 RequiredParameterNode
+S 6 name addr_len
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name sock_owner_set
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name sk
+A 9 arguments 10
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 11 IntegerNode
+I 11 value 0
+A 7 body 8,11
+R 2 body 7
+R 2 receiver -1
+N 12 DefNode
+S 12 name tracepoint__sock__inet_sock_set_state
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name skaddr
+N 15 RequiredParameterNode
+S 15 name daddr
+N 16 RequiredParameterNode
+S 16 name dport
+N 17 RequiredParameterNode
+S 17 name family
+N 18 RequiredParameterNode
+S 18 name oldstate
+N 19 RequiredParameterNode
+S 19 name newstate
+N 20 RequiredParameterNode
+S 20 name daddr6_hi
+N 21 RequiredParameterNode
+S 21 name daddr6_lo
+A 13 requireds 14,15,16,17,18,19,20,21
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 22 StatementsNode
+N 23 IfNode
+N 24 CallNode
+S 24 name ==
+N 25 LocalVariableReadNode
+S 25 name newstate
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 1
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+R 23 predicate 24
+N 28 StatementsNode
+N 29 CallNode
+S 29 name emit_connect
+R 29 receiver -1
+N 30 ArgumentsNode
+N 31 LocalVariableReadNode
+S 31 name skaddr
+N 32 LocalVariableReadNode
+S 32 name daddr
+N 33 LocalVariableReadNode
+S 33 name dport
+N 34 LocalVariableReadNode
+S 34 name family
+N 35 LocalVariableReadNode
+S 35 name oldstate
+N 36 LocalVariableReadNode
+S 36 name daddr6_hi
+N 37 LocalVariableReadNode
+S 37 name daddr6_lo
+A 30 arguments 31,32,33,34,35,36,37
+R 29 arguments 30
+R 29 block -1
+S 29 call_operator .
+A 28 body 29
+R 23 statements 28
+R 23 subsequent -1
+N 38 IntegerNode
+I 38 value 0
+A 22 body 23,38
+R 12 body 22
+R 12 receiver -1
+A 1 body 2,12
+R 0 statements 1
