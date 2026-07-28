@@ -6,7 +6,7 @@
 @denied = 0
 
 def fmod_ret__security_file_open(file, ret)
-  if parent_path_eq("/usr/bin/spnlbad") && path_eq(file, "/etc/spnl_e289_secret")
+  if parent_path_eq("/usr/bin/spnlbad") && path_eq(file, "/etc/spnl_parent_file")
     @denied = @denied + 1
     -1
   else

@@ -13,8 +13,7 @@
 #   1. Invokes deps/spinel binaries to produce .ast and .ir
 #   2. In --native-only mode: passes through to ./spinel, produces native binary
 #   3. In --ebpf-mixed mode: runs the partition analysis and prints a
-#      per-method tag table. eBPF codegen for :ebpf methods is future work
-#      (a separate ADR + Edoc will handle the actual .bpf.c emission).
+#      per-method tag table, then emits .bpf.c for the :ebpf methods.
 
 $LOAD_PATH.unshift(File.expand_path("../src", __dir__))
 
@@ -722,14 +721,13 @@ def check_static_libelf!(clang, elf_dir)
            It references #{missing.sort.first(3).join(", ")}#{missing.length > 3 ? ", ..." : ""} with no definition in the archive.
            elfutils < 0.193 leaves those in its internal libeu.a, which upstream never
            installs (`noinst_LIBRARIES`), so no distro ships them. Fixed upstream in 0.193.
-           See docs/experiments/E380_full_static_probe_elfutils_0195.md
 
-           Fix (easiest) — install elfutils >= 0.193 from your distro; then plain
+           Fix (easiest) -- install elfutils >= 0.193 from your distro; then plain
            SPNL_STATIC=1 works and SPNL_STATIC_ELF_DIR is not needed:
              Debian trixie    : apt install -t trixie-backports libelf-dev  # 0.195-1~bpo13+1
              Debian sid/forky : apt install libelf-dev                      # 0.195-1
              Alpine / Fedora  : current elfutils-dev / elfutils-libelf-devel-static is 0.195
-           Fix (no newer package available) — build elfutils and point at its libelf.a:
+           Fix (no newer package available) -- build elfutils and point at its libelf.a:
              ./configure --disable-debuginfod --disable-libdebuginfod --disable-werror
              make -C lib && make -C libelf libelf.a
              SPNL_STATIC=1 SPNL_STATIC_ELF_DIR=<elfutils-src>/libelf spinel-ebpf compile ... --build

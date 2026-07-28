@@ -40,7 +40,7 @@ N 15 ArgumentsNode
 N 16 LocalVariableReadNode
 S 16 name file
 N 17 StringNode
-S 17 content /etc/spnl_e289_secret
+S 17 content /etc/spnl_parent_file
 A 15 arguments 16,17
 R 14 arguments 15
 R 14 block -1

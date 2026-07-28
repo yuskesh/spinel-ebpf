@@ -6,7 +6,7 @@
  * back. Historically each layout was written twice by hand -- once as a
  * templates/<chan>.template.c struct, once as memcpy offsets in the runtime --
  * with only comments keeping the two in sync. That is the offset-desync risk
- * described in docs/research/ringbuf_data_contract.md.
+ * described below.
  *
  * Here the layout becomes *data*: one table per channel, from which
  *   S1 generates the kernel record struct + its ringbuf map (spinel_ebpf_cc.c),

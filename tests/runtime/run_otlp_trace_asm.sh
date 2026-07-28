@@ -52,7 +52,7 @@ assert 'name: "off-CPU wait (sleep)"'
 assert 'kind: SPAN_KIND_SERVER'
 assert 'kind: SPAN_KIND_INTERNAL'
 assert 'parent_span_id:'
-assert 'string_value: "spinel-e312-test"'
+assert 'string_value: "spinel-tree-test"'
 count 'parent_span_id:' 1     # only the child has a parent; the parent is the root
 count 'trace_id:' 2           # 2 spans (parent + child): same trace_id value, printed on 2 lines
 

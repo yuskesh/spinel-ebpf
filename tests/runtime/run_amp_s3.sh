@@ -30,7 +30,7 @@ ICC="$REPO_ROOT/build/codegen_c/spinel-ebpf-cc"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-SERVICE="spinel-amp-e364"   # distinct so the assert proves it came from the manifest
+SERVICE="spinel-amp-test"   # distinct so the assert proves it came from the manifest
 
 # --- locate/build the AOT driver ---
 # target/ is bind-mounted (like build/), so it may hold a wrong-platform ELF.

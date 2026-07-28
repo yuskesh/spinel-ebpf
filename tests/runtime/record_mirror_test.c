@@ -131,7 +131,7 @@ static size_t put_httpish(uint8_t *b, size_t cap, const char *req, const char *r
  *   pid(0) comm(4) pad duration(24) offcpu(32) wait_stack(40) req(44..108)
  *   resp(108..124) pad cgid(128..136) | start_ktime(136..144) hdr_ext(144..272)
  * min H+136; the last two fields were appended later (H+144 / H+272 guards). */
-static size_t put_offcpu(uint8_t *b, size_t cap, int with_e312) {   /* with_e312: write the two appended fields too */
+static size_t put_offcpu(uint8_t *b, size_t cap, int with_window_fields) {   /* with_window_fields: write the two appended fields too */
     uint32_t pid = 1010;
     uint64_t dur = 310000000ULL, off = 305000000ULL, cgid = 7, start = 88888ULL;
     int32_t stack = 14636;
@@ -148,7 +148,7 @@ static size_t put_offcpu(uint8_t *b, size_t cap, int with_e312) {   /* with_e312
     memcpy(p + 44, "GET /sleep HTTP/1.1", 19);
     memcpy(p + 108, "HTTP/1.1 200 OK", 15);
     memcpy(p + 128, &cgid, 8);
-    if (!with_e312) return H + 136;
+    if (!with_window_fields) return H + 136;
     memcpy(p + 136, &start, 8);
     memcpy(p + 144, req, strlen(req));
     return H + 272;

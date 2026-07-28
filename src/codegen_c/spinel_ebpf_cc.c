@@ -31,7 +31,7 @@
 
 /* Packed-record ringbuf layouts are *data*, not template text: one declaration
  * per channel feeds the kernel struct (S1), the userspace mirror (S2) and the
- * capabilities surface (S3). See docs/research/ringbuf_data_contract.md. */
+ * capabilities surface. */
 #include "record_schema.h"
 
 /* ---------- diagnostics (mirror upstream `spinel:` + exit(1)) ---------- */

@@ -16,7 +16,7 @@
 @allowed = 0
 
 def fmod_ret__security_file_open(file, ret)
-  if path_eq(file, "/etc/spnl_e287_secret")
+  if path_eq(file, "/etc/spnl_locked_file")
     @denied = @denied + 1
     -1
   else

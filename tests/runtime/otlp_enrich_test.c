@@ -53,7 +53,7 @@ static const char *POD_IP  = "10.42.0.20";
 
 int main(void) {
     /* ---- build a fake kubepods hierarchy under a temp dir (container inode = cgid) ---- */
-    char cgroot[] = "/tmp/e313_cg_XXXXXX";
+    char cgroot[] = "/tmp/spnl_enrich_cg_XXXXXX";
     if (!mkdtemp(cgroot)) { perror("mkdtemp cgroot"); return 2; }
     char p1[512], p2[512], p3[512], p4[512];
     snprintf(p1, sizeof p1, "%s/kubepods", cgroot);                mkdir(p1, 0755);
@@ -65,14 +65,14 @@ int main(void) {
     uint64_t cgid = (uint64_t)st.st_ino;
 
     /* uid map / ip map, standing in for what kubectl would supply */
-    char uidmap[] = "/tmp/e313_uid_XXXXXX";
+    char uidmap[] = "/tmp/spnl_enrich_uid_XXXXXX";
     { int fd = mkstemp(uidmap); FILE *f = fdopen(fd, "w");
       fprintf(f, "%s kube-system/coredns-ccb96694c-5kpb7\n", POD_UID); fclose(f); }
-    char ipmap[] = "/tmp/e313_ip_XXXXXX";
+    char ipmap[] = "/tmp/spnl_enrich_ip_XXXXXX";
     { int fd = mkstemp(ipmap); FILE *f = fdopen(fd, "w");
       fprintf(f, "%s pod default echo-srv\n", POD_IP); fclose(f); }
     /* CRIMAP maps cgid -> real container name; here the container inode -> coredns. */
-    char crimap[] = "/tmp/e315_cri_XXXXXX";
+    char crimap[] = "/tmp/spnl_cri_XXXXXX";
     { int fd = mkstemp(crimap); FILE *f = fdopen(fd, "w");
       fprintf(f, "%llu coredns\n", (unsigned long long)cgid); fclose(f); }
 
@@ -95,7 +95,7 @@ int main(void) {
 
     /* ---- (2) no-op with no env set, checked in a forked child so the one-shot lazy init is not contaminated ---- */
     printf("[enrich] (2) no-op: with no env set even CONN yields 0 attributes (forked child)\n");
-    { char empty[] = "/tmp/e313_empty_XXXXXX"; (void)mkdtemp(empty);   /* empty root, no kubepods */
+    { char empty[] = "/tmp/spnl_enrich_empty_XXXXXX"; (void)mkdtemp(empty);   /* empty root, no kubepods */
       pid_t pid = fork();
       if (pid == 0) {
           unsetenv("SPNL_K8S_IPMAP");            /* peer off */

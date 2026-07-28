@@ -65,7 +65,7 @@ int main(void)
     s.attrs = attrs; s.nattrs = n;
 
     static uint8_t buf[8192];
-    long blen = otlp_traces_generic_build(buf, sizeof buf, "spinel-e302-k8s", "0.1",
+    long blen = otlp_traces_generic_build(buf, sizeof buf, "spinel-k8s-test", "0.1",
                                           "spinel-ebpf", &s);
     if (blen < 0) { fprintf(stderr, "encode failed\n"); return 1; }
     fwrite(buf, 1, (size_t)blen, stdout);

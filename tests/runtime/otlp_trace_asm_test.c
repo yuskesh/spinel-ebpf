@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
 
     /* ---- OTLP encode: both /sleep spans into a single request (the multi-span build) ---- */
     uint8_t buf[8192];
-    long b = otlp_traces_generic_build_multi(buf, sizeof buf, "spinel-e312-test", "0", "spinel-ebpf", spans, (size_t)nsp);
+    long b = otlp_traces_generic_build_multi(buf, sizeof buf, "spinel-tree-test", "0", "spinel-ebpf", spans, (size_t)nsp);
     if (b < 0) { fprintf(stderr, "FAIL: build_multi\n"); return 1; }
     fprintf(stderr, "[trace_asm] encoded %ld bytes (2 spans, 1 ResourceSpans)\n", b);
 

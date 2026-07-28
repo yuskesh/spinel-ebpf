@@ -12,7 +12,7 @@
 @allowed = 0
 
 def fmod_ret__security_file_open(file, ret)
-  if path_starts_with(file, "/etc/spnl_e332/")
+  if path_starts_with(file, "/etc/spnl_area/")
     @denied = @denied + 1
     -1
   else

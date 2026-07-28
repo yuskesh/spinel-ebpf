@@ -712,9 +712,9 @@ module SpinelEbpf
 
     # per-unit N-tuple event channel. n in {3, 4}. The struct field
     # names match the host parse contract: 3-tuple = (a, b, c), 4-tuple =
-    # (a, b, c, d). Anything beyond 4 deferred to a future Edoc -- by then
-    # users will have hit the limits of fixed-arity emit and a variadic
-    # design will be motivated by concrete need.
+    # (a, b, c, d). Anything beyond 4 is deferred: by the time someone needs it,
+    # they will have hit the limits of fixed-arity emit, and a variadic design
+    # will be motivated by a concrete case rather than a guess.
     def emit_n_tuple_event_types_and_map(ctx, n)
       raise ArgumentError, "emit_n_tuple n must be 3 or 4, got #{n}" unless [3, 4].include?(n)
       field_names = %w[a b c d].first(n)
@@ -2081,8 +2081,8 @@ module SpinelEbpf
     # fast-path constants. The request prefix is 12 bytes (no path
     # variability) so we can unroll the byte-by-byte compare; the response is
     # fixed at 41 bytes (HTTP/1.0 200 OK + Content-Length: 3 + body "OK\n").
-    M004_REQUEST_PREFIX  = "GET /health "
-    M004_RESPONSE_BODY   = "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nOK\n"
+    HEALTH_REQUEST_PREFIX  = "GET /health "
+    HEALTH_RESPONSE_BODY   = "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nOK\n"
 
     # Partial TCP-checksum contribution of the response payload, computed at
     # codegen time so the BPF program can just += a constant instead of
@@ -2090,8 +2090,8 @@ module SpinelEbpf
     # to match how the kernel-side helper would have summed memory:
     #   each u16 word = bytes[i] | (bytes[i+1] << 8)
     #   trailing byte (if length is odd) added as a raw __u16 byte value.
-    M004_RESPONSE_CSUM_PARTIAL = begin
-      bytes = M004_RESPONSE_BODY.bytes
+    HEALTH_RESPONSE_CSUM_PARTIAL = begin
+      bytes = HEALTH_RESPONSE_BODY.bytes
       sum = 0
       i = 0
       while i + 1 < bytes.length
@@ -2103,7 +2103,7 @@ module SpinelEbpf
     end
 
     def emit_xdp_health_match_helper(_ctx)
-      compares = M004_REQUEST_PREFIX.each_char.each_with_index.map do |c, i|
+      compares = HEALTH_REQUEST_PREFIX.each_char.each_with_index.map do |c, i|
         "if (payload[#{i}] != '#{c == "\\" ? '\\\\' : c == "'" ? "\\'" : c}') return 0;"
       end.join("\n            ")
       <<~MATCH
@@ -2130,7 +2130,7 @@ module SpinelEbpf
             if (thl < sizeof(*tcp)) return 0;
 
             char *payload = (char *)tcp + thl;
-            if (payload + #{M004_REQUEST_PREFIX.length} > (char *)data_end) return 0;
+            if (payload + #{HEALTH_REQUEST_PREFIX.length} > (char *)data_end) return 0;
 
             #{compares}
             return 1;
@@ -2139,10 +2139,10 @@ module SpinelEbpf
     end
 
     def emit_xdp_health_reply_helper(_ctx)
-      response_len = M004_RESPONSE_BODY.length
+      response_len = HEALTH_RESPONSE_BODY.length
       # Emit body as a brace-enclosed initializer of unsigned char (bytes), since
       # we'll memcpy this into the payload region.
-      body_init = M004_RESPONSE_BODY.bytes.map { |b| sprintf("0x%02x", b) }.each_slice(8).map { |s| s.join(", ") }.join(",\n                ")
+      body_init = HEALTH_RESPONSE_BODY.bytes.map { |b| sprintf("0x%02x", b) }.each_slice(8).map { |s| s.join(", ") }.join(",\n                ")
       <<~REPLY
         /* hand-craft a 200 OK response packet in place and return XDP_TX.
          * Returns XDP_PASS on any error so kernel falls back to the userspace path.
@@ -2273,7 +2273,7 @@ module SpinelEbpf
              * use a codegen-time precomputed partial sum instead of looping
              * over packet bytes -- the verifier rejects pointer arithmetic on
              * the in-packet u16 pointer. */
-            tcp_csum += 0x#{M004_RESPONSE_CSUM_PARTIAL.to_s(16)}; /* precomputed payload partial csum (#{M004_RESPONSE_BODY.length} bytes) */
+            tcp_csum += 0x#{HEALTH_RESPONSE_CSUM_PARTIAL.to_s(16)}; /* precomputed payload partial csum (#{HEALTH_RESPONSE_BODY.length} bytes) */
             while (tcp_csum >> 16) tcp_csum = (tcp_csum & 0xffff) + (tcp_csum >> 16);
             tcp->check = (__u16)~tcp_csum;
 
@@ -3893,7 +3893,7 @@ PCFN
         end
       when :xdp
         # MVP: no per-param extraction yet. Packet length / header bytes
-        # will arrive via dedicated builtins (e.g. pkt_len) in a follow-up Edoc.
+        # will arrive via dedicated builtins such as pkt_len.
         unless params.empty?
           raise UnsupportedNode,
                 "xdp__#{attach[:xdp_name]}: parameters are not supported " \
@@ -8278,8 +8278,7 @@ PCFN
 
       # `recv.field op= value` (CallOperatorWriteNode). Currently
       # routed to tcp_sock_* when in tcp_cc context; other receivers will
-      # be handled when we generalize the receiver-type registry in a
-      # later Edoc.
+      # be handled when the receiver-type registry is generalised.
       def call_op_write_node(_nid, node)
         recv_id = node.refs.fetch("receiver", -1)
         raise UnsupportedNode, "CallOperatorWriteNode missing receiver" if recv_id < 0

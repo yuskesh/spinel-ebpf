@@ -640,16 +640,16 @@ class CodegenBpfTest < Minitest::Test
   end
 
   def test_request_prefix_and_response_body
-    assert_equal "GET /health ", SpinelEbpf::CodegenBpf::M004_REQUEST_PREFIX
+    assert_equal "GET /health ", SpinelEbpf::CodegenBpf::HEALTH_REQUEST_PREFIX
     assert_equal "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nOK\n",
-                 SpinelEbpf::CodegenBpf::M004_RESPONSE_BODY
-    assert_equal 41, SpinelEbpf::CodegenBpf::M004_RESPONSE_BODY.length
+                 SpinelEbpf::CodegenBpf::HEALTH_RESPONSE_BODY
+    assert_equal 41, SpinelEbpf::CodegenBpf::HEALTH_RESPONSE_BODY.length
   end
 
   def test_response_partial_csum_precomputed
     # Sanity: codegen-time precomputed checksum is non-zero (varies with body
     # bytes). Used to eliminate a verifier-painful payload loop.
-    refute_equal 0, SpinelEbpf::CodegenBpf::M004_RESPONSE_CSUM_PARTIAL
+    refute_equal 0, SpinelEbpf::CodegenBpf::HEALTH_RESPONSE_CSUM_PARTIAL
   end
 
   # ---------- sockmap / sk_msg / sk_skb (HTTP server building block) ----------
@@ -2428,7 +2428,7 @@ end
     c = emit_for("100_path_eq")
     inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
     refute_nil inner
-    # "/etc/spnl_e287_secret" = 21 bytes -> buf = ((21+1+7)/8)*8 = 24, ret = 22.
+    # "/etc/spnl_locked_file" = 21 bytes -> buf = ((21+1+7)/8)*8 = 24, ret = 22.
     # Sizing to the literal is the correct semantics: a longer real path makes
     # bpf_d_path return -ENAMETOOLONG => no match (the layout was measured).
     assert_match(/char _pb\d+\[24\] = \{0\};/, inner)
@@ -2437,7 +2437,7 @@ end
     assert_match(/__s64 _pm\d+ = \(_pr\d+ == 22\);/, inner)
     # AOT: the literal's bytes are burned in, one unrolled compare each
     assert_match(/_pm\d+ = _pm\d+ && \(_pb\d+\[0\] == 47\);/, inner)   # '/'
-    assert_match(/_pm\d+ = _pm\d+ && \(_pb\d+\[20\] == 116\);/, inner) # 't'
+    assert_match(/_pm\d+ = _pm\d+ && \(_pb\d+\[20\] == 101\);/, inner) # 'e'
     assert_equal 21, inner.scan(/_pm\d+ = _pm\d+ && \(_pb\d+\[\d+\] == \d+\);/).length
   end
 
@@ -2486,7 +2486,7 @@ end
     assert_match(/struct task_struct \*_pt\d+ = bpf_get_current_task_btf\(\);/, inner)
     assert_match(/bpf_d_path\(&_pt\d+->real_parent->mm->exe_file->f_path, _pb\d+/, inner)
     # "/usr/bin/spnlbad" = 16 bytes -> ret == 17 (parent), and the fixture ANDs it
-    # with path_eq(file, "/etc/spnl_e289_secret") = 21 bytes -> ret == 22.
+    # with path_eq(file, "/etc/spnl_parent_file") = 21 bytes -> ret == 22.
     assert_match(/__s64 _pm\d+ = \(_pr\d+ == 17\);/, inner)   # parent_path_eq length gate
     assert_match(/__s64 _pm\d+ = \(_pr\d+ == 22\);/, inner)   # path_eq length gate
     # 16 (parent) + 21 (file) unrolled byte compares, both burned in at compile time

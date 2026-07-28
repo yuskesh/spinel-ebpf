@@ -16,7 +16,7 @@
 #
 # build: bin/spinel-ebpf compile examples/http_server/ws_echo.rb --native-only --build -o build
 # run:   SPINEL_HTTP_PORT=8090 ./build/ws_echo
-#   then connect with wscat -c ws://127.0.0.1:8090/ (or a raw masked frame, see Edoc)
+#   then connect with wscat -c ws://127.0.0.1:8090/, or send a raw masked frame
 
 module Crypto
   ffi_func :sp_crypto_websocket_accept, [:str],       :str

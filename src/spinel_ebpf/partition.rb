@@ -3,7 +3,7 @@
 # Partition algorithm — Phase 2 (per-method walk + flags) and Phase 3
 # (call-graph fix-point + tag decision).
 #
-# Per design in docs/research/partition_algorithm_design.md.
+
 # Consumes the parsed IR and AST.
 
 require_relative "parse_spinel_ir"

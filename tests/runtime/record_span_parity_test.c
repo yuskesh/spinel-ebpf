@@ -493,8 +493,8 @@ static void case_offcpu(void) {
  * plain table. The cgid is the inode of a fake kubepods hierarchy, so no real k8s is
  * needed. */
 static int mode_cgid_enricher(void) {
-    char cgroot[] = "/tmp/e377_cg_XXXXXX";
-    char uidmap[] = "/tmp/e377_uid_XXXXXX";
+    char cgroot[] = "/tmp/spnl_parity_cg_XXXXXX";
+    char uidmap[] = "/tmp/spnl_parity_uid_XXXXXX";
     const char *uid = "1d0ff866-8ef5-41f5-a2ee-0c1ddcd4c280";
     const char *ctr = "9b763adf6f512b686d81705fe1267700c1de5ab427f527a84ca949b6d7eec866";
     char p[4][512]; struct stat st;

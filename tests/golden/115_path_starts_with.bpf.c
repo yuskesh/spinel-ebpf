@@ -58,10 +58,10 @@ static __noinline __s64 fmod_ret__security_file_open_inner(__s64 file, __s64 ret
         _pm1 = _pm1 && (_pbuf1[7] == 110);
         _pm1 = _pm1 && (_pbuf1[8] == 108);
         _pm1 = _pm1 && (_pbuf1[9] == 95);
-        _pm1 = _pm1 && (_pbuf1[10] == 101);
-        _pm1 = _pm1 && (_pbuf1[11] == 51);
-        _pm1 = _pm1 && (_pbuf1[12] == 51);
-        _pm1 = _pm1 && (_pbuf1[13] == 50);
+        _pm1 = _pm1 && (_pbuf1[10] == 97);
+        _pm1 = _pm1 && (_pbuf1[11] == 114);
+        _pm1 = _pm1 && (_pbuf1[12] == 101);
+        _pm1 = _pm1 && (_pbuf1[13] == 97);
         _pm1 = _pm1 && (_pbuf1[14] == 47);
     }
     __s64 _if2 = 0;
