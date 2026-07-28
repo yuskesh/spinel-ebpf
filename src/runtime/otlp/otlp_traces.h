@@ -1,13 +1,17 @@
 /*
- * otlp_traces.h — メソッド呼び出しツリーを OTLP traces (span) に変換
+ * otlp_traces.h -- turn a method call tree into OTLP traces (spans)
  *
- * kernel は uprobe/uretprobe で enter/exit イベント (kind,idx,ktime,tid) を emit4 ringbuf に出す。
- * userspace は (1) それを per-tid スタックで組み立てて span にし (otlp_traces_assemble)、
- * (2) OTLP ExportTraceServiceRequest を nanopb で組む (otlp_traces_build)。
+ * The kernel side emits enter and exit events as {kind, idx, ktime, tid} into a
+ * ringbuf, from a uprobe and a uretprobe. Userspace then (1) reassembles them into
+ * spans using a per-thread stack (otlp_traces_assemble) and (2) encodes an OTLP
+ * ExportTraceServiceRequest with nanopb (otlp_traces_build).
  *
- * 親 span id は「呼び出し開始(enter)時」に確定する必要がある(exit は内側から先に返るため)。
- * よって enter で span_id を割当 + 親 = スタック直下、trace_id は最外(depth 0)で生成する。
- * libbpf 非依存(drain は呼び出し側=otlp_agent が行い、events 配列を渡す)→ host で単体検証可能。
+ * A span's parent has to be decided when the call *starts*, because exits arrive
+ * innermost-first. So the span id is allocated on enter, the parent is whatever
+ * sits below it on the stack, and the trace id is minted at depth 0.
+ *
+ * No libbpf dependency: the caller drains the ringbuf and passes an array of
+ * events in, which also makes this unit-testable on any host.
  */
 #ifndef SPNL_OTLP_TRACES_H
 #define SPNL_OTLP_TRACES_H
@@ -15,7 +19,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "otlp_http.h"   /* otlp_kv_t (E292 generic span attrs) */
+#include "otlp_http.h"   /* otlp_kv_t, for arbitrary span attributes */
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +28,7 @@ extern "C" {
 #define OTLP_TRACE_MAX_TIDS  64
 #define OTLP_TRACE_MAX_DEPTH 64
 
-/* emit4 から decode した enter/exit イベント (kind: 0=enter, 1=exit) */
+/* An enter or exit event decoded from the ringbuf; kind is 0 for enter, 1 for exit. */
 typedef struct {
     int32_t  kind;
     int32_t  idx;
@@ -32,7 +36,7 @@ typedef struct {
     uint64_t tid;
 } otlp_span_event_t;
 
-/* 組み立て済の span */
+/* An assembled span. */
 typedef struct {
     uint8_t  trace_id[16];
     uint8_t  span_id[8];
@@ -43,7 +47,7 @@ typedef struct {
     uint64_t end_unix_ns;
 } otlp_span_t;
 
-/* idx -> 名前/ファイル/行 (code.* 属性 + span 名に使う) */
+/* idx -> name, file and line, used for the code.* attributes and the span name. */
 typedef struct {
     int32_t     idx;
     const char *method;
@@ -52,23 +56,25 @@ typedef struct {
 } otlp_method_meta_t;
 
 /*
- * events (実行順) を span 群に組み立てる。off_ns は ktime(monotonic) -> unix nano の加算オフセット
- * (= realtime - monotonic)。seed は trace/span id 生成の種 (テストは固定、本番は wall^pid 等)。
- * 組み立てた span 数を返す (max_out で頭打ち)。
+ * Assemble events, in execution order, into spans. off_ns is the offset added to
+ * turn a monotonic ktime into unix nanoseconds (realtime minus monotonic). seed
+ * seeds trace and span id generation: fixed in tests, something unpredictable such
+ * as wall-clock XOR pid in production. Returns the number of spans assembled,
+ * capped at max_out.
  */
 int otlp_traces_assemble(const otlp_span_event_t *ev, size_t nev,
                          int64_t off_ns, uint64_t seed,
                          otlp_span_t *out, size_t max_out);
 
-/* spans から OTLP ExportTraceServiceRequest を組む。成功でバイト数、失敗で -1。 */
+/* Build an OTLP ExportTraceServiceRequest from spans. Returns the byte count, or -1. */
 long otlp_traces_build(uint8_t *buf, size_t cap,
                        const char *service_name, const char *service_version,
                        const char *scope_name,
                        const otlp_span_t *spans, size_t nspans,
                        const otlp_method_meta_t *metas, size_t nmetas);
 
-/* HTTP server span (kind=SERVER + http.* 属性、W3C trace context 伝播)。
- * OBI/semconv v1.41.0 互換の server/client/scheme/route 属性を追加。 */
+/* An HTTP server span: kind SERVER, http.* attributes, and W3C trace context
+ * propagation, plus the semconv server/client/scheme/route attributes. */
 typedef struct {
     uint8_t  trace_id[16];
     uint8_t  span_id[8];
@@ -76,31 +82,33 @@ typedef struct {
     bool     has_parent;
     uint64_t start_unix_ns;
     uint64_t end_unix_ns;
-    const char *name;            /* span 名 (例 "GET /path" or "GET <route>") */
-    const char *http_method;     /* http.request.method (NULL 可) */
-    const char *url_path;        /* url.path (NULL 可) */
-    int32_t     status_code;     /* http.response.status_code (<=0 は省略、>=500 で Span.status=ERROR) */
-    const char *server_address;  /* server.address (getsockname 由来、NULL/空は省略) */
-    int32_t     server_port;     /* server.port (<=0 は省略) */
-    const char *client_address;  /* client.address (getpeername 由来、NULL/空は省略) */
-    const char *url_scheme;      /* url.scheme (spinel server は "http" 固定、NULL/空は省略) */
-    const char *route;           /* http.route (低カーディナリティ経路、NULL/空は省略) */
-    /* L2–L8 横断相関の追加属性 (任意、省略可)。従来の span_fd 経路は tenant=NULL /
-     * tcp_retransmits=-1 / tcp_server_sends=-1 を渡すので全て省略され、出力は byte 一致。 */
-    const char *tenant;            /* L8 ビジネス文脈 (NULL/空は省略) -> attribute "tenant" */
-    int64_t     tcp_established;    /* L4 4-tuple keyed ESTABLISHED 数 (<0 は省略) -> "net.tcp.established" */
-    int64_t     tcp_state_changes; /* L4 4-tuple keyed 状態遷移数 (<0 は省略) -> "net.tcp.state_changes" */
+    const char *name;            /* span name, e.g. "GET /path" or "GET <route>" */
+    const char *http_method;     /* http.request.method; may be NULL */
+    const char *url_path;        /* url.path; may be NULL */
+    int32_t     status_code;     /* http.response.status_code; omitted when not positive,
+                                    and 500 or above sets Span.status to ERROR */
+    const char *server_address;  /* server.address, from getsockname; omitted when empty */
+    int32_t     server_port;     /* server.port; omitted when not positive */
+    const char *client_address;  /* client.address, from getpeername; omitted when empty */
+    const char *url_scheme;      /* url.scheme, always "http" here; omitted when empty */
+    const char *route;           /* http.route, the low-cardinality path; omitted when empty */
+    /* Optional cross-layer attributes. The plain span_fd path passes tenant=NULL
+     * and negative counters, so all three are omitted and the output is unchanged. */
+    const char *tenant;            /* application-level context; omitted when empty -> "tenant" */
+    int64_t     tcp_established;   /* connection-keyed ESTABLISHED count; omitted when negative */
+    int64_t     tcp_state_changes; /* connection-keyed state-transition count; omitted when negative */
 } otlp_http_span_t;
 
-/* 単一 HTTP server span を OTLP ExportTraceServiceRequest に組む。成功でバイト数、失敗で -1。 */
+/* Build one HTTP server span into an ExportTraceServiceRequest. Byte count, or -1. */
 long otlp_traces_http_build(uint8_t *buf, size_t cap,
                             const char *service_name, const char *service_version,
                             const char *scope_name,
                             const otlp_http_span_t *span);
 
-/* 任意ラベルの汎用 span (kind + 任意 KV 属性)。監査 (deny/path/lineage) を
- * span 化して Splunk O11y に直送するため (O11y は OTLP logs 直送不可、E291)。
- * E271 の「任意プローブ keyed メトリクスを任意ラベルで」の span 版。 */
+/* A generic span: a kind plus arbitrary key/value attributes. This is what lets an
+ * audit event -- verdict, path, lineage -- be sent as a span, which matters because
+ * the backends this targets accept OTLP traces directly but not OTLP logs. It is
+ * the span-shaped counterpart of the generic keyed metrics. */
 typedef struct {
     uint8_t  trace_id[16];
     uint8_t  span_id[8];
@@ -108,54 +116,63 @@ typedef struct {
     bool     has_parent;
     uint64_t start_unix_ns;
     uint64_t end_unix_ns;
-    const char     *name;    /* span 名 */
-    int32_t         kind;    /* opentelemetry SpanKind (0 は INTERNAL に既定化) */
-    bool            is_error;/* true で Span.status=ERROR (deny を APM で色分け) */
-    const otlp_kv_t *attrs;  /* 任意 KV 属性 (semconv 等)、空文字 val は省略 */
+    const char     *name;    /* span name */
+    int32_t         kind;    /* OpenTelemetry SpanKind; 0 defaults to INTERNAL */
+    bool            is_error;/* true sets Span.status to ERROR, so a denial stands out */
+    const otlp_kv_t *attrs;  /* arbitrary attributes; an empty value is omitted */
     int             nattrs;
 } otlp_generic_span_t;
 
-/* 単一の汎用 span を OTLP ExportTraceServiceRequest に組む。成功でバイト数、失敗で -1。 */
+/* Build one generic span into an ExportTraceServiceRequest. Byte count, or -1. */
 long otlp_traces_generic_build(uint8_t *buf, size_t cap,
                                const char *service_name, const char *service_version,
                                const char *scope_name,
                                const otlp_generic_span_t *span);
 
-/* 複数の汎用 span を 1 つの ResourceSpans/ScopeSpans にまとめて 1 リクエストに符号化
- * (「1 record = 1 POST」を潰すバッチ化の符号化側)。resource 属性 (service.*) は全 span 共通、
- * k8s.* 等は span 属性なので別 pod の span を 1 ResourceSpans に混在してよい (OTLP 意味論)。
- * 成功でバイト数、失敗で -1。nspans==1 は otlp_traces_generic_build と byte 一致。 */
+/* Encode several generic spans into a single ResourceSpans/ScopeSpans, and so a
+ * single request -- the encoding half of batching, which is what stops every
+ * record becoming its own POST. The resource attributes (service.*) are shared by
+ * all of them; per-pod facts like k8s.* are span attributes, so spans from
+ * different pods may legitimately share one ResourceSpans. Returns the byte count,
+ * or -1. With nspans == 1 the output is byte-identical to the single-span build. */
 long otlp_traces_generic_build_multi(uint8_t *buf, size_t cap,
                                      const char *service_name, const char *service_version,
                                      const char *scope_name,
                                      const otlp_generic_span_t *spans, size_t nspans);
 
-/* ---- E312: マルチ span トレース組み立て (層 2、runtime) ----
- * 関連イベント (request window / off-CPU 待ち / DNS / connect / L7) を「共通 trace_id +
- * 親子リンク (parent_span_id)」の木にするための ID 生成プリミティブ。seed は splitmix64 の
- * 状態 (呼ぶたび前進、本番は wall^pid 等の非決定種、テストは固定)。probe/codegen は無変更。 */
+/* ---- Assembling a trace out of several spans ----
+ * The id-generation primitives that turn related events -- a request window, an
+ * off-CPU wait, a DNS lookup, a connect, an L7 round trip -- into a tree sharing
+ * one trace id and linked by parent_span_id. seed is splitmix64 state and advances
+ * on every call; production seeds it unpredictably, tests fix it. Nothing in the
+ * probe or the generated code changes for this. */
 
-/* root span: 新しい trace_id(16) + span_id(8) を割り当て、has_parent=false / parent_span_id=0。
- * start/end/name/attrs/kind は呼び出し側が別途設定する。 */
+/* Root span: allocate a new 16-byte trace id and 8-byte span id, with has_parent
+ * false. The caller still fills in start, end, name, attributes and kind. */
 void otlp_span_new_root(otlp_generic_span_t *s, uint64_t *seed);
 
-/* child span: parent と同じ trace_id、parent_span_id = parent->span_id、新しい span_id を割り当て、
- * has_parent=true。start/end/name/attrs/kind は呼び出し側が別途設定する (親 window 内に nest)。 */
+/* Child span: same trace id as the parent, parent_span_id set to the parent's span
+ * id, a fresh span id, and has_parent true. The caller fills in the rest, nesting
+ * it inside the parent's window. */
 void otlp_span_new_child(otlp_generic_span_t *child,
                          const otlp_generic_span_t *parent, uint64_t *seed);
 
-/* 受信 traceparent (W3C "vv-<32hex>-<16hex>-ff") があれば **その trace_id を根**にし、
- * parent_span_id = 受信 span-id (呼び出し側の span)、has_parent=true にする (= 我々の span は
- * 分散トレースの子として nest)。無効/NULL なら otlp_span_new_root と同じ (生成)。span_id は常に
- * 新規割当。戻り値: 1=継承, 0=生成。 */
+/* If an incoming traceparent is present ("vv-<32hex>-<16hex>-ff"), adopt its trace
+ * id as the root and set parent_span_id to the incoming span id -- so our span
+ * nests inside the caller's distributed trace. A NULL or malformed value behaves
+ * like otlp_span_new_root. The span id is always freshly allocated. Returns 1 when
+ * the context was inherited, 0 when it was generated. */
 int otlp_span_root_from_traceparent(otlp_generic_span_t *s, const char *traceparent,
                                     uint64_t *seed);
 
-/* E312 Step2: cross-record 子相関の述語。child の (tgid, ktime) が parent の request window
- * [start_ktime, start_ktime+dur_ns] 内で **かつ同 tgid** なら 1。parent_start_ktime==0
- * (window 不明・旧 record) は相関しない (0)。ktime は monotonic 生値 (unix 変換前) で比較。
- * 前提: 1 tid=1 リクエストの同期ハンドラ (sequential)。並行/非同期は best-effort (誤相関より
- * fallback = 単一 span 優先)。 */
+/* The predicate for correlating a child record with a parent one: 1 when the
+ * child's thread group and timestamp fall inside the parent's request window,
+ * [start_ktime, start_ktime + dur_ns], and the thread groups match. A
+ * parent_start_ktime of 0 means the window is unknown -- an older record -- and
+ * never correlates. Timestamps are compared as raw monotonic values, before any
+ * conversion to unix time. This assumes a synchronous handler where one thread
+ * serves one request; concurrent or asynchronous handlers are best-effort, and the
+ * code prefers falling back to standalone spans over correlating wrongly. */
 int otlp_child_in_window(uint32_t child_tgid, uint64_t child_ktime,
                          uint32_t parent_tgid, uint64_t parent_start_ktime,
                          uint64_t parent_dur_ns);

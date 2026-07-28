@@ -1,9 +1,10 @@
 /*
- * otlp_httpspan.h — HTTP server span + W3C trace context 伝播 (P003 option)
+ * otlp_httpspan.h -- HTTP server spans, with W3C trace context propagation
  *
- * spinel-compiled な HTTP サーバ (Ruby) から呼ぶ FFI。受信リクエストの `traceparent`
- * ヘッダを取り込み、リクエスト 1 件 = SERVER span を作って OTLP traces で送る。
- * libbpf 非依存 (otlp_traces/json + transport のみ)。service 名は env OTEL_SERVICE_NAME。
+ * The FFI an HTTP server written in Ruby and compiled by spinel calls per request.
+ * It picks up the incoming `traceparent` header, turns the request into one SERVER
+ * span and sends it as OTLP traces. No libbpf dependency: it needs only the trace
+ * encoders and the transport. The service name comes from OTEL_SERVICE_NAME.
  */
 #ifndef SPNL_OTLP_HTTPSPAN_H
 #define SPNL_OTLP_HTTPSPAN_H
@@ -15,31 +16,34 @@
 extern "C" {
 #endif
 
-/* wall-clock 現在時刻 (unix nanoseconds)。span の start/end 計測に使う。 */
+/* Current wall-clock time in unix nanoseconds, for span start and end. */
 uint64_t spnl_otlp_now_unix_ns(void);
 
 /*
- * 受信 traceparent (W3C "00-<32hex>-<16hex>-<2hex>"、NULL/空/不正なら新規 trace) を取り込み、
- * OBI/semconv v1.41.0 互換の SERVER span を 1 つ OTLP traces で endpoint に送る。
+ * Adopt the incoming traceparent (W3C "00-<32hex>-<16hex>-<2hex>"; a NULL, empty
+ * or malformed value starts a new trace) and send one semconv-compatible SERVER
+ * span to endpoint as OTLP traces.
  *
- *  - fd >= 0 のとき accept 済み client socket から getsockname → server.address/server.port、
- *    getpeername → client.address を自動導出 (IPv4/IPv6、inet_ntop)。fd < 0 なら省略。
- *  - url.scheme は "http" 固定 (spinel server は平文)。
- *  - route が非 NULL/非空なら span 名 = "<METHOD> <route>" + http.route 属性、そうでなければ
- *    span 名 = "<METHOD> <target>" (path fallback)。
- *  - status_code >= 500 で Span.status = ERROR。
+ *  - with fd >= 0, server.address and server.port are derived from getsockname on
+ *    the accepted client socket, and client.address from getpeername (IPv4 or
+ *    IPv6, via inet_ntop). With fd < 0 they are omitted.
+ *  - url.scheme is always "http": this server speaks cleartext.
+ *  - a non-empty route gives the span the name "<METHOD> <route>" and an
+ *    http.route attribute; otherwise the name falls back to "<METHOD> <target>".
+ *  - a status_code of 500 or above sets Span.status to ERROR.
  *
- * 成功で HTTP status (200 等)、失敗で -1。
+ * Returns the HTTP status on success, -1 on failure.
  */
 int spnl_otlp_http_span_fd(int fd, const char *traceparent, const char *method,
                            const char *target, const char *route, int status_code,
                            uint64_t start_unix_ns, uint64_t end_unix_ns, const char *endpoint);
 
 /*
- * L2–L8 横断相関付き SERVER span。spnl_otlp_http_span_fd に加えて、L8 の tenant と、
- * L3/L4 の 4-tuple keyed メトリクス (tcp_established / tcp_state_changes) を同一 span の属性
- * (tenant / net.tcp.established / net.tcp.state_changes) として載せる。established/state_changes
- * が負のときは該当属性を省略。userspace 結合デモ (xlayer_correlate.rb) 用。成功で HTTP status。
+ * A SERVER span that also carries cross-layer context. On top of what
+ * spnl_otlp_http_span_fd records, it puts the application-level tenant and the
+ * connection-keyed TCP counters onto the same span, as the attributes tenant,
+ * net.tcp.established and net.tcp.state_changes. A negative counter omits its
+ * attribute. Returns the HTTP status on success.
  */
 int spnl_otlp_http_span_fd_x(int fd, const char *traceparent, const char *method,
                              const char *target, const char *route, int status_code,
@@ -48,7 +52,8 @@ int spnl_otlp_http_span_fd_x(int fd, const char *traceparent, const char *method
                              const char *endpoint);
 
 /*
- * 後方互換 wrapper: fd=-1 / route=NULL で spnl_otlp_http_span_fd を呼ぶ (E270 の元 API)。
+ * Backward-compatible wrapper: calls spnl_otlp_http_span_fd with fd=-1 and
+ * route=NULL, which is what the original API did.
  * SERVER span (name="<method> <target>"、http.request.method / url.path / http.response.status_code)。
  */
 int spnl_otlp_http_span(const char *traceparent, const char *method, const char *target,
@@ -56,20 +61,26 @@ int spnl_otlp_http_span(const char *traceparent, const char *method, const char 
                         const char *endpoint);
 
 /*
- * 蓄積した http.server.request.duration (秒・明示バケット Histogram、OBI 同一バケット
- * [0,0.005,...,10]、CUMULATIVE、E272 S2) を OTLP metrics で endpoint に送る。
- * シリーズは spnl_otlp_http_span_fd/_http_span 呼び出し毎に (t1-t0) を積む。属性は
- * http.request.method / http.route (route があるとき) / http.response.status_code。
- * 成功で HTTP status、失敗で -1。
+ * Send the accumulated http.server.request.duration as OTLP metrics: seconds, a
+ * cumulative explicit-bucket Histogram over the same bounds the OpenTelemetry eBPF
+ * instrumentation uses, [0, 0.005, ..., 10]. Every call to spnl_otlp_http_span_fd
+ * or spnl_otlp_http_span adds its (t1 - t0) to the series. The attributes are
+ * http.request.method, http.route when a route was given, and
+ * http.response.status_code. Returns the HTTP status on success, -1 on failure.
  */
 int spnl_otlp_http_metrics_push(const char *endpoint);
 
 /*
- * 監査 (deny/path/lineage) を 1 span 化して直送 (O11y は OTLP logs 直送不可、E291)。
+ * Turn one audit event -- the verdict, the path, and the process lineage -- into a
+ * single span and send it. Spans are used rather than logs because the backends
+ * this targets accept OTLP traces directly but not OTLP logs.
  *   exe_path -> process.executable.path (semconv)、file_path -> file.path (semconv)、
- *   parent_exe_path -> process.parent.executable.path (独自 key)、verdict -> verdict (独自 key)。
- *   deny != 0 で Span.status=ERROR (APM で色分け)。traceparent を継続 (E274 相関)。
- * span 名 "file_open <file_path>"、kind=INTERNAL。成功で HTTP status、失敗で -1。
+ *   parent_exe_path becomes process.parent.executable.path and verdict becomes
+ *   verdict; both are attribute names of our own, not semconv ones. A non-zero
+ *   deny sets Span.status to ERROR so it stands out in an APM view, and an
+ *   incoming traceparent is continued so the audit joins the surrounding trace.
+ * The span is named "file_open <file_path>" and has kind INTERNAL. Returns the
+ * HTTP status on success, -1 on failure.
  */
 int spnl_otlp_audit_file_span(const char *traceparent,
                               const char *exe_path, const char *parent_exe_path,
