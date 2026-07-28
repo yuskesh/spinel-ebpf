@@ -29,6 +29,15 @@ jobs:
         run: |
           make -C src/codegen_c
           ruby tools/golden.rb
+      # This repository is published from a larger private one. These two checks
+      # catch what that leaves behind: prose that is not English, references to
+      # documents that are not here, and paths into a directory layout this
+      # repository does not have. Cheap, and the only thing standing between a
+      # port and a script that fails on someone else's machine.
+      - name: Public-tree checks (English prose, no dangling reference or path)
+        run: |
+          sh scripts/check-public-prose.sh
+          ruby scripts/check-public-paths.rb
 
   integration:
     name: build spinel fork + emit .bpf.c
