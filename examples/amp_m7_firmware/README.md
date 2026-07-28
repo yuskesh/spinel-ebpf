@@ -41,6 +41,13 @@ west build -p always -b imx95_evk/mimx9596/m7 \
 
 ## Load (A55 remoteproc, assuming the M7 is off)
 
+Every command from here on talks to the board over ssh as root. Set its address
+once:
+
+```bash
+export BOARD=<board-ip>
+```
+
 ```bash
 scp /tmp/amp-m7/zephyr/zephyr.elf root@$BOARD:/lib/firmware/amp-m7.elf
 ssh root@$BOARD '
