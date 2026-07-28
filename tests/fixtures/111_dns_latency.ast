@@ -1,0 +1,160 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/111_dns_latency.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__udp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name len
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name ==
+N 10 CallNode
+S 10 name kfield
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name sk
+N 13 StringNode
+S 13 content sock
+N 14 StringNode
+S 14 content __sk_common.skc_dport
+A 11 arguments 12,13,14
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+R 9 receiver 10
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 13568
+A 15 arguments 16
+R 9 arguments 15
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 17 StatementsNode
+N 18 CallNode
+S 18 name dns_req_start
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name sk
+N 21 LocalVariableReadNode
+S 21 name msg
+A 19 arguments 20,21
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+A 17 body 18
+R 8 statements 17
+R 8 subsequent -1
+N 22 IntegerNode
+I 22 value 0
+A 7 body 8,22
+R 2 body 7
+R 2 receiver -1
+N 23 DefNode
+S 23 name kprobe__udp_recvmsg
+N 24 ParametersNode
+N 25 RequiredParameterNode
+S 25 name sk
+N 26 RequiredParameterNode
+S 26 name msg
+N 27 RequiredParameterNode
+S 27 name len
+N 28 RequiredParameterNode
+S 28 name flags
+N 29 RequiredParameterNode
+S 29 name addr_len
+A 24 requireds 25,26,27,28,29
+A 24 optionals 
+A 24 keywords 
+A 24 posts 
+R 23 parameters 24
+N 30 StatementsNode
+N 31 IfNode
+N 32 CallNode
+S 32 name ==
+N 33 CallNode
+S 33 name kfield
+R 33 receiver -1
+N 34 ArgumentsNode
+N 35 LocalVariableReadNode
+S 35 name sk
+N 36 StringNode
+S 36 content sock
+N 37 StringNode
+S 37 content __sk_common.skc_dport
+A 34 arguments 35,36,37
+R 33 arguments 34
+R 33 block -1
+S 33 call_operator .
+R 32 receiver 33
+N 38 ArgumentsNode
+N 39 IntegerNode
+I 39 value 13568
+A 38 arguments 39
+R 32 arguments 38
+R 32 block -1
+S 32 call_operator .
+R 31 predicate 32
+N 40 StatementsNode
+N 41 CallNode
+S 41 name dns_resp_stash
+R 41 receiver -1
+N 42 ArgumentsNode
+N 43 LocalVariableReadNode
+S 43 name sk
+N 44 LocalVariableReadNode
+S 44 name msg
+A 42 arguments 43,44
+R 41 arguments 42
+R 41 block -1
+S 41 call_operator .
+A 40 body 41
+R 31 statements 40
+R 31 subsequent -1
+N 45 IntegerNode
+I 45 value 0
+A 30 body 31,45
+R 23 body 30
+R 23 receiver -1
+N 46 DefNode
+S 46 name kretprobe__udp_recvmsg
+N 47 ParametersNode
+N 48 RequiredParameterNode
+S 48 name ret
+A 47 requireds 48
+A 47 optionals 
+A 47 keywords 
+A 47 posts 
+R 46 parameters 47
+N 49 StatementsNode
+N 50 CallNode
+S 50 name dns_emit
+R 50 receiver -1
+N 51 ArgumentsNode
+N 52 LocalVariableReadNode
+S 52 name ret
+A 51 arguments 52
+R 50 arguments 51
+R 50 block -1
+S 50 call_operator .
+N 53 IntegerNode
+I 53 value 0
+A 49 body 50,53
+R 46 body 49
+R 46 receiver -1
+A 1 body 2,23,46
+R 0 statements 1

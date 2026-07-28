@@ -35,6 +35,7 @@ S 14 content throw
 A 10 arguments 11,12,13,14
 R 9 arguments 10
 N 15 BlockNode
+S 15 locals obj,tinfo,dest
 N 16 BlockParametersNode
 N 17 ParametersNode
 N 18 RequiredParameterNode

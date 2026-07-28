@@ -1,0 +1,47 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/error_quality_p1_regex.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name dfd
+N 5 RequiredParameterNode
+S 5 name filename
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 IfNode
+N 8 CallNode
+S 8 name =~
+N 9 LocalVariableReadNode
+S 9 name filename
+R 8 receiver 9
+N 10 ArgumentsNode
+N 11 RegularExpressionNode
+S 11 unescaped secret
+I 11 flags 4098
+A 10 arguments 11
+R 8 arguments 10
+R 8 block -1
+S 8 call_operator .
+R 7 predicate 8
+N 12 StatementsNode
+N 13 InstanceVariableOperatorWriteNode
+S 13 name @count
+S 13 binary_operator +
+N 14 IntegerNode
+I 14 value 1
+R 13 value 14
+A 12 body 13
+R 7 statements 12
+R 7 subsequent -1
+A 6 body 7
+R 2 body 6
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

@@ -1,0 +1,191 @@
+{
+  "_comment_about_this_file": "Splunk Enterprise/Cloud Dashboard Studio definition for the spinel-ebpf L2-L8 cross-layer view. This is an SPL dashboard assuming ingest through OTLP -> OpenTelemetry Collector -> splunk_hec exporter -> a Splunk index. The JSON is valid under python json.load. SPL field names depend on the quirks of HEC ingest, so see the README and each panel's description.",
+  "_comment_field_naming": "OTLP attributes contain dots (http.route, net.tcp.state_changes and so on). In Splunk they are referenced in single quotes: 'http.route'. The real index and sourcetype depend on your environment; index=otel and sourcetype=otel:span are used here as an example. duration is the span's execution-time field, which some Collector and exporter combinations name span_duration or similar.",
+  "title": "spinel-ebpf L2-L8 xlayer correlation (SPL)",
+  "description": "L3/L4, L7 and L8 sit together in one span, so tenant, route, status and TCP state can be displayed across layers with no join",
+  "inputs": {
+    "input_time": {
+      "type": "input.timerange",
+      "title": "Time range",
+      "options": {
+        "token": "global_time",
+        "defaultValue": "-60m@m,now"
+      }
+    },
+    "input_tenant": {
+      "type": "input.text",
+      "title": "tenant (L8)",
+      "options": {
+        "token": "tenant",
+        "defaultValue": "*"
+      }
+    },
+    "input_route": {
+      "type": "input.text",
+      "title": "http.route (L7)",
+      "options": {
+        "token": "route",
+        "defaultValue": "*"
+      }
+    }
+  },
+  "dataSources": {
+    "ds_latency_by_route": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=otel sourcetype=otel:span 'tenant'=\"$tenant$\" 'http.route'=\"$route$\" | timechart perc95(duration) AS p95 by 'http.route'",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "p95 latency per route (L7)"
+    },
+    "ds_count_by_status": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=otel sourcetype=otel:span 'tenant'=\"$tenant$\" | timechart count by 'http.response.status_code'",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Request count per status (L7)"
+    },
+    "ds_xlayer_table": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=otel sourcetype=otel:span 'http.route'=\"$route$\" | stats latest('net.tcp.state_changes') AS state_changes latest('net.tcp.established') AS established avg(duration) AS avg_duration count AS requests by 'tenant' 'http.route' 'http.request.method' | sort - state_changes",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "TCP state_changes / established table by tenant x route (L4 x L7 x L8)"
+    },
+    "ds_access_class": {
+      "type": "ds.search",
+      "options": {
+        "query": "| mstats sum(_value) AS count WHERE metric_name=\"access_class\" AND index=otel_metrics BY proto tcp_state | sort - count",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Classification of a traffic burst (rate by proto x tcp_state, L3/L4)"
+    },
+    "ds_access_action": {
+      "type": "ds.search",
+      "options": {
+        "query": "| mstats sum(_value) AS count WHERE metric_name=\"access_class\" AND index=otel_metrics BY action proto | sort - count",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Enforcement, pass against drop (rate by action x proto, L3/L4)"
+    }
+  },
+  "visualizations": {
+    "viz_latency": {
+      "type": "splunk.line",
+      "title": "p95 latency per route (HTTP server span duration)",
+      "description": "L7: p95 latency split by 'http.route'",
+      "dataSources": {
+        "primary": "ds_latency_by_route"
+      },
+      "options": {
+        "yAxisTitleText": "seconds"
+      }
+    },
+    "viz_status": {
+      "type": "splunk.column",
+      "title": "Request count per status",
+      "description": "L7: request count split by 'http.response.status_code'",
+      "dataSources": {
+        "primary": "ds_count_by_status"
+      },
+      "options": {}
+    },
+    "viz_xlayer": {
+      "type": "splunk.table",
+      "title": "Cross-layer: tenant x route x TCP state (L4 x L7 x L8)",
+      "description": "L8 (tenant) x L7 (http.route/method) x L4 (net.tcp.state_changes/established) in one table, with no join.",
+      "dataSources": {
+        "primary": "ds_xlayer_table"
+      },
+      "options": {
+        "count": 20
+      }
+    },
+    "viz_access_class": {
+      "type": "splunk.column",
+      "title": "Classification of a traffic burst (rate by proto x tcp_state)",
+      "description": "L3/L4: access_class split by 'proto' (icmp/udp/tcp/other) x 'tcp_state' (syn/established), which tells a SYN surge from established sessions at a glance. The metric index depends on your environment, for example otel_metrics.",
+      "dataSources": {
+        "primary": "ds_access_class"
+      },
+      "options": {}
+    },
+    "viz_access_action": {
+      "type": "splunk.column",
+      "title": "Enforcement, pass against drop (rate by action x proto)",
+      "description": "L3/L4: access_class split by 'action' (pass/drop) x 'proto', separating what XDP dropped on the spot (drop=icmp) from what it passed (pass=tcp/udp/other) -- observation and enforcement from one binary. A sudden rise in drop is a sign of an attack or a misconfiguration. The metric index depends on your environment.",
+      "dataSources": {
+        "primary": "ds_access_action"
+      },
+      "options": {}
+    }
+  },
+  "layout": {
+    "type": "grid",
+    "options": {
+      "width": 1200,
+      "height": 900
+    },
+    "structure": [
+      {
+        "item": "viz_latency",
+        "type": "block",
+        "position": { "x": 0, "y": 0, "w": 600, "h": 300 }
+      },
+      {
+        "item": "viz_status",
+        "type": "block",
+        "position": { "x": 600, "y": 0, "w": 600, "h": 300 }
+      },
+      {
+        "item": "viz_xlayer",
+        "type": "block",
+        "position": { "x": 0, "y": 300, "w": 1200, "h": 400 }
+      },
+      {
+        "item": "viz_access_class",
+        "type": "block",
+        "position": { "x": 0, "y": 700, "w": 600, "h": 300 }
+      },
+      {
+        "item": "viz_access_action",
+        "type": "block",
+        "position": { "x": 600, "y": 700, "w": 600, "h": 300 }
+      }
+    ],
+    "globalInputs": [
+      "input_time",
+      "input_tenant",
+      "input_route"
+    ]
+  },
+  "defaults": {
+    "dataSources": {
+      "ds.search": {
+        "options": {
+          "queryParameters": {
+            "earliest": "$global_time.earliest$",
+            "latest": "$global_time.latest$"
+          }
+        }
+      }
+    }
+  }
+}

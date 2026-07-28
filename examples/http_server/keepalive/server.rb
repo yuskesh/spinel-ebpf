@@ -1,15 +1,15 @@
 # examples/http_server/keepalive/server.rb
 #
-# HTTP/1.1 keepalive (persistent connections) on top of the SO_REUSEPORT
-# server. This exists to measure the spinel HTTP server's REAL-network
-# capacity fairly against nginx: the HTTP/1.0 servers use Connection: close
-# (one request per connection), which over a real network is bound by RTT +
-# connection-per-request churn (the server sits idle at ~1k RPS regardless of
-# cores). nginx with keepalive saturates the box; spinel could not even be
-# compared until it learned keepalive. This variant adds that.
+# SO_REUSEPORT + HTTP/1.1 keepalive (persistent connections). This exists to
+# measure the spinel HTTP server's REAL-network capacity fairly against nginx: the
+# earlier servers are HTTP/1.0 Connection: close (one request per connection),
+# which over a real network is bound by RTT + connection-per-request churn -- the
+# server sits idle at ~1k RPS regardless of how many cores it has.
+# nginx with keepalive saturates the box; spinel could not even be compared until
+# it learned keepalive. This variant adds that.
 #
-# Pure userspace (no eBPF): drops the L7 path counter and the sk_reuseport
-# BPF program so it builds --native-only (no libbpf) and isolates the
+# Pure userspace (no eBPF): drops the L7 path counter and the
+# sk_reuseport BPF program so it builds --native-only (no libbpf) and isolates the
 # keepalive question. Still multi-worker via fork + SO_REUSEPORT.
 #
 # Build:  spinel-ebpf compile examples/http_server/keepalive/server.rb --build --native-only -o build/keepalive

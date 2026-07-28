@@ -50,6 +50,7 @@ R 19 receiver -1
 R 19 arguments -1
 R 19 block -1
 S 19 call_operator .
+I 19 vcall 1
 A 18 arguments 19
 R 16 arguments 18
 R 16 block -1

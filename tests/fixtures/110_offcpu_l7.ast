@@ -1,0 +1,126 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/110_offcpu_l7.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_recvmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+A 3 requireds 4,5
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 6 StatementsNode
+N 7 CallNode
+S 7 name offcpu_recv_stash
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name sk
+N 10 LocalVariableReadNode
+S 10 name msg
+A 8 arguments 9,10
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+N 11 IntegerNode
+I 11 value 0
+A 6 body 7,11
+R 2 body 6
+R 2 receiver -1
+N 12 DefNode
+S 12 name kretprobe__tcp_recvmsg
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name ret
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 15 StatementsNode
+N 16 CallNode
+S 16 name offcpu_begin
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name ret
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+N 19 IntegerNode
+I 19 value 0
+A 15 body 16,19
+R 12 body 15
+R 12 receiver -1
+N 20 DefNode
+S 20 name tracepoint__sched__sched_switch
+N 21 ParametersNode
+N 22 RequiredParameterNode
+S 22 name prev_pid
+N 23 RequiredParameterNode
+S 23 name prev_state
+N 24 RequiredParameterNode
+S 24 name next_pid
+A 21 requireds 22,23,24
+A 21 optionals 
+A 21 keywords 
+A 21 posts 
+R 20 parameters 21
+N 25 StatementsNode
+N 26 CallNode
+S 26 name offcpu_account
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 LocalVariableReadNode
+S 28 name prev_pid
+N 29 LocalVariableReadNode
+S 29 name prev_state
+N 30 LocalVariableReadNode
+S 30 name next_pid
+A 27 arguments 28,29,30
+R 26 arguments 27
+R 26 block -1
+S 26 call_operator .
+N 31 IntegerNode
+I 31 value 0
+A 25 body 26,31
+R 20 body 25
+R 20 receiver -1
+N 32 DefNode
+S 32 name kprobe__tcp_sendmsg
+N 33 ParametersNode
+N 34 RequiredParameterNode
+S 34 name sk
+N 35 RequiredParameterNode
+S 35 name msg
+A 33 requireds 34,35
+A 33 optionals 
+A 33 keywords 
+A 33 posts 
+R 32 parameters 33
+N 36 StatementsNode
+N 37 CallNode
+S 37 name offcpu_emit
+R 37 receiver -1
+N 38 ArgumentsNode
+N 39 LocalVariableReadNode
+S 39 name sk
+N 40 LocalVariableReadNode
+S 40 name msg
+A 38 arguments 39,40
+R 37 arguments 38
+R 37 block -1
+S 37 call_operator .
+N 41 IntegerNode
+I 41 value 0
+A 36 body 37,41
+R 32 body 36
+R 32 receiver -1
+A 1 body 2,12,20,32
+R 0 statements 1

@@ -23,6 +23,7 @@ R 8 receiver -1
 R 8 arguments -1
 R 8 block -1
 S 8 call_operator .
+I 8 vcall 1
 R 7 value 8
 N 9 LocalVariableWriteNode
 S 9 name usid
@@ -32,6 +33,7 @@ R 10 receiver -1
 R 10 arguments -1
 R 10 block -1
 S 10 call_operator .
+I 10 vcall 1
 R 9 value 10
 N 11 CallNode
 S 11 name hist_observe_by

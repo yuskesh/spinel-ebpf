@@ -1,23 +1,23 @@
 # examples/http_server/sendfile_demo/serve_deck_pty.rb
 #
-# Dogfooding showcase: the HTTP server compiled with spinel-ebpf provides a
-# browser-usable **interactive terminal** (WebSocket + PTY; vi/top/less work).
+# The full dogfooding demo: an HTTP server compiled with spinel-ebpf serving an
+# **interactive terminal** you can use from a browser (WebSocket + PTY, with
+# vi/top/less all working).
 #
 #   GET  /            -> deck.html        (sendfile, text/html)
-#   GET  /pty-term    -> pty_terminal.html (xterm.js page)
-#   GET  /dual        -> dual_terminal.html (top = interactive terminal /
-#                                            bottom = eBPF visualization, auto-started)
+#   GET  /pty-term    -> pty_terminal.html (the xterm.js page)
+#   GET  /dual        -> dual_terminal.html (top = interactive terminal / bottom = eBPF visualization, started automatically)
 #   GET  /pty         -> WebSocket upgrade -> forkpty(bash) -> bidirectional pump
 #   POST /api/exec    -> sp_net_shell_capture(body) RAW shell (LAN-only / RCE)
 #   GET  /health      -> "OK\n"
 #
 # Both the WebSocket handshake and the frame handling (parse/unmask/build/mask)
-# are written entirely in Ruby (spinel subset). The FFI :binstr type carries the
-# NUL bytes of masked frames, so the old sp_ws_pump_* C shims are no longer
-# needed. The only remaining C primitives are PTY operations (sp_pty_spawn /
-# read / write / set_winsize) — the pty master is not a socket, so send/recv
-# cannot be used and read/write are required. Ruby handles the handshake,
-# framing, poll, and session lifecycle.
+# are entirely in Ruby (the spinel subset). The `:binstr` FFI return mode carries
+# the NUL bytes inside masked frames, which is what made the older sp_ws_pump_* C
+# shims unnecessary. The only remaining C primitives are the PTY operations
+# (sp_pty_spawn / read / write / set_winsize) -- a pty master is not a socket, so
+# send/recv do not apply and read/write are required. Ruby owns the handshake,
+# the frames, the poll loop and the sessions.
 #
 # Run: SPINEL_HTTP_PORT=8080 SPINEL_STATIC_FILE=/tmp/deck.html \
 #      SPINEL_PTY_TERM_FILE=/tmp/pty_terminal.html ./serve_deck_pty
@@ -80,7 +80,7 @@ def serve_html(client, path)
   Net.sp_net_sendfile(client, path)
 end
 
-# Read headers to the end; return the Sec-WebSocket-Key if present ("" = non-WS).
+# Read headers to the end and return the Sec-WebSocket-Key if present ("" = not a WS request).
 def read_headers_wskey(fd)
   key = ""
   loop do
@@ -237,8 +237,8 @@ def handle_ws_pty(client, wskey)
       end
     end
   end
-  Net.sp_net_rl_close(pty)   # end of session: close the PTY master -> SIGHUP to bash
-  Net.sp_net_wait_any     # reap bash (this handler's child); PID 1 (sleep) does not reap orphans
+  Net.sp_net_rl_close(pty)   # end of session: closing the PTY master sends SIGHUP to bash
+  Net.sp_net_wait_any     # reap bash (this handler's child); PID1=sleep does not reap orphans
 end
 
 # ---- main ----
@@ -255,12 +255,12 @@ if listen_fd < 0
 end
 puts "[pty] deck + /pty-term (WebSocket+PTY) + /api/exec on 0.0.0.0:" + port.to_s
 
-# Reap finished session children immediately via SIGCHLD (no zombies even while
-# blocked in accept).
+# Reap finished session children immediately via SIGCHLD, so nothing turns into a zombie
+# even while blocked in accept.
 Net.sp_net_autoreap_on
 
 loop do
-  Net.sp_net_reap_nb               # safety net (autoreap is primary; this is belt-and-suspenders)
+  Net.sp_net_reap_nb               # safety net for anything missed (autoreap is the main path)
   client = Net.sp_net_accept(listen_fd)
   if client < 0
     puts "[pty] accept failed"
@@ -272,17 +272,17 @@ loop do
   wskey = read_headers_wskey(client)
 
   if req.valid == 1 && req.verb == "GET" && req.path == "/pty" && wskey.length > 0
-    # Multi-session: fork per session. The child owns its own bash/PTY, and the
-    # parent returns to accept immediately (each session is a separate process,
-    # so static buffers are not shared).
+    # Multi-session: fork per session. The child gets its own bash/PTY and the
+    # parent goes straight back to accept (each session is a separate process, so
+    # even the static buffers are not shared).
     pid = Net.sp_net_fork
     if pid == 0
-      Net.sp_net_rl_close(listen_fd)        # child: listen fd not needed
+      Net.sp_net_rl_close(listen_fd)        # child: does not need the listen fd
       handle_ws_pty(client, wskey)
       Net.sp_net_rl_close(client)
-      Net.sp_net_exit(0)                 # child does not return to the accept loop
+      Net.sp_net_exit(0)                 # the child never returns to the accept loop
     elsif pid < 0
-      handle_ws_pty(client, wskey)       # on fork failure, degrade to inline handling
+      handle_ws_pty(client, wskey)       # fork failed: degrade to handling it inline
     end
     # parent (pid > 0) falls through to the shared close below and continues
   elsif req.valid == 1 && req.verb == "POST" && req.path == "/api/exec"

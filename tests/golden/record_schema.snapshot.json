@@ -1,0 +1,975 @@
+{
+  "schema": "spinel-ebpf.record-contract-snapshot/1",
+  "note": "Distilled contract of the ringbuf record channels. Refresh with `ruby tools/record_gate.rb --update` and REVIEW the diff: anything that moves, retypes or removes a published entry is a breaking change for a running probe, an existing consumer program, or a dashboard query.",
+  "channels": {
+    "dns": {
+      "record_struct": "<unit>_dns_event",
+      "ringbuf_map": "<unit>_dns_events",
+      "record_bytes": 120,
+      "record_min_bytes": 120,
+      "producers": [
+        "emit_dns",
+        "dns_emit"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": "int"
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": "str"
+        },
+        {
+          "name": "raw",
+          "ctype": "unsigned char",
+          "count": 64,
+          "offset": 36,
+          "bytes": 64,
+          "expose": ""
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 104,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "duration_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 112,
+          "bytes": 8,
+          "expose": "int"
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_dns_span_push",
+        "span_name": "resolve {dns.question.name}",
+        "span_kind": "INTERNAL",
+        "attributes": [
+          "dns.question.name",
+          "process.executable.name",
+          "spnl.dns.latency_ns"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri"
+        ]
+      },
+      "consumer": {
+        "drain_fn": "spnl_rec_dns_drain",
+        "to_span_fn": "spnl_rec_dns_to_span",
+        "properties": [
+          {
+            "name": "pid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_dns_pid",
+            "cap": null
+          },
+          {
+            "name": "comm",
+            "kind": "field",
+            "expose": "str",
+            "ffi": "spnl_rec_dns_comm",
+            "cap": null
+          },
+          {
+            "name": "cgid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_dns_cgid",
+            "cap": null
+          },
+          {
+            "name": "duration_ns",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_dns_duration_ns",
+            "cap": null
+          },
+          {
+            "name": "qname",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_dns_qname",
+            "cap": 256
+          }
+        ]
+      }
+    },
+    "conn": {
+      "record_struct": "<unit>_conn_event",
+      "ringbuf_map": "<unit>_conn_events",
+      "record_bytes": 88,
+      "record_min_bytes": 88,
+      "producers": [
+        "emit_connect"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": "int"
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": "str"
+        },
+        {
+          "name": "daddr",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 36,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "dport",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 40,
+          "bytes": 2,
+          "expose": "int"
+        },
+        {
+          "name": "family",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 42,
+          "bytes": 2,
+          "expose": ""
+        },
+        {
+          "name": "srtt_us",
+          "ctype": "__s64",
+          "count": 0,
+          "offset": 48,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 56,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "oldstate",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 64,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "daddr6_hi",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 72,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "daddr6_lo",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 80,
+          "bytes": 8,
+          "expose": ""
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_conn_span_push",
+        "span_name": "connect {network.peer.address}:{network.peer.port}",
+        "span_kind": "INTERNAL",
+        "attributes": [
+          "network.peer.address",
+          "network.peer.port",
+          "network.transport",
+          "network.type",
+          "net.peer.srtt_us",
+          "spnl.conn.direction",
+          "process.executable.name"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri",
+          "peer"
+        ]
+      },
+      "consumer": {
+        "drain_fn": "spnl_rec_conn_drain",
+        "to_span_fn": "spnl_rec_conn_to_span",
+        "properties": [
+          {
+            "name": "pid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_conn_pid",
+            "cap": null
+          },
+          {
+            "name": "comm",
+            "kind": "field",
+            "expose": "str",
+            "ffi": "spnl_rec_conn_comm",
+            "cap": null
+          },
+          {
+            "name": "dport",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_conn_dport",
+            "cap": null
+          },
+          {
+            "name": "cgid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_conn_cgid",
+            "cap": null
+          },
+          {
+            "name": "peer",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_conn_peer",
+            "cap": 64
+          },
+          {
+            "name": "direction",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_conn_direction",
+            "cap": 16
+          },
+          {
+            "name": "srtt_us",
+            "kind": "derived",
+            "expose": "int",
+            "ffi": "spnl_rec_conn_srtt_us",
+            "cap": 0
+          }
+        ]
+      }
+    },
+    "l7": {
+      "record_struct": "<unit>_l7_event",
+      "ringbuf_map": "<unit>_l7_events",
+      "record_bytes": 72,
+      "record_min_bytes": 72,
+      "producers": [
+        "emit_l7"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": "int"
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": "str"
+        },
+        {
+          "name": "daddr",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 36,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "dport",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 40,
+          "bytes": 2,
+          "expose": "int"
+        },
+        {
+          "name": "family",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 42,
+          "bytes": 2,
+          "expose": ""
+        },
+        {
+          "name": "start_ktime",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 48,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "duration_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 56,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 64,
+          "bytes": 8,
+          "expose": "int"
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_l7_span_push",
+        "span_name": "request {network.peer.address}:{network.peer.port}",
+        "span_kind": "CLIENT",
+        "attributes": [
+          "network.peer.address",
+          "network.peer.port",
+          "network.transport",
+          "network.type",
+          "spnl.l7.latency_ns",
+          "process.executable.name"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri"
+        ]
+      },
+      "consumer": {
+        "drain_fn": "spnl_rec_l7_drain",
+        "to_span_fn": "spnl_rec_l7_to_span",
+        "properties": [
+          {
+            "name": "pid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_l7_pid",
+            "cap": null
+          },
+          {
+            "name": "comm",
+            "kind": "field",
+            "expose": "str",
+            "ffi": "spnl_rec_l7_comm",
+            "cap": null
+          },
+          {
+            "name": "dport",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_l7_dport",
+            "cap": null
+          },
+          {
+            "name": "duration_ns",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_l7_duration_ns",
+            "cap": null
+          },
+          {
+            "name": "cgid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_l7_cgid",
+            "cap": null
+          }
+        ]
+      }
+    },
+    "http": {
+      "record_struct": "<unit>_http_event",
+      "ringbuf_map": "<unit>_http_events",
+      "record_bytes": 152,
+      "record_min_bytes": 152,
+      "producers": [
+        "http_emit",
+        "ssl_emit"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": "int"
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": "str"
+        },
+        {
+          "name": "daddr",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 36,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "dport",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 40,
+          "bytes": 2,
+          "expose": "int"
+        },
+        {
+          "name": "family",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 42,
+          "bytes": 2,
+          "expose": ""
+        },
+        {
+          "name": "start_ktime",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 48,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "duration_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 56,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "req",
+          "ctype": "unsigned char",
+          "count": 64,
+          "offset": 64,
+          "bytes": 64,
+          "expose": ""
+        },
+        {
+          "name": "resp",
+          "ctype": "unsigned char",
+          "count": 16,
+          "offset": 128,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 144,
+          "bytes": 8,
+          "expose": "int"
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_http_span_push",
+        "span_name": "{http.request.method} {url.path}",
+        "span_kind": "CLIENT",
+        "attributes": [
+          "http.request.method",
+          "url.path",
+          "http.response.status_code",
+          "url.scheme",
+          "network.peer.address",
+          "network.peer.port",
+          "network.transport",
+          "spnl.http.latency_ns",
+          "process.executable.name"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri"
+        ]
+      },
+      "consumer": {
+        "drain_fn": "spnl_rec_http_drain",
+        "to_span_fn": "spnl_rec_http_to_span",
+        "properties": [
+          {
+            "name": "pid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_http_pid",
+            "cap": null
+          },
+          {
+            "name": "comm",
+            "kind": "field",
+            "expose": "str",
+            "ffi": "spnl_rec_http_comm",
+            "cap": null
+          },
+          {
+            "name": "dport",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_http_dport",
+            "cap": null
+          },
+          {
+            "name": "duration_ns",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_http_duration_ns",
+            "cap": null
+          },
+          {
+            "name": "cgid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_http_cgid",
+            "cap": null
+          },
+          {
+            "name": "method",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_http_method",
+            "cap": 65
+          },
+          {
+            "name": "path",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_http_path",
+            "cap": 65
+          },
+          {
+            "name": "status",
+            "kind": "derived",
+            "expose": "int",
+            "ffi": "spnl_rec_http_status",
+            "cap": 0
+          }
+        ]
+      }
+    },
+    "redis": {
+      "record_struct": "<unit>_redis_event",
+      "ringbuf_map": "<unit>_redis_events",
+      "record_bytes": 152,
+      "record_min_bytes": 152,
+      "producers": [
+        "redis_emit"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "daddr",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 36,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "dport",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 40,
+          "bytes": 2,
+          "expose": ""
+        },
+        {
+          "name": "family",
+          "ctype": "__u16",
+          "count": 0,
+          "offset": 42,
+          "bytes": 2,
+          "expose": ""
+        },
+        {
+          "name": "start_ktime",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 48,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "duration_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 56,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "req",
+          "ctype": "unsigned char",
+          "count": 64,
+          "offset": 64,
+          "bytes": 64,
+          "expose": ""
+        },
+        {
+          "name": "resp",
+          "ctype": "unsigned char",
+          "count": 16,
+          "offset": 128,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 144,
+          "bytes": 8,
+          "expose": ""
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_redis_span_push",
+        "span_name": "{db.operation.name}",
+        "span_kind": "CLIENT",
+        "attributes": [
+          "db.system",
+          "db.operation.name",
+          "db.query.text",
+          "error.type",
+          "network.peer.address",
+          "network.peer.port",
+          "network.transport",
+          "process.executable.name"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri"
+        ]
+      },
+      "consumer": null
+    },
+    "offcpu": {
+      "record_struct": "<unit>_offcpu_event",
+      "ringbuf_map": "<unit>_offcpu_events",
+      "record_bytes": 288,
+      "record_min_bytes": 152,
+      "producers": [
+        "offcpu_emit"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "pid",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 16,
+          "bytes": 4,
+          "expose": "int"
+        },
+        {
+          "name": "comm",
+          "ctype": "char",
+          "count": 16,
+          "offset": 20,
+          "bytes": 16,
+          "expose": "str"
+        },
+        {
+          "name": "duration_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 40,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "offcpu_ns",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 48,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "wait_stack",
+          "ctype": "__s32",
+          "count": 0,
+          "offset": 56,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "req",
+          "ctype": "unsigned char",
+          "count": 64,
+          "offset": 60,
+          "bytes": 64,
+          "expose": ""
+        },
+        {
+          "name": "resp",
+          "ctype": "unsigned char",
+          "count": 16,
+          "offset": 124,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "cgid",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 144,
+          "bytes": 8,
+          "expose": "int"
+        },
+        {
+          "name": "start_ktime",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 152,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "hdr_ext",
+          "ctype": "unsigned char",
+          "count": 128,
+          "offset": 160,
+          "bytes": 128,
+          "expose": ""
+        }
+      ],
+      "egress": {
+        "push_fn": "spnl_otlp_offcpu_span_push",
+        "span_name": "{http.request.method} {url.path}",
+        "span_kind": "SERVER",
+        "attributes": [
+          "http.request.method",
+          "url.path",
+          "http.response.status_code",
+          "spnl.offcpu_ns",
+          "spnl.oncpu_ns",
+          "spnl.wait.kind",
+          "process.executable.name"
+        ],
+        "enrichers": [
+          "k8s",
+          "cri"
+        ]
+      },
+      "consumer": {
+        "drain_fn": "spnl_rec_offcpu_drain",
+        "to_span_fn": "spnl_rec_offcpu_to_span",
+        "properties": [
+          {
+            "name": "pid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_pid",
+            "cap": null
+          },
+          {
+            "name": "comm",
+            "kind": "field",
+            "expose": "str",
+            "ffi": "spnl_rec_offcpu_comm",
+            "cap": null
+          },
+          {
+            "name": "duration_ns",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_duration_ns",
+            "cap": null
+          },
+          {
+            "name": "cgid",
+            "kind": "field",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_cgid",
+            "cap": null
+          },
+          {
+            "name": "method",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_offcpu_method",
+            "cap": 65
+          },
+          {
+            "name": "path",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_offcpu_path",
+            "cap": 65
+          },
+          {
+            "name": "status",
+            "kind": "derived",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_status",
+            "cap": 0
+          },
+          {
+            "name": "offcpu_ns",
+            "kind": "derived",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_offcpu_ns",
+            "cap": 0
+          },
+          {
+            "name": "oncpu_ns",
+            "kind": "derived",
+            "expose": "int",
+            "ffi": "spnl_rec_offcpu_oncpu_ns",
+            "cap": 0
+          },
+          {
+            "name": "wait_kind",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_offcpu_wait_kind",
+            "cap": 16
+          }
+        ]
+      }
+    },
+    "l7stream": {
+      "record_struct": "<unit>_l7stream_event",
+      "ringbuf_map": "<unit>_l7stream_events",
+      "record_bytes": 160,
+      "record_min_bytes": 160,
+      "producers": [
+        "emit_tcp_stream",
+        "emit_tcp_payload"
+      ],
+      "fields": [
+        {
+          "name": "hdr",
+          "ctype": "struct spnl_event_hdr",
+          "count": 0,
+          "offset": 0,
+          "bytes": 16,
+          "expose": ""
+        },
+        {
+          "name": "sock",
+          "ctype": "__u64",
+          "count": 0,
+          "offset": 16,
+          "bytes": 8,
+          "expose": ""
+        },
+        {
+          "name": "len",
+          "ctype": "__u32",
+          "count": 0,
+          "offset": 24,
+          "bytes": 4,
+          "expose": ""
+        },
+        {
+          "name": "raw",
+          "ctype": "char",
+          "count": 128,
+          "offset": 28,
+          "bytes": 128,
+          "expose": ""
+        }
+      ],
+      "egress": null,
+      "consumer": null
+    }
+  }
+}

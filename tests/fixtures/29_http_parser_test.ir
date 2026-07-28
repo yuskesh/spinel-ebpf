@@ -2,7 +2,7 @@ SPINEL-IR v1
 SA @meth_names 2 parse_request_line|show
 SA @meth_param_names 2 line|label,req
 SA @meth_param_types 2 string|string,obj_HttpRequest
-SA @meth_return_types 2 obj_HttpRequest|void
+SA @meth_return_types 2 obj_HttpRequest|nil
 IA @meth_body_ids 2 29,109
 SA @cls_names 1 HttpRequest
 SA @cls_parents 1 

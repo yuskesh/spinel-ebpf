@@ -1,0 +1,72 @@
+/*
+ * Copyright 2025 NXP
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		/*
+		 * shared memory reserved for the inter-processor communication
+		 */
+		zephyr,ipc_shm = &shmem;
+		zephyr,ipc_rsc_table = &rsc_table;
+		zephyr,ipc = &mailbox0;
+	};
+
+	shmem: memory@88000000 {
+		compatible = "mmio-sram";
+		reg = <0x88000000 0x500000>;
+	};
+
+	rsc_table: memory@88220000 {
+		compatible = "mmio-sram";
+		reg = <0x88220000 0x100>;
+	};
+
+	mailbox0: mailbox {
+		compatible = "zephyr,mbox-ipm";
+		mboxes = <&mu7 1>, <&mu7 1>;
+		mbox-names = "tx", "rx";
+		status = "okay";
+	};
+};
+
+&mu7 {
+	status = "okay";
+};
+
+/*
+ * Fixed-ABI carveouts (spnl/amp_abi_imx95m7.h). The same reservation
+ * mechanism that was proven under QEMU by shrinking sram0, applied to the M7 TCM:
+ *   ITCM top 1280B (0x0003FB00..0x00040000): A/B blob exec slots (2 x 512B, for
+ *     hot swap) + helper table (256B @ AMP_HELPER_BASE 0x0003FF00). ITCM = Code
+ *     region => RX (executable); the runtime patches it inside a boot-time
+ *     MPU-disable window (amp_m7_runtime.c).
+ *   DTCM top 256B (0x2003FF00): IVARS (@ivar carveout, AMP_IVARS_BASE). DTCM = RW.
+ * itcm/dtcm are shrunk so the linker/allocator never lands code/data in these.
+ * The event ring / staging / cmd ring live in shared DDR (raw physical, no DT node).
+ */
+&itcm {
+	reg = <0x00000000 0x0003fb00>;   /* 256 KiB - 1280B */
+};
+
+&dtcm {
+	reg = <0x20000000 0x0003ff00>;   /* 256 KiB - 256B */
+};
+
+/ {
+	amp_itcm: memory@3fb00 {
+		compatible = "zephyr,memory-region";
+		reg = <0x0003fb00 0x500>;    /* A/B slots (2x512B) + helper table (256B) */
+		zephyr,memory-region = "AMP_ITCM";
+		zephyr,memory-region-flags = "rx";
+	};
+
+	amp_ivars: memory@2003ff00 {
+		compatible = "zephyr,memory-region";
+		reg = <0x2003ff00 0x100>;
+		zephyr,memory-region = "AMP_IVARS";
+		zephyr,memory-region-flags = "rw";
+	};
+};

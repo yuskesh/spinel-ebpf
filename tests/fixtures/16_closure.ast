@@ -37,6 +37,7 @@ S 12 name n
 R 11 receiver 12
 R 11 arguments -1
 N 13 BlockNode
+S 13 locals i
 N 14 BlockParametersNode
 N 15 ParametersNode
 N 16 RequiredParameterNode
@@ -105,6 +106,7 @@ S 34 name n
 R 33 receiver 34
 R 33 arguments -1
 N 35 BlockNode
+S 35 locals i
 N 36 BlockParametersNode
 N 37 ParametersNode
 N 38 RequiredParameterNode

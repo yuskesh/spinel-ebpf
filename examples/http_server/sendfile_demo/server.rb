@@ -1,7 +1,7 @@
 # examples/http_server/sendfile_demo/server.rb
 #
-# sendfile(2) zero-copy static-file serving. Same single-process HTTP/1.0
-# accept loop as the basic HTTP/1.0 server, with one extra route:
+# sendfile(2) zero-copy static-file serving. Same single-process
+# HTTP/1.0 accept loop as the http-1.0-server example, with one extra route:
 #
 #   GET /static  -> the file named by $SPINEL_STATIC_FILE, streamed to the
 #                   socket with sendfile(2). The body bytes go from the
@@ -13,7 +13,8 @@
 #
 # HTTP framing (status line, headers, Content-Length) stays in Ruby; only
 # the body byte transfer is pushed into the kernel. That is the whole
-# point — "HTTP written in Ruby" keeps holding while we take the zero-copy win.
+# point -- "HTTP written in Ruby" keeps holding while we
+# take the zero-copy win.
 #
 # Run: SPINEL_HTTP_PORT=8080 SPINEL_STATIC_FILE=/work/static.bin ./server
 # Stop: Ctrl+C (SIGINT) or kill.
@@ -41,8 +42,7 @@ def build_response(status, body)
   body
 end
 
-# Non-static routing, identical to the basic HTTP/1.0 server
-# (400/405/200//200/health/404).
+# Non-static routing, identical to http-1.0-server (400/405/200//200/health/404).
 def route(req)
   if req.valid == 0
     return build_response("400 Bad Request",        "Bad Request\n")

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT OR Apache-2.0
+/* SPDX-License-Identifier: GPL-2.0
  *
  * spinel-ebpf — host-side runtime wrapper around libbpf.
  *
@@ -60,7 +60,30 @@ int spnl_runtime_ringbuf_drain(spnl_runtime *rt,
                                spnl_runtime_event_cb cb, void *user_ctx,
                                int timeout_ms);
 
-/* Dump a per-unit log2 histogram (BPF_MAP_TYPE_ARRAY of 64 __u64 slots)
+/* event-boxed one-shot termination (SPNL_MAX_EVENTS=K).
+ *
+ * Complements the time-boxed one-shot form (`timeout N`, or an external SIGTERM, which
+ * fd-GC). When SPNL_MAX_EVENTS=K (K>=1) is set, every emit/drain-based drain
+ * path (spnl_stream, the OTLP span/trace/log push funnels, spnl_runtime_ringbuf_drain)
+ * tallies the events/spans it produces; once the cumulative count reaches K the
+ * process exits cleanly via exit(0). A clean exit runs the glue
+ * __attribute__((destructor)) that detaches every BPF program (fd-GC is the
+ * backstop), so the on-disk BPF trace is left at zero — byte-for-byte the same
+ * teardown as the time-boxed path. K=0 or unset = unlimited (legacy: run until
+ * timeout/Ctrl-C), so behaviour is unchanged when the env is absent.
+ *
+ * Composes with time-boxing as whichever-first: `timeout N` still ends the run
+ * before K when events are slow; K ends it before N when events are fast.
+ *
+ * Contract for callers: after a drain cycle has fully built/sent its records
+ * (a lossless boundary), call spnl_oneshot_add(<events this cycle>). It returns
+ * 1 once the K threshold is crossed, at which point call spnl_oneshot_exit().
+ * The K limit is read once (lazily) from SPNL_MAX_EVENTS. */
+int           spnl_oneshot_add(long n);       /* += n; returns 1 iff K reached */
+unsigned long spnl_oneshot_count(void);        /* current cumulative tally */
+void          spnl_oneshot_exit(void);         /* clean exit(0): destructors detach BPF */
+
+/* dump a per-unit log2 histogram (BPF_MAP_TYPE_ARRAY of 64 __u64 slots)
  * to `fp` in bcc-compatible ASCII format. `label` is printed as the value
  * axis label (e.g. "usecs", "bytes"). Returns 0 on success, negative errno
  * on failure (map not found, wrong shape, etc.). */
@@ -69,7 +92,7 @@ int spnl_runtime_print_log2_hist(spnl_runtime *rt,
                                  const char *label,
                                  FILE *fp);
 
-/* Compute an approximate percentile from a log2 histogram. `percentile`
+/* compute an approximate percentile from a log2 histogram. `percentile`
  * is in (0, 1] (e.g. 0.5 for p50, 0.99 for p99). `value_out` receives the
  * upper edge of the bucket where the cumulative count first crosses the
  * threshold — that's an over-approximation by at most 1 log2 step.
@@ -79,7 +102,7 @@ int spnl_runtime_log2_hist_percentile(spnl_runtime *rt,
                                       double percentile,
                                       __u64 *value_out);
 
-/* Dump a linear histogram (BPF_MAP_TYPE_ARRAY of __u64 slots, the
+/* dump a linear histogram (BPF_MAP_TYPE_ARRAY of __u64 slots, the
  * caller already pre-bucketed values). `slot_label_fmt` is a printf
  * format string applied to each slot index for the row label
  * (e.g. "%d us" for microseconds). Returns 0 on success. */
@@ -88,7 +111,7 @@ int spnl_runtime_print_linear_hist(spnl_runtime *rt,
                                    const char *slot_label_fmt,
                                    FILE *fp);
 
-/* Variants that take a raw `struct bpf_object *`. Used by glue.c
+/* variants that take a raw `struct bpf_object *`. Used by glue.c
  * (which holds a skeleton, not a spnl_runtime) and by anyone driving
  * libbpf directly. Semantics identical to the spnl_runtime_* family. */
 int spnl_print_log2_hist_obj(struct bpf_object *obj,
@@ -104,9 +127,9 @@ int spnl_log2_hist_percentile_obj(struct bpf_object *obj,
                                   double percentile,
                                   __u64 *value_out);
 
-/* Keyed variants (bpf_hist_keyed: HASH u64 -> u64[64]). Render / derive
+/* keyed variants (bpf_hist_keyed: HASH u64 -> u64[64]). Render / derive
  * a percentile for the 64-slot log2 histogram stored under `key` (used by
- * --instrument for per-method duration). Absent key = empty histogram. */
+ * --instrument S2 for per-method duration). Absent key = empty histogram. */
 int spnl_print_log2_hist_keyed_obj(struct bpf_object *obj,
                                    const char *map_name,
                                    unsigned long long key,
@@ -121,8 +144,14 @@ int spnl_log2_hist_count_keyed_obj(struct bpf_object *obj,
                                    const char *map_name,
                                    unsigned long long key,
                                    __u64 *count_out);
+/* OTLP S2: copy the raw 64-slot bucket array under `key` into out[64]
+ * (absent key = all zero). Used to build an OTLP ExponentialHistogram. */
+int spnl_hist_buckets_keyed_obj(struct bpf_object *obj,
+                                const char *map_name,
+                                unsigned long long key,
+                                __u64 out[64]);
 
-/* Dump a stack trace by stack id from `map_name` (a
+/* dump a stack trace by stack id from `map_name` (a
  * BPF_MAP_TYPE_STACK_TRACE produced by stack_id() / user_stack_id()).
  * Each non-zero PC is printed on its own line. If `symbolize_kernel` is
  * non-zero, /proc/kallsyms is parsed (best-effort) to resolve PCs to
@@ -134,7 +163,7 @@ int spnl_print_stack_trace_obj(struct bpf_object *obj,
                                int symbolize_kernel,
                                FILE *fp);
 
-/* Emit folded-stacks format (compatible with Brendan Gregg's
+/* emit folded-stacks format (compatible with Brendan Gregg's
  * `flamegraph.pl`) by joining a keyed log2 hist (stack_id -> total hits
  * across all buckets) with a STACK_TRACE map (stack_id -> u64[127] PCs).
  * Each line is `sym1;sym2;sym3 <count>` with PCs reversed (bottom-up,
@@ -145,7 +174,7 @@ int spnl_print_folded_stacks_obj(struct bpf_object *obj,
                                  const char *stacks_map_name,
                                  FILE *fp);
 
-/* Folded-stacks for USER stacks (user_stack_id()). The keyed-hist key
+/* folded-stacks for USER stacks (user_stack_id()). The keyed-hist key
  * packs `(tgid << 32) | user_stack_id`. Each stack is symbolized via
  * spnl_sym_user (with build-id debug-file fallback so stripped statics like
  * libruby's vm_exec_core resolve); frames are merged by function name (the
@@ -160,13 +189,13 @@ int spnl_print_folded_user_stacks_obj(struct bpf_object *obj,
                                       int pid_override,
                                       FILE *fp);
 
-/* Resolve a user-space PC in process `pid` to "<sym>+0xoff [binary]"
- * via /proc/<pid>/maps + the mapped ELF's .symtab/.dynsym. Complements the
+/* resolve a user-space PC in process `pid` to "<sym>+0xoff [binary]"
+ * via /proc/<pid>/maps and the mapped ELF's .symtab/.dynsym. Complements the
  * kernel-only (/proc/kallsyms) symbolization. Returns 0 on a resolved symbol,
  * -1 otherwise (out is still filled with the hex address). */
 int spnl_sym_user(int pid, unsigned long pc, char *out, size_t outlen);
 
-/* Memleak report. `allocs_map` is a HASH of u64 ptr ->
+/* memleak report. `allocs_map` is a HASH of u64 ptr ->
  * struct { __s64 size; __s64 stack_id } (spinel-ebpf's bpf_allocs, written by
  * leak_record/leak_forget). Surviving entries are un-freed allocations; this
  * groups them by stack id, sorts by bytes desc, and prints the top `top_n`
@@ -177,7 +206,7 @@ int spnl_dump_leaks_obj(struct bpf_object *obj,
                         int top_n,
                         FILE *fp);
 
-/* Deadlock detection. `edges_map` is a HASH of struct {u64 a; u64 b} ->
+/* deadlock detection. `edges_map` is a HASH of struct {u64 a; u64 b} ->
  * u64 count (spinel-ebpf's bpf_lock_edges, written by lock_edge). Reports each
  * 2-cycle (a->b AND b->a) as a potential lock-order inversion. Returns the
  * number of inversions found (>=0), or a negative errno on failure. */

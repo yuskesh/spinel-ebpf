@@ -8,22 +8,22 @@
 #     program intercepts it at NIC ingress, rewrites it in place to be a
 #     200 OK response (SEQ/ACK swap, MAC/IP/port swap, IP+TCP checksum
 #     recompute), and returns XDP_TX so the response goes straight back.
-#   - The original request packet is consumed by XDP — kernel never sees it.
+#   - The original request packet is consumed by XDP -- the kernel never sees it.
 #     The response carries the FIN flag, so the client closes the connection
 #     and the kernel transitions through CLOSE_WAIT.
 #   - Userspace workers do **only** `accept` + `close` (no `read`/`write`/
-#     `recvfrom`/`sendto` ever): the response never traverses userspace.
+#     `recvfrom`/`sendto` ever), so the response never traverses userspace.
 #
-# Non-`/health` traffic falls through XDP_PASS to the kernel TCP stack, and the
-# multi-worker accept loop handles it. (This MVP keeps the server
-# `/health`-only — non-matching connections accept+close immediately, clients
-# receive nothing.)
+# Non-`/health` traffic falls through XDP_PASS to the kernel TCP stack, where the
+# multi-worker code path would handle it. This server is deliberately
+# `/health`-only -- non-matching connections accept+close immediately and the
+# client receives nothing.
 #
 # Build:
 #   spinel-ebpf compile examples/http_server/pure-xdp-tcp-slice/server.rb \
-#       -o build/xdp_server --build
+#       -o build/xdp_tx_server --build
 # Run:
-#   SPINEL_XDP_IFACE=lo SPINEL_HTTP_WORKERS=4 ./build/xdp_server/server
+#   SPINEL_XDP_IFACE=lo SPINEL_HTTP_WORKERS=4 ./build/xdp_tx_server/server
 #   curl http://127.0.0.1:8080/health
 #   strace -p <worker> -e read,write,recvfrom    # should show nothing
 
@@ -46,11 +46,14 @@ XDP_TX   = 3
 # it back via XDP_TX. Otherwise let it proceed to the kernel TCP stack so the
 # accept-loop below can clean up.
 #
-# The underlying xdp_reply_health helper correctly handles TCP headers with
-# options (thl=32 with Timestamps) — essentially every real Linux packet. This
-# raises concurrent throughput significantly while leaving sequential
-# reliability around 50% (still bound by the kernel TCP state divergence: the
-# kernel never sees the request, so its socket state diverges from the client's).
+# The underlying xdp_reply_health helper handles TCP headers that carry options
+# (thl=32 with Timestamps). An earlier version silently fell through to XDP_PASS
+# for option-bearing packets -- which is essentially every real Linux packet.
+# Handling them raised concurrent throughput significantly, while sequential
+# reliability stayed around 50%: this design still shares the connection with the
+# kernel's own TCP state machine, and the two diverge. The tcp_slice.rb variant
+# in this directory removes the kernel from the connection entirely and does not
+# have that ceiling.
 def xdp__health_responder
   if xdp_match_health == 1
     @xdp_match_hits = @xdp_match_hits + 1
@@ -64,7 +67,7 @@ end
 # Accept-only worker. The actual request/response handling happens entirely
 # in the XDP program above; this loop just keeps the accept queue drained so
 # the kernel keeps accepting new connections. We deliberately do NOT call
-# read/write — that's the whole point of the pure-XDP response.
+# read/write -- that's the whole point of this design.
 def worker_loop(port)
   listen_fd = Net.sp_net_listen(port, 1)
   if listen_fd < 0
@@ -75,7 +78,7 @@ def worker_loop(port)
   loop do
     client = Net.sp_net_accept(listen_fd)
     break if client < 0
-    # Contract: no read/write here. XDP already did the conversation.
+    # The contract: no read/write here. XDP already did the conversation.
     Net.sp_net_close(client)
   end
 end

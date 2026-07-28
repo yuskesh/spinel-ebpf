@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: MIT OR Apache-2.0
+/* SPDX-License-Identifier: GPL-2.0
  *
  * spinel-ebpf shared types -- used by both eBPF C (generated) and host C.
- * The host<->kernel ring-buffer record header.
+ * This is the host<->kernel ringbuf record header.
  *
  * Layout MUST stay 16 bytes and field order MUST not change without bumping
  * SPNL_EVENT_HDR_VERSION; both sides assume the same layout.

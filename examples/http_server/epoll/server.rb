@@ -1,10 +1,10 @@
 # examples/http_server/epoll/server.rb
 #
-# Event-driven spinel HTTP/1.1 server (epoll), the answer to the blocking
-# model's limits. The blocking keepalive server serves ONE connection per
-# worker — its keepalive inner loop occupies the worker, so N workers handle
-# only N concurrent connections; matching nginx needed 4-8x oversubscribed
-# workers and still peaked roughly 21% lower.
+# EVENT-DRIVEN spinel HTTP/1.1 server (epoll), the answer to the
+# blocking model's limits. The keepalive-but-blocking variant serves ONE connection
+# per worker -- its keepalive inner loop occupies the worker, so N workers handle
+# only N concurrent connections; matching nginx needed 4-8x oversubscribed workers
+# and still peaked about 21% lower.
 #
 # Here each worker runs an epoll event loop and multiplexes MANY connections
 # (like nginx): epoll_wait returns the next ready fd; if it's the listen socket we

@@ -175,6 +175,7 @@ S 60 name shapes
 R 59 receiver 60
 R 59 arguments -1
 N 61 BlockNode
+S 61 locals s
 N 62 BlockParametersNode
 N 63 ParametersNode
 N 64 RequiredParameterNode

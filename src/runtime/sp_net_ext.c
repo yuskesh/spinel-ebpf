@@ -1,9 +1,9 @@
 /* sp_net_ext.c -- spinel-ebpf's OWN sp_net extensions, kept OUT of upstream
- * lib/sp_net.c (keeping the upstream surface minimal). Linked into the final
+ * lib/sp_net.c, keeping the upstream surface minimal. Linked into the final
  * binary via bin/spinel-ebpf's extra_sources, NOT patched into libspinel_rt.a.
  *
  * Provides the HTTP-server / observability surface upstream sp_net lacks:
- *   - buffered line read    : sp_net_read_line(+_reset/_buffered_remaining)
+ *   - buffered line read   : sp_net_read_line(+_reset/_buffered_remaining)
  *   - zero-copy static file : sp_net_file_size / sp_net_sendfile
  *   - epoll readiness mux    : sp_net_epoll_create/_add/_del/_wait_one
  *   - SIGCHLD auto-reap      : sp_net_reap_nb / sp_net_autoreap_on
@@ -139,9 +139,9 @@ const char *sp_net_read_line(int fd) {
 /* ---------- read_line-aware close / recv_some (replaces upstream dormant hooks) ----------
  * Callers that used read_line() on an fd must close it via sp_net_rl_close (so the
  * fill buffer is dropped before the fd is recycled), and -- if they switch to raw
- * recv() after read_line() -- read via sp_net_rl_recv_some so any over-read
- * remainder is returned before touching the socket. Upstream's sp_net_close /
- * sp_net_recv_some stay verbatim and are reached for the recv path. */
+ * recv() after read_line(), which once hung an endpoint -- read via sp_net_rl_recv_some so
+ * any over-read remainder is returned before touching the socket. Upstream's
+ * sp_net_close / sp_net_recv_some stay verbatim and are reached for the recv path. */
 int sp_net_rl_close(int fd) {
     sp_net_read_line_reset(fd);
     return sp_net_close(fd);
@@ -284,10 +284,9 @@ int sp_pty_set_winsize(int fd, int rows, int cols) {
 /* The PTY master is a character device, not a socket, so send()/recv()
  * (sp_net_write_bytes / sp_net_recv_some) fail on it with ENOTSOCK. These
  * read(2)/write(2) primitives let the Ruby side pump bytes to/from the pty.
- * WebSocket frame parse/unmask/build now lives entirely in Ruby
- * (serve_deck_pty.rb), so the former sp_ws_pump_* / sp_ws_send_frame C shims
- * are gone -- the :binstr FFI return mode makes binary-safe frame handling
- * possible in Ruby. */
+ * WebSocket frame parse/unmask/build now lives entirely in Ruby (
+ * serve_deck_pty.rb), so the former sp_ws_pump_* / sp_ws_send_frame C shims
+ * are gone -- :binstr makes binary-safe frame handling possible in Ruby. */
 static unsigned char sp_pty_buf[SP_NET_BUFSIZE];
 
 /* read up to maxlen bytes from the pty master; binary-safe for the FFI :binstr

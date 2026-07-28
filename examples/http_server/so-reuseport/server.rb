@@ -1,20 +1,20 @@
 # examples/http_server/so-reuseport/server.rb
 #
-# Multi-process spinel HTTP/1.0 server. Each worker creates its own listen
-# socket with SO_REUSEPORT bound to the same port; the kernel's default
-# 5-tuple hash spreads incoming SYNs across the reuseport group. An optional
-# SO_ATTACH_REUSEPORT_EBPF program adds consistent-hash worker pinning (see
-# below).
+# Multi-process spinel HTTP/1.0 server. Each worker creates its own
+# listen socket with SO_REUSEPORT bound to the same port; the kernel's default
+# 5-tuple hash spreads incoming SYNs across the reuseport group. An
+# SO_ATTACH_REUSEPORT_EBPF program can be added on top for consistent-hash
+# worker pinning.
 #
-# Inherits everything from the L7 path-counter server (HTTP/1.0 routing, L7
-# BPF counter via transparent dispatch). Adds a parent that forks N workers,
-# plus each worker's pid tagged onto the log so connections can be attributed.
+# Inherits everything from the l7-path-counter variant (HTTP/1.0 routing, L7 BPF
+# counter via transparent dispatch). Adds a parent that forks N workers, plus each
+# worker's pid tagged onto the log so connections can be attributed.
 #
 # Build:
 #   spinel-ebpf compile examples/http_server/so-reuseport/server.rb \
-#       -o build/reuseport_server --build --ebpf-dispatch
+#       -o build/so_reuseport_server --build --ebpf-dispatch
 # Run:
-#   SPINEL_HTTP_WORKERS=4 ./build/reuseport_server/server
+#   SPINEL_HTTP_WORKERS=4 ./build/so_reuseport_server/server
 #   # in another shell: curl http://127.0.0.1:8080/ ; ab -c 100 -n 10000 ...
 
 require_relative "../http-1.0-server/http_parser"
@@ -29,7 +29,7 @@ module Net
   ffi_func :sp_net_getpid,                [],              :int
 end
 
-# SO_REUSEPORT BPF helpers — register a worker's socket in the SOCKARRAY
+# SO_REUSEPORT BPF helpers -- register a worker's socket in the SOCKARRAY
 # and attach the sk_reuseport__select program to the reuseport group.
 module ReuseportBpf
   ffi_func :sp_bpf_reuseport_register, [:int, :int], :int
@@ -44,9 +44,9 @@ end
 SK_PASS  = 0
 WORKERS  = 4   # keep in sync with the SPINEL_HTTP_WORKERS env default. The
                # :ebpf method below uses a literal 4 because the BPF codegen
-               # doesn't yet resolve user-defined ConstantReadNode (KNOWN_CONSTANTS
-               # only covers kernel enums); plumbing const values through the IR
-               # is future work.
+               # doesn't yet resolve user-defined ConstantReadNode (the known
+               # constants table only covers kernel enums); plumbing const values
+               # through the IR is future work.
 
 # Consistent-hash worker selection. The kernel-computed 5-tuple hash
 # (sk_reuseport_md->hash) drives a modulo into bpf_worker_socks; the selected
@@ -124,7 +124,7 @@ def worker_loop(port, my_idx)
   end
   ReuseportBpf.sp_bpf_reuseport_register(listen_fd, my_idx)
   # Opt-in BPF worker selection. Set SPINEL_HTTP_BPF_SELECT=1 to attach the
-  # sk_reuseport__select program; default keeps the kernel's plain 5-tuple
+  # sk_reuseport__select program; the default keeps the kernel's own 5-tuple
   # distribution.
   if my_idx == 0 && (ENV["SPINEL_HTTP_BPF_SELECT"] || "0") != "0"
     rc = ReuseportBpf.sp_bpf_reuseport_attach(listen_fd, "sk_reuseport__select")
@@ -161,7 +161,7 @@ if workers < 1
   workers = 1
 end
 
-puts "[main " + Net.sp_net_getpid.to_s + "] SO_REUSEPORT server starting " + workers.to_s + " worker(s) on port " + port.to_s
+puts "[main " + Net.sp_net_getpid.to_s + "] starting " + workers.to_s + " worker(s) on port " + port.to_s
 
 # Fork workers-1 children; parent process also serves as a worker so we end
 # up with `workers` accept loops total. fork returns 0 in the child; the

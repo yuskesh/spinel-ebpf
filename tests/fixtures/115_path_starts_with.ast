@@ -1,0 +1,88 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/115_path_starts_with.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @denied
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @allowed
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name fmod_ret__security_file_open
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name file
+N 9 RequiredParameterNode
+S 9 name ret
+A 7 requireds 8,9
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 10 StatementsNode
+N 11 IfNode
+N 12 CallNode
+S 12 name path_starts_with
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name file
+N 15 StringNode
+S 15 content /etc/spnl_e332/
+A 13 arguments 14,15
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+R 11 predicate 12
+N 16 StatementsNode
+N 17 InstanceVariableWriteNode
+S 17 name @denied
+N 18 CallNode
+S 18 name +
+N 19 InstanceVariableReadNode
+S 19 name @denied
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 1
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+N 22 IntegerNode
+I 22 value -1
+A 16 body 17,22
+R 11 statements 16
+N 23 ElseNode
+N 24 StatementsNode
+N 25 InstanceVariableWriteNode
+S 25 name @allowed
+N 26 CallNode
+S 26 name +
+N 27 InstanceVariableReadNode
+S 27 name @allowed
+R 26 receiver 27
+N 28 ArgumentsNode
+N 29 IntegerNode
+I 29 value 1
+A 28 arguments 29
+R 26 arguments 28
+R 26 block -1
+S 26 call_operator .
+R 25 value 26
+N 30 LocalVariableReadNode
+S 30 name ret
+A 24 body 25,30
+R 23 statements 24
+R 11 subsequent 23
+A 10 body 11
+R 6 body 10
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# kubectl-spinel_probe -- krew-style kubectl plugin for one-shot spinel eBPF probe injection.
+#
+# Installed as `kubectl-spinel_probe` on PATH, it is invoked as:
+#
+#   kubectl spinel_probe node/<node> --probe dns --seconds 30
+#   kubectl spinel_probe node/<node> --image <ref> --mode hybrid --seconds 45
+#
+# It is a thin wrapper over tools/k8s_oneshot.sh's image mode: pick a prebuilt probe
+# image from a small catalog (--probe) or bring your own (--image), then run it as the image
+# of a `kubectl debug node/` pod (privileged sysadmin profile). The image ENTRYPOINT chooses
+# the execution model (SPNL_PROBE_MODE): pure = run in the pod, hybrid = nsenter into the host
+# namespaces, with the image only as the delivery vehicle.
+#
+# The AOT probe is a self-contained native binary baked into the image; per-arch is handled by
+# the image manifest. Token/secret endpoints are NEVER baked into the image -- pass a non-secret
+# collector endpoint here, or let a collector you control hold the token.
+#
+# krew note: this is a LOCAL plugin. Put this file on PATH (chmod +x) and `kubectl plugin
+# list` will discover it. Public krew index registration is out of scope.
+set -euo pipefail
+
+PROG="kubectl spinel_probe"
+usage() {
+  cat >&2 <<EOF
+$PROG -- one-shot spinel eBPF probe injection (kubectl debug --image)
+
+USAGE:
+  $PROG node/<node> --probe <name> [options]
+  $PROG node/<node> --image <ref>  [options]
+
+TARGET:
+  node/<node>            target node (or --node <node>). Defaults to first Ready node.
+
+PROBE SELECTION (one of):
+  --probe <name>         prebuilt probe image from the catalog:
+                           dns   -> $CAT_dns
+                           file  -> $CAT_file
+                           l7    -> $CAT_l7
+                           net   -> $CAT_net
+  --image <ref>          any container image whose ENTRYPOINT honours SPNL_PROBE_MODE.
+
+OPTIONS:
+  --seconds N            finite run duration (default 30)
+  --mode M               execution model: hybrid (default) | pure | recon
+  --endpoint URL         OTLP traces endpoint (default http://127.0.0.1:4318/v1/traces).
+                         Use a non-secret collector; do not pass tokens on the cmdline.
+  --service NAME         OTEL_SERVICE_NAME (default spinel-oneshot)
+  --env FILE             extra non-secret env (KEY=VAL lines) injected into the debug pod
+  --node NODE            target node (alternative to node/<node>)
+  --kubectl CMD          kubectl command (default: kubectl)
+  --keep                 leave the debug pod (debugging)
+  -h, --help             this help
+EOF
+  exit "${1:-2}"
+}
+
+# ---- probe catalog (prebuilt image tags) ----
+# Each --probe maps to a layer-1 capability domain -- the same
+# domains as src/spinel_ebpf/capabilities.rb (`spinel-ebpf capabilities`):
+#   dns  -> l7          (DNS is an L7 protocol: emit_dns / dns_* builtins)
+#   file -> enforcement (file audit + deny: emit_path / path_eq / lsm hooks)
+#   l7   -> l7          (http_* / ssl_* / req_start / emit_l7)
+#   net  -> net         (emit_connect / pkt_* / xdp / tc / lb)
+CAT_dns="docker.io/library/spinel-probe-dns:latest"
+CAT_file="docker.io/library/spinel-probe-file:latest"
+CAT_l7="docker.io/library/spinel-probe-l7:latest"
+CAT_net="docker.io/library/spinel-probe-net:latest"
+
+PROBE=""; IMAGE=""; SECONDS_RUN=30; MODE="hybrid"; NODE=""
+ENDPOINT="http://127.0.0.1:4318/v1/traces"; SERVICE="spinel-oneshot"
+ENVFILE=""; KUBECTL="kubectl"; KEEP=0
+
+# node/<x> positional
+if [ "${1:-}" != "" ]; then
+  case "$1" in node/*) NODE="${1#node/}"; shift ;; esac
+fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --probe)    PROBE="$2"; shift 2 ;;
+    --image)    IMAGE="$2"; shift 2 ;;
+    --seconds)  SECONDS_RUN="$2"; shift 2 ;;
+    --mode)     MODE="$2"; shift 2 ;;
+    --endpoint) ENDPOINT="$2"; shift 2 ;;
+    --service)  SERVICE="$2"; shift 2 ;;
+    --env)      ENVFILE="$2"; shift 2 ;;
+    --node)     NODE="$2"; shift 2 ;;
+    --kubectl)  KUBECTL="$2"; shift 2 ;;
+    --keep)     KEEP=1; shift ;;
+    -h|--help)  usage 0 ;;
+    node/*)     NODE="${1#node/}"; shift ;;
+    *)          echo "$PROG: unknown option: $1" >&2; usage ;;
+  esac
+done
+
+# resolve image from catalog or --image
+if [ -n "$IMAGE" ]; then
+  REF="$IMAGE"
+elif [ -n "$PROBE" ]; then
+  case "$PROBE" in
+    dns)  REF="$CAT_dns" ;;
+    file) REF="$CAT_file" ;;
+    l7)   REF="$CAT_l7" ;;
+    net)  REF="$CAT_net" ;;
+    *)    echo "$PROG: unknown --probe '$PROBE' (use dns|file|l7|net or --image)" >&2; usage ;;
+  esac
+else
+  echo "$PROG: one of --probe <name> or --image <ref> is required" >&2; usage
+fi
+
+# locate k8s_oneshot.sh (same tools/ dir)
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ONESHOT="$HERE/k8s_oneshot.sh"
+[ -f "$ONESHOT" ] || { echo "$PROG: k8s_oneshot.sh not found next to plugin ($ONESHOT)" >&2; exit 1; }
+
+# assemble a non-secret env file for the probe
+TMPENV="$(mktemp)"
+trap 'rm -f "$TMPENV"' EXIT
+{
+  echo "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=$ENDPOINT"
+  echo "OTEL_SERVICE_NAME=$SERVICE"
+  [ -n "$ENVFILE" ] && cat "$ENVFILE"
+} > "$TMPENV"
+
+ARGS=(--probe-image "$REF" --mode "$MODE" --seconds "$SECONDS_RUN" --env "$TMPENV" --kubectl "$KUBECTL")
+[ -n "$NODE" ] && ARGS+=(--node "$NODE")
+[ "$KEEP" -eq 1 ] && ARGS+=(--keep)
+
+echo "$PROG: node=${NODE:-<first-ready>} image=$REF mode=$MODE seconds=$SECONDS_RUN service=$SERVICE" >&2
+exec bash "$ONESHOT" "${ARGS[@]}"

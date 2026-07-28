@@ -87,6 +87,13 @@ class CAstTest < Minitest::Test
     assert_equal "((__s64)bpf_get_smp_processor_id())", expr.to_c
   end
 
+  def test_cgroup_id_byte_identical
+    # current: ((__s64)bpf_get_current_cgroup_id()) -- the cgroup id value builtin,
+    # used to correlate an event with the Kubernetes pod it came from.
+    expr = C.s64(C.call("bpf_get_current_cgroup_id"))
+    assert_equal "((__s64)bpf_get_current_cgroup_id())", expr.to_c
+  end
+
   def test_ktime_ns_byte_identical
     # current: ((__s64)bpf_ktime_get_ns())
     expr = C.s64(C.call("bpf_ktime_get_ns"))

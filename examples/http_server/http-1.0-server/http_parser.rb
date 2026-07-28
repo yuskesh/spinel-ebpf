@@ -2,7 +2,7 @@
 #
 # Minimal HTTP/1.0 request-line parser for the spinel HTTP server.
 # Splits "GET /path HTTP/1.0" into method / path / version with light
-# structural validation. Header parsing is intentionally out of scope —
+# structural validation. Header parsing is intentionally out of scope --
 # the server reads + discards header lines until an empty line
 # arrives, then dispatches based on this parsed structure.
 #
@@ -41,7 +41,7 @@ def parse_request_line(line)
     valid = 0
   end
   # Path must start with "/" (absolute-path form per RFC 1945 §5.1.2).
-  # Absolute-URI form ("http://...") is not supported here.
+  # Absolute-URI form ("http://...") is not supported.
   if p.length == 0 || p[0] != "/"
     valid = 0
   end

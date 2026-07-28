@@ -1,15 +1,15 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# Ruby-parity check — HISTORICAL, no longer the gate.
+# Ruby-parity check -- HISTORICAL, no longer the gate.
 #
 # This harness verified the C port by diffing the Ruby `CodegenBpf.emit` output
 # against the C codegen (byte-identical = faithful port). It drove the whole
-# initial port to PASS=84/DIFF=0. The C codegen is now the production source of
-# truth and the regression gate is tools/golden.rb (C output == committed
-# tests/golden/*.bpf.c). The Ruby codegen is no longer kept in lockstep, so this
-# check WILL diverge as the C codegen evolves — keep it only to inspect where C
-# and the frozen Ruby reference differ.
+# initial port to PASS=84/DIFF=0. The C codegen is now
+# the production source of truth and the regression gate is tools/golden.rb
+# (C output == committed tests/golden/*.bpf.c). The Ruby codegen is no longer
+# kept in lockstep, so this check WILL diverge as the C codegen evolves — keep it
+# only to inspect where C and the frozen Ruby reference differ.
 #
 #   ruby tools/cgen_oracle.rb            # board over all fixtures (informational)
 #   ruby tools/cgen_oracle.rb 02_integer_arith   # one fixture, show diff

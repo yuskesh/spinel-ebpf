@@ -1,6 +1,6 @@
-/* spinel_upstream_contract.h -- the COMPLETE dependency surface of upstream
+/* spinel_upstream_contract.h — the COMPLETE dependency surface of upstream
  * spinel internal structs that spinel-ebpf's in-process eBPF codegen reads
- * (Stage 2).
+
  *
  * Every layout-dependent field read of the upstream Compiler / Scope /
  * ClassInfo / LocalVar structs goes through ONE accessor here, so that:

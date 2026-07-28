@@ -24,6 +24,8 @@ class BtfSchemaTest < Minitest::Test
         __u8 saddr[4];
         __u8 daddr[4];
         __u8 saddr_v6[16];
+        char comm[16];
+        long unsigned int call_site;
         char __data[0];
     };
   C
@@ -51,6 +53,8 @@ class BtfSchemaTest < Minitest::Test
     assert_equal "int", b.field_type("trace_event_raw_demo", "oldstate")    # int
     assert_equal "int", b.field_type("trace_event_raw_demo", "sport")       # __u16
     assert_equal "int", b.field_type("trace_event_raw_demo", "bytes_alloc") # unsigned int
+    # Canonical multi-word integer spellings bpftool emits.
+    assert_equal "int", b.field_type("trace_event_raw_demo", "call_site")   # long unsigned int
   end
 
   def test_u8_array_of_4_is_ipv4
@@ -59,9 +63,15 @@ class BtfSchemaTest < Minitest::Test
     assert_equal "ipv4", b.field_type("trace_event_raw_demo", "daddr")
   end
 
-  def test_non_ipv4_array_and_struct_and_absent_are_nil
+  # __u8[16] is an IPv6 address; a char[16] string field is NOT.
+  def test_u8_array_of_16_is_ipv6_but_char16_is_not
     b = schema_with(SAMPLE)
-    assert_nil b.field_type("trace_event_raw_demo", "saddr_v6")  # __u8[16], not a scalar
+    assert_equal "ipv6", b.field_type("trace_event_raw_demo", "saddr_v6")  # __u8[16]
+    assert_nil b.field_type("trace_event_raw_demo", "comm")                # char[16] string
+  end
+
+  def test_non_addr_array_and_struct_and_absent_are_nil
+    b = schema_with(SAMPLE)
     assert_nil b.field_type("trace_event_raw_demo", "ent")       # embedded struct
     assert_nil b.field_type("trace_event_raw_demo", "__data")    # char[0] trailer
     assert_nil b.field_type("trace_event_raw_demo", "nope")      # absent field

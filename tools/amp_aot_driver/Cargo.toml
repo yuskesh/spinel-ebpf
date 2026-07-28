@@ -1,0 +1,8 @@
+[package]
+name = "aot-driver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rbpf = { path = "../rbpf-for-microcontrollers", default-features = false }
+env_logger = "0.11"

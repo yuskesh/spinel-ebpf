@@ -1,0 +1,94 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/108_http_l7.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name size
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 CallNode
+S 8 name http_req_start
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name sk
+N 11 LocalVariableReadNode
+S 11 name msg
+A 9 arguments 10,11
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 12 IntegerNode
+I 12 value 0
+A 7 body 8,12
+R 2 body 7
+R 2 receiver -1
+N 13 DefNode
+S 13 name kprobe__tcp_recvmsg
+N 14 ParametersNode
+N 15 RequiredParameterNode
+S 15 name sk
+N 16 RequiredParameterNode
+S 16 name msg
+A 14 requireds 15,16
+A 14 optionals 
+A 14 keywords 
+A 14 posts 
+R 13 parameters 14
+N 17 StatementsNode
+N 18 CallNode
+S 18 name http_resp_stash
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name sk
+N 21 LocalVariableReadNode
+S 21 name msg
+A 19 arguments 20,21
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+N 22 IntegerNode
+I 22 value 0
+A 17 body 18,22
+R 13 body 17
+R 13 receiver -1
+N 23 DefNode
+S 23 name kretprobe__tcp_recvmsg
+N 24 ParametersNode
+N 25 RequiredParameterNode
+S 25 name ret
+A 24 requireds 25
+A 24 optionals 
+A 24 keywords 
+A 24 posts 
+R 23 parameters 24
+N 26 StatementsNode
+N 27 CallNode
+S 27 name http_emit
+R 27 receiver -1
+N 28 ArgumentsNode
+N 29 LocalVariableReadNode
+S 29 name ret
+A 28 arguments 29
+R 27 arguments 28
+R 27 block -1
+S 27 call_operator .
+N 30 IntegerNode
+I 30 value 0
+A 26 body 27,30
+R 23 body 26
+R 23 receiver -1
+A 1 body 2,13,23
+R 0 statements 1

@@ -1,12 +1,12 @@
 # examples/http_server/http-1.0-server/server.rb
 #
-# Single-process HTTP/1.0 server. Single-process accept loop. Combines the
-# TCP socket FFI and the request-line parser into a server that responds to
-# GET / and GET /health with 200, returns 404 for unknown paths, 405 for
-# non-GET methods, and 400 for malformed request lines. Each connection is
-# one request + Connection: close (HTTP/1.0 default), no keepalive — the
-# multi-process SO_REUSEPORT server revisits this when worker processes come
-# in.
+# spinel-only HTTP/1.0 server. Single-process accept loop. Combines
+# the TCP socket FFI and the request-line parser into a
+# server that responds to GET / and GET /health with 200, returns 404 for
+# unknown paths, 405 for non-GET methods, and 400 for malformed request
+# lines. Each connection is one request + Connection: close (HTTP/1.0
+# default), no keepalive -- the keepalive/ variant revisits that once
+# SO_REUSEPORT workers are in place.
 #
 # Run: SPINEL_HTTP_PORT=8080 ./server   (port falls back to 8080 if unset)
 # Stop: Ctrl+C (SIGINT) or kill.

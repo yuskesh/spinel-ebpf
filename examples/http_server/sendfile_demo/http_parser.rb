@@ -1,7 +1,7 @@
 # examples/http_server/sendfile_demo/http_parser.rb
 #
-# Minimal HTTP/1.0 request-line parser (verbatim copy of the basic HTTP/1.0
-# server's parser; each example keeps a self-contained copy). Splits
+# Minimal HTTP/1.0 request-line parser (verbatim copy of the http-1.0-server parser;
+# each example keeps a self-contained copy). Splits
 # "GET /path HTTP/1.0" into method / path / version with light
 # structural validation.
 

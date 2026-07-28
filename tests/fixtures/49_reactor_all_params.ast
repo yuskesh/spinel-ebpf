@@ -31,6 +31,7 @@ S 12 content do_sys_openat2
 A 10 arguments 11,12
 R 9 arguments 10
 N 13 BlockNode
+S 13 locals dfd,filename
 N 14 BlockParametersNode
 N 15 ParametersNode
 N 16 RequiredParameterNode
@@ -79,6 +80,7 @@ S 29 content do_sys_openat2
 A 27 arguments 28,29
 R 26 arguments 27
 N 30 BlockNode
+S 30 locals ret
 N 31 BlockParametersNode
 N 32 ParametersNode
 N 33 RequiredParameterNode
@@ -110,6 +112,7 @@ S 40 content tcp_v4_rcv
 A 38 arguments 39,40
 R 37 arguments 38
 N 41 BlockNode
+S 41 locals skb
 N 42 BlockParametersNode
 N 43 ParametersNode
 N 44 RequiredParameterNode
@@ -151,6 +154,7 @@ S 54 content tcp_v4_rcv
 A 52 arguments 53,54
 R 51 arguments 52
 N 55 BlockNode
+S 55 locals skb,ret
 N 56 BlockParametersNode
 N 57 ParametersNode
 N 58 RequiredParameterNode
@@ -186,6 +190,7 @@ S 67 content sys_enter_write
 A 64 arguments 65,66,67
 R 63 arguments 64
 N 68 BlockNode
+S 68 locals fd,buf,count
 N 69 BlockParametersNode
 N 70 ParametersNode
 N 71 RequiredParameterNode
@@ -221,6 +226,7 @@ S 80 content /usr/bin/bash:readline
 A 78 arguments 79,80
 R 77 arguments 78
 N 81 BlockNode
+S 81 locals prompt
 N 82 BlockParametersNode
 N 83 ParametersNode
 N 84 RequiredParameterNode
@@ -252,6 +258,7 @@ S 91 content /usr/bin/bash:readline
 A 89 arguments 90,91
 R 88 arguments 89
 N 92 BlockNode
+S 92 locals ret
 N 93 BlockParametersNode
 N 94 ParametersNode
 N 95 RequiredParameterNode
@@ -287,6 +294,7 @@ S 104 content throw
 A 100 arguments 101,102,103,104
 R 99 arguments 100
 N 105 BlockNode
+S 105 locals obj,tinfo,dest
 N 106 BlockParametersNode
 N 107 ParametersNode
 N 108 RequiredParameterNode

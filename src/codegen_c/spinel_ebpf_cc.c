@@ -1,18 +1,17 @@
-/* spinel_ebpf_cc -- C port of spinel-ebpf's eBPF codegen (Stage 1).
+/* spinel_ebpf_cc -- C port of spinel-ebpf's eBPF codegen.
  *
  * Reads the SPINEL-IR v1 text (`--emit-ir`) + AST dump (`--dump-ast`) and emits
- * the .bpf.c, aiming to be byte-identical to the Ruby `CodegenBpf.emit`. The Ruby
+ * the .bpf.c, aiming to be BYTE-IDENTICAL to the Ruby `CodegenBpf.emit`. The Ruby
  * co-process stays the regression oracle (tools/cgen_oracle.rb diffs the two).
  *
- * Stage 1 scope grows one feature at a time, each verified byte-identical;
- * the first ported feature was int-param methods, arithmetic-expr bodies, and
- * SEC("syscall").
+ * Stage 1 scope grows one feature at a time, each verified byte-identical:
+ *   02_integer_arith -- int-param methods, arithmetic-expr bodies, SEC("syscall").
  *
- * Conventions follow upstream spinel src/: 2-space indent, K&R braces, block
- * comments only, `Buf`/`nt_*`/`ty_*` types mirror upstream so the Stage-2
- * in-process plugin can swap our text parsers for the real NodeTable/Compiler.
- * Anything not yet ported is a hard error (no silent fallback). Pure host text
- * processing -- builds with cc on macOS/Linux.
+ * Conventions follow upstream spinel src/ (convention audit): 2-space indent,
+ * K&R braces, block comments only, `Buf`/`nt_*`/`ty_*` types mirror upstream so the
+ * Stage-2 in-process plugin can swap our text parsers for the real NodeTable/Compiler.
+ * Anything not yet ported is a hard error (there is no silent fallback). Pure host
+ * text processing -- builds with cc on macOS/Linux.
  *
  *   spinel_ebpf_cc <unit.ir> <unit.ast> <base_name>   # -> .bpf.c on stdout
  */
@@ -20,12 +19,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>   /* access() for the best-effort BTF reader */
 
 /* Fixed hand-written BPF C helpers live as pristine .template.c files under
  * templates/, embedded here at build time (tools/embed_templates.rb). Each is a
- * `static const char tpl_<name>[]` with an @SIG@ slot for the function signature.
- * Keeps big fixed snippets out of the codegen logic without a runtime file dep. */
+ * `static const char tpl_<name>[]` with @KEY@ slots filled by tpl_emit (e.g.
+ * @SIG@ = function signature, @UNIT@ = per-unit name prefix); slot-free ones go
+ * through bare buf_puts. Keeps fixed snippets whose *shape* doesn't depend on
+ * program structure out of the codegen logic without a runtime file dep. */
 #include "templates_gen.h"
+
+/* Packed-record ringbuf layouts are *data*, not template text: one declaration
+ * per channel feeds the kernel struct (S1), the userspace mirror (S2) and the
+ * capabilities surface (S3). See docs/research/ringbuf_data_contract.md. */
+#include "record_schema.h"
 
 /* ---------- diagnostics (mirror upstream `spinel:` + exit(1)) ---------- */
 
@@ -106,7 +113,7 @@ static void tpl_emit(Buf *b, const char *tpl, const TplSlot *slots, int n) {
 
 /* split `s` on `sep` into out[] (returns count). Empty fields preserved
  * (split(-1) semantics). The strdup'd backing buffer is leaked: a short-lived
- * tool; Stage-2 in-process must add free discipline. */
+ * tool; Stage-2 in-process must add free discipline (convention audit). */
 static int split(const char *s, char sep, char ***out) {
   char *copy = strdup(s);
   int cap = 8, n = 0;
@@ -149,6 +156,42 @@ static void lines_push(Lines *L, char *s) {
 static int lines_has(Lines *L, const char *s) {
   for (int i = 0; i < L->n; i++) if (!strcmp(L->v[i], s)) return 1;
   return 0;
+}
+
+/* tpl_emit for statement lowering (templates/bi_*.template.c): substitute the
+ * slots, strip the template's trailing newline, and push the result as ONE
+ * multi-line Lines entry. Downstream indentation (cc_indent_each / cs depth
+ * passes) prefixes every embedded line, so this is byte-identical to pushing
+ * each line individually. */
+static void tpl_emit_lines(Lines *L, const char *tpl, const TplSlot *slots, int n) {
+  Buf b; memset(&b, 0, sizeof b);
+  tpl_emit(&b, tpl, slots, n);
+  if (b.len && b.p[b.len - 1] == '\n') b.p[--b.len] = '\0';
+  lines_push(L, b.p ? b.p : strdup(""));
+}
+
+/* ---------- typed record channels ----------
+ *
+ * The packed-record layouts are declared as data in record_schema.h rather than
+ * hand-written as templates/ text, so that the one declaration can feed
+ * the kernel struct (here), the userspace mirror (S2) and the capabilities
+ * surface (S3). This emitter is the S1 consumer: it prints the record struct and
+ * its ringbuf map, byte-identically to the template it replaces. */
+static void cc_rec_emit_channel(Buf *b, const CcRecSchema *s, const char *unit) {
+  /* A channel that lives inside a larger section (http/redis/offcpu keep their
+   * pending/stash maps in a template) declares no banner: the section already
+   * printed one, and inventing a second would change the emitted text. */
+  if (s->banner) buf_printf(b, "%s\n", s->banner);
+  buf_printf(b, "struct %s_%s {\n", unit, s->struct_suffix);
+  for (int i = 0; i < s->nfields; i++) {
+    const CcRecField *f = &s->fields[i];
+    if (f->count > 0) buf_printf(b, "    %s %s[%d];\n", f->ctype, f->name, f->count);
+    else              buf_printf(b, "    %s %s;\n", f->ctype, f->name);
+  }
+  buf_puts(b, "};\n\n");
+  buf_puts(b, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n");
+  buf_printf(b, "    __uint(max_entries, %s);\n", s->ringbuf_size);
+  buf_printf(b, "} %s_%s SEC(\".maps\");\n", unit, s->map_suffix);
 }
 
 /* ---------- types (CcTy mirrors upstream types.h; Stage 2 reads it directly
@@ -205,9 +248,9 @@ typedef struct {
   /* class ivar tables (for emit_ivar_maps), one entry per class. */
   int ncls; char **cls_names; char **cls_ivar_names; char **cls_ivar_types;
   char **cls_parents;          /* class superclass (BPF_SchedExt etc.), one per class */
-  /* NOTE: top-level ivars are no longer carried in the IR -- Stage 2 derives
-   * them from an AST scan (cc_collect_ivar_names), since the upstream C
-   * compiler does not emit @toplevel_ivar_names. */
+  /* NOTE: top-level ivars are no longer carried in the IR -- Stage 2
+   * derives them from an AST scan (cc_collect_ivar_names), since the
+   * upstream C compiler does not emit @toplevel_ivar_names. */
 } IR;
 
 #ifndef SPNL_INPROCESS  /* text IR/AST parsers -- Stage 1 / oracle build only */
@@ -281,7 +324,7 @@ static char *cc_safe_dup(const char *name);   /* C-keyword sanitizer (defined be
 static void method_set_params(Method *me, const char *pn, const char *pt) {
   if (!pn || !pn[0]) return;
   me->nparams = split(pn, ',', &me->pnames);
-  /* Sanitize param names at the parse leaf so every downstream use
+  /* sanitize param names at the parse leaf so every downstream use
    * (ctx struct field, inner signature, syscall wrapper `ctx->p`) is C-safe.
    * split() returns interior pointers into one buffer, so don't free the old
    * pname (the buffer is leaked wholesale -- this is a one-shot tool). */
@@ -341,7 +384,7 @@ static void ir_parse(const char *text, IR *ir) {
     char **bb; int nb = (c < n_cmb) ? split(cmb[c], ';', &bb) : 0;
     char **pp; int npp = (c < n_cmp)  ? split(pct_decode(cmp[c]),  '|', &pp)  : 0;
     char **qq; int nqq = (c < n_cmpt) ? split(pct_decode(cmpt[c]), '|', &qq) : 0;
-    /* A `class X < BPF::SchedExt/Qdisc/TcpCC` maps its methods to struct_ops
+    /* a `class X < BPF::SchedExt/Qdisc/TcpCC` maps its methods to struct_ops
      * members (synthesized top-level `<prefix>__<member>` names, cls cleared). */
     const char *parent = (ir->cls_parents && ir->cls_parents[c]) ? ir->cls_parents[c] : "";
     int so_kind = SO_NONE; const char *so_prefix = NULL;
@@ -491,16 +534,67 @@ static const int *nt_arr(AST *t, int id, const char *key, int *out_n) {
  * across its split codegen; same idiom). Set at the top of ebpf_codegen_program. */
 static const IR *g_ir = NULL;
 static const char *g_unit = "";   /* sanitized unit name, for per-unit map names */
+static int g_uses_sock_owner = 0;  /* unit uses sock_owner_set -> emit corr map + correlate emit_connect */
+static int g_uses_l7 = 0;          /* unit uses req_start/emit_l7 -> emit send-time correlation map */
+static int g_uses_http_l7 = 0;     /* unit uses http_req_start/http_resp_stash/http_emit -> HTTP L7 RED */
+static int g_uses_offcpu = 0;      /* unit uses offcpu_* -> off-CPU-during-request correlation */
+static int g_uses_dns_lat = 0;     /* unit uses dns_req_start/dns_resp_stash/dns_emit -> DNS RTT (txid-keyed) */
+static int g_uses_redis_l7 = 0;    /* unit uses redis_req_start/redis_resp_stash/redis_emit -> Redis L7 RED */
 static int g_if_counter = 0;   /* fresh temp counter (`fresh`), reset per method */
 static const Method *g_method = NULL;  /* method being lowered (for ivar map scope) */
 static Lines *g_body = NULL;   /* current method's line accumulator (Ruby @lines) */
+
+/* --target amp-m7. When set, ivar -> static-memory RMW at a
+ * baked carveout address and spnl_emit -> amp_emit() helper call, so the same
+ * body lowering emits an h2.c-shaped .bpf.c (no vmlinux/maps/SEC) that
+ * clang -target bpf compiles to bytecode for the micro-bpf ARMv7E-M AOT. */
+static int g_amp = 0;
+static char *g_amp_ivars[64];
+static int g_amp_nivars = 0;
+/* mirror of the fixed AMP ABI (spnl/amp_abi_imx95m7.h). Baking these
+ * constants into amp-m7 output makes blobs single-pass / firmware-independent
+ * (no per-build `nm` for the ivar carveout, no -DSPNL_AMP_IVARS_BASE override).
+ * KEEP IN SYNC with that header -- changing either value is an ABI-version bump.
+ * (Not #included to avoid adding -Iinclude to every codegen build site; the
+ * amp regression greps these values against the header, catching drift.) */
+#define AMP_ABI_VERSION_MIRROR 1u          /* = AMP_ABI_VERSION */
+#define AMP_IVARS_BASE_MIRROR  0x2003FF00u /* = AMP_IVARS_BASE (DTCM top - 256B) */
+static int amp_ivar_slot(const char *iv) {   /* iv keeps its '@' */
+  const char *bare = (iv[0] == '@') ? iv + 1 : iv;
+  for (int i = 0; i < g_amp_nivars; i++)
+    if (!strcmp(g_amp_ivars[i], bare)) return i;
+  if (g_amp_nivars >= 64) die("amp-m7: too many ivars (max 64)", bare);
+  g_amp_ivars[g_amp_nivars] = strdup(bare);
+  return g_amp_nivars++;
+}
+
+/* bpf_d_path is kernel-gated, and the gate is NOT a plain name list --
+ * Measurement shows lsm/file_open loads but lsm/file_permission is rejected ("helper call is
+ * not allowed in probe"), while fmod_ret/security_file_permission is OK. So only
+ * the hooks actually measured to load are permitted, and only those whose gated arg
+ * is a `struct file *`; nothing is guessed and nothing falls back silently. Shared by
+ * emit_path (statement) and path_eq (expression). */
+static const char *const CC_DPATH_OK[] = {
+  "lsm/file_open",                      /* measured: LOAD_OK */
+  "fmod_ret/security_file_open",        /* measured: LOAD_OK */
+  "fmod_ret/security_file_permission",  /* P7 measured: LOAD_OK */
+  NULL
+};
+/* path_eq stack budget. The BPF stack is 512B total and the path buffer is only
+ * one of the frame's locals. The real limit was found by raising this
+ * (override at build time to re-measure): buf<=256 loads, and the frame blows up
+ * past that. 256 is kept as the cap with headroom for the rest of the frame. */
+#ifndef CC_PATH_EQ_MAX
+#define CC_PATH_EQ_MAX 256
+#endif
 static int g_loop_counter = 0;     /* per-unit loop-callback id (cb names), not reset per method */
+static int g_pc_counter = 0;       /* per-unit path_contains callback/struct id (unit scope, not reset per method) */
 static Lines *g_deferred = NULL;   /* complete callback/struct blocks, emitted before the inners */
 static Lines *g_captures = NULL;   /* capture names active while lowering a loop-callback body */
 /* is `name` (already C-safe) an outer local captured by the current loop callback? */
 static int cc_is_capture(const char *name) { return g_captures && lines_has(g_captures, name); }
 
-/* Locals bound via `t = kptr(ptr, "struct")` -- `t.field` then reads via
+/* locals bound via `t = kptr(ptr, "struct")` -- `t.field` then reads via
  * BPF_CORE_READ on (struct <name> *)t. Reset per method. */
 #define MAX_KPTR 16
 static const char *g_kptr_names[MAX_KPTR];
@@ -550,6 +644,11 @@ static char *cc_qual_name(const Method *me) {
 /* ivar map name (Ruby ivar_map_name / top_ivar_map_name); `ivar` keeps its '@'. */
 static char *cc_ivar_map(const char *ivar) {
   const char *bare = (ivar[0] == '@') ? ivar + 1 : ivar;
+  if (g_amp) {
+    /* amp-m7: @x is a 32-bit word in the carveout at IVARS_BASE + 4*slot. The
+     * returned lvalue expression is used directly by cc_emit_ivar_read/write/rmw. */
+    return msprintf("(*(volatile __u32 *)(SPNL_AMP_IVARS_BASE + %du))", 4 * amp_ivar_slot(bare));
+  }
   if (g_method && g_method->cls) { char *lc = cc_lower(g_method->cls); char *r = msprintf("%s_at_%s", lc, bare); free(lc); return r; }
   return msprintf("%s_top_%s", g_unit, bare);
 }
@@ -569,8 +668,8 @@ static char *cc_sanitize(const char *s) {
   return out;
 }
 
-/* KNOWN_CONSTANTS subset: ConstantReadNode names the codegen resolves to a
- * literal int. */
+/* KNOWN_CONSTANTS subset: ConstantReadNode names the codegen
+ * resolves to a literal int. */
 static int cc_known_const(const char *name, long long *out) {
   static const struct { const char *n; long long v; } K[] = {
     {"XDP_ABORTED",0},{"XDP_DROP",1},{"XDP_PASS",2},{"XDP_TX",3},{"XDP_REDIRECT",4},
@@ -601,7 +700,7 @@ static const char *cc_macro_path(const char *path) {
 }
 
 static int cc_known_const(const char *name, long long *out);   /* defined below */
-/* Module-style constant path (XDP::PASS / IP::Proto::TCP) -> integer.
+/* module-style constant path (XDP::PASS / IP::Proto::TCP) -> integer.
  * Map the module path prefix to the flat constant prefix (Ruby CONSTANT_PATH_PREFIXES),
  * then resolve the flat name in KNOWN_CONSTANTS. */
 static int cc_const_path_value(const char *path, long long *out) {
@@ -640,7 +739,7 @@ static int cc_method_eligible(const Method *me) {
   return 1;
 }
 
-/* a same-unit :ebpf method by this name? (BPF-to-BPF call target). */
+/* a same-unit :ebpf method by this name? (a BPF-to-BPF call target). */
 static int cc_is_ebpf_method(const char *name) {
   if (!g_ir || !name) return 0;
   for (int i = 0; i < g_ir->n; i++)
@@ -650,7 +749,7 @@ static int cc_is_ebpf_method(const char *name) {
 
 /* pkt_* header-access builtins. Each lowers to a no-arg call
  * `spnl_<name>(ctx)` (XDP) or `spnl_tc_<name>(ctx)` (TC) backed by a __noinline
- * helper with verifier-safe bounds checks. Mirrors Ruby PKT_BUILTINS. */
+ * helper with bounds checks that satisfy the verifier. Mirrors Ruby PKT_BUILTINS. */
 static const char *PKT_BUILTINS[] = {
   "pkt_len", "pkt_eth_proto", "pkt_l4_proto", "pkt_ip4_src", "pkt_ip4_dst",
   "pkt_l4_sport", "pkt_l4_dport", "pkt_tcp_flags", "pkt_l4_payload_len",
@@ -681,7 +780,7 @@ static void cc_record_pkt(const char *name, int tc) {
   g_pkt_names[g_n_pkt] = canon; g_pkt_kinds[g_n_pkt] = bit; g_n_pkt++;
 }
 
-/* Per-flow conntrack maps, inferred from flow_get/set/del
+/* Roadmap #2: per-flow conntrack maps, inferred from flow_get/set/del
  * (:name, :field) usage. name -> sorted unique fields + ctx kinds used (bit0 xdp,
  * bit1 tc). Populated by a pre-scan, emitted as LRU_HASH + key-extract helpers. */
 #define MAX_FLOW_MAPS 8
@@ -882,7 +981,7 @@ static CExpr *cc_build_expr(AST *ast, int nid) {
     /* Build operands left-to-right via locals: cc_build_expr has side effects
        (it allocates the _pN ivar-lookup temporaries and emits their prelude
        lines), and C leaves the evaluation order of function arguments
-       unspecified — sequencing keeps the emitted output identical across
+       unspecified -- sequencing keeps the emitted output identical across
        compilers/architectures (gcc evaluates args L->R on arm64 but R->L on x86). */
     CExpr *lhs = cc_build_expr(ast, l);
     CExpr *rhs = cc_build_expr(ast, r);
@@ -933,6 +1032,7 @@ static CExpr *cc_core_read(const char *strct, char *ptr_text, char **fields, int
 /* @x read: emit `_kN`+lookup prelude into `pre`, return the read expression
  * "(_pN ? *_pN : 0)" (caller frees). Counter order: k, p. */
 static char *cc_emit_ivar_read(Lines *pre, const char *map) {
+  if (g_amp) { (void)pre; return strdup(map); }   /* map is the carveout lvalue expr */
   int kk = ++g_if_counter, pp = ++g_if_counter;
   lines_push(pre, msprintf("__u32 _k%d = 0;", kk));
   lines_push(pre, msprintf("__s64 *_p%d = bpf_map_lookup_elem(&%s, &_k%d);", pp, map, kk));
@@ -942,6 +1042,7 @@ static char *cc_emit_ivar_read(Lines *pre, const char *map) {
 /* @x = rhs: emit key + value-temp + update into `body`, return "_vN" (caller
  * frees). Counter order: k, v. */
 static char *cc_emit_ivar_write(Lines *body, const char *map, const char *rhs) {
+  if (g_amp) { lines_push(body, msprintf("%s = (%s);", map, rhs)); return strdup(map); }
   int kk = ++g_if_counter, vv = ++g_if_counter;
   lines_push(body, msprintf("__u32 _k%d = 0;", kk));
   lines_push(body, msprintf("__s64 _v%d = %s;", vv, rhs));
@@ -952,6 +1053,7 @@ static char *cc_emit_ivar_write(Lines *body, const char *map, const char *rhs) {
 /* @x op= rhs: lookup-compute-update into `body`, return "_vN" (caller frees).
  * Counter order: k, p, v. */
 static char *cc_emit_ivar_rmw(Lines *body, const char *map, const char *op, const char *rhs) {
+  if (g_amp) { lines_push(body, msprintf("%s = %s %s (%s);", map, map, op, rhs)); return strdup(map); }
   int kk = ++g_if_counter, pp = ++g_if_counter, vv = ++g_if_counter;
   lines_push(body, msprintf("__u32 _k%d = 0;", kk));
   lines_push(body, msprintf("__s64 *_p%d = bpf_map_lookup_elem(&%s, &_k%d);", pp, map, kk));
@@ -1007,8 +1109,8 @@ static char *cc_emit_queue_pop(void) {
   return msprintf("_qpop_ret%d", rv);
 }
 
-/* The common 16-byte event header: the 4 hdr.* assignments shared verbatim by
- * every ringbuf emit idiom (spnl_emit / emit_str|pair|3|4 / emit_argv / emit_comm).
+/* The 16-byte event header: the four hdr.* assignments shared verbatim by every
+ * ringbuf emit idiom (spnl_emit / emit_str|pair|3|4 / emit_argv / emit_comm).
  * `var` is the reserved-event pointer expr (e.g. "_e3"), `ind` the leading
  * indentation. Dedups what was 4 copies of the same 4 lines. */
 static void cc_push_evt_hdr(Lines *body, const char *ind, const char *var) {
@@ -1053,6 +1155,221 @@ static void cc_emit_flow_del(Lines *body, const char *mn) {
   int fk = ++g_if_counter;
   lines_push(body, msprintf("struct spnl_flow_%s_%s_k _fk%d = {};", g_unit, mn, fk));
   lines_push(body, msprintf("if (spnl_flow_%s_%s_key_%s(ctx, &_fk%d) == 0) bpf_map_delete_elem(&spnl_flow_%s_%s, &_fk%d);", g_unit, mn, kind, fk, g_unit, mn, fk));
+}
+
+/* enforce the bpf_d_path kernel gate (CC_DPATH_OK). Shared by
+ * path_eq / parent_path_eq. die() with the offending SEC. */
+static void cc_require_dpath_ok(const char *who) {
+  Attach a = {0};
+  (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
+  int ok = 0;
+  for (int i = 0; a.sec && CC_DPATH_OK[i]; i++)
+    if (!strcmp(a.sec, CC_DPATH_OK[i])) { ok = 1; break; }
+  if (!ok) {
+    char *msg = msprintf("%s: bpf_d_path is kernel-gated; measured-OK hooks are "
+                         "def lsm__file_open / fmod_ret__security_file_open / "
+                         "fmod_ret__security_file_permission (got SEC)", who);
+    die(msg, a.sec ? a.sec : "<none>");
+  }
+  if (a.sec) free(a.sec);
+}
+
+/* emit the path-compare into g_body and hand back the match expr in `b`.
+ * `pathexpr` is a `struct path *` expression (file's f_path, or parent's exe f_path).
+ * AOT: literal length + bytes known at compile time -> exact-sized stack buffer +
+ * unrolled byte compare, length-first for short-circuit. Buffer sized to the literal
+ * is the correct semantics (a longer real path yields -ENAMETOOLONG, and so no match). */
+static void cc_emit_path_eq(Buf *b, const char *pathexpr, const char *lit) {
+  size_t len = strlen(lit);
+  if (len == 0) die("path compare: empty path literal", NULL);
+  /* exact literal + NUL, rounded to 8 for stack alignment. Refuse long literals at
+   * compile time rather than emit a program clang/verifier rejects. */
+  size_t sz = ((len + 1 + 7) / 8) * 8;
+  if (sz > CC_PATH_EQ_MAX)
+    die("path compare: path literal too long for the BPF stack", lit);
+  int n = ++g_if_counter;
+  lines_push(g_body, msprintf("char _pb%d[%zu] = {0};", n, sz));
+  lines_push(g_body, msprintf("__s64 _pr%d = bpf_d_path(%s, _pb%d, sizeof(_pb%d));", n, pathexpr, n, n));
+  lines_push(g_body, msprintf("__s64 _pm%d = (_pr%d == %zu);", n, n, len + 1));
+  for (size_t i = 0; i < len; i++)
+    lines_push(g_body, msprintf("_pm%d = _pm%d && (_pb%d[%zu] == %d);", n, n, n, i, (int)(unsigned char)lit[i]));
+  buf_printf(b, "(_pm%d)", n);
+}
+
+/* emit a PREFIX path-compare into g_body; hand back the match expr in `b`.
+ * Sibling of cc_emit_path_eq, but the correctness constraint differs and drives
+ * the design:
+ *   - path_eq (exact): the matched path IS the literal (< 256B), so a small stack
+ *     buffer always fits.
+ *   - path_starts_with (prefix): the matched path is `prefix + arbitrary suffix`,
+ *     up to PATH_MAX (4096). bpf_d_path writes the WHOLE path and returns
+ *     -ENAMETOOLONG when the buffer is too small -- so a small buffer would make a
+ *     LONG path under the prefix FAIL to match = a deny/audit BYPASS (an attacker
+ *     evades with a long filename). So the buffer must hold a full PATH_MAX path.
+ * 4096 does NOT fit the 512B BPF stack, so we read into a per-unit PERCPU_ARRAY
+ * scratch (<unit>_path_scratch, one char[4096] slot; declared once per unit,
+ * gated on uses_path_scratch). bpf_map_lookup_elem yields a PTR_TO_MAP_VALUE of
+ * 4096 bytes; the unrolled `_buf[i]` reads (i < prefix_len <= 256 < 4096) are
+ * provably in-bounds so the verifier accepts them, and they are guarded by the
+ * NULL check on the lookup. Fails safe: a negative bpf_d_path return (or a path
+ * shorter than the prefix) makes the length test 0, and && short-circuits. */
+static void cc_emit_path_starts_with(Buf *b, const char *pathexpr, const char *lit) {
+  size_t len = strlen(lit);
+  if (len == 0) die("path prefix compare: empty path literal", NULL);
+  /* Cap the unrolled prefix length (consistent with path_eq's CC_PATH_EQ_MAX).
+   * The buffer is a 4096B map value, not the stack, so the wall here is the
+   * number of unrolled byte comparisons, not the frame size. */
+  if (len > CC_PATH_EQ_MAX)
+    die("path prefix compare: path literal too long (the cap is CC_PATH_EQ_MAX)", lit);
+  int n = ++g_if_counter;
+  lines_push(g_body, msprintf("__s64 _pm%d = 0;", n));
+  lines_push(g_body, msprintf("__u32 _pz%d = 0;", n));
+  lines_push(g_body, msprintf("char *_pbuf%d = bpf_map_lookup_elem(&%s_path_scratch, &_pz%d);", n, g_unit, n));
+  lines_push(g_body, msprintf("if (_pbuf%d) {", n));
+  lines_push(g_body, msprintf("    __s64 _pr%d = bpf_d_path(%s, _pbuf%d, 4096);", n, pathexpr, n));
+  /* path at least as long as the prefix (strlen+1 >= prefix_len+1); fails safe on
+   * -ENAMETOOLONG (< 0) and on paths shorter than the prefix. */
+  lines_push(g_body, msprintf("    _pm%d = (_pr%d >= %zu);", n, n, len + 1));
+  for (size_t i = 0; i < len; i++)
+    lines_push(g_body, msprintf("    _pm%d = _pm%d && (_pbuf%d[%zu] == %d);", n, n, n, i, (int)(unsigned char)lit[i]));
+  lines_push(g_body, msprintf("}"));
+  buf_printf(b, "(_pm%d)", n);
+}
+
+/* emit a SUBSTRING path-compare into g_body; hand back the match expr in `b`.
+ * The third of the path matchers: path_eq is exact, path_starts_with takes a
+ * prefix, and path_contains looks for the literal at ANY offset. A substring can sit
+ * anywhere up to PATH_MAX, so this is a sliding-window search over the whole path;
+ * a crafted long path with the substring near the end must NOT bypass the deny
+ * (no-bypass, same principle as path_starts_with's 4096B per-cpu buffer). A full
+ * unroll (4096 windows x N bytes) is verifier/code-size infeasible, so we bpf_loop
+ * over the window positions with the N-byte compare unrolled inside the callback.
+ *
+ * Verifier notes preserved from measurement:
+ *   - CONSTANT 4096 bpf_loop bound (bpf_loop needs a bounded scalar; the callback's
+ *     `if (i+N > plen) return 1` stops at the real end. _pr from bpf_d_path is NOT
+ *     range-tracked, so it can't be the loop bound).
+ *   - `& 4095` on every index makes buf[(i+j)&4095] provably in-bounds on the 4096B
+ *     map value (i<4096 logically, but the verifier needs the mask to prove it).
+ *   - RE-LOOKUP the scratch map inside the callback (don't stash the pointer in the
+ *     ctx) -- passing PTR_TO_MAP_VALUE through a struct field loses the bound. */
+static void cc_emit_path_contains(Buf *b, const char *pathexpr, const char *lit) {
+  size_t len = strlen(lit);
+  if (len == 0) die("path substring compare: empty path literal", NULL);
+  /* Same unrolled-compare cap as path_eq/path_starts_with: the buffer is a 4096B
+   * map value, so the wall is the number of unrolled byte comparisons, not frame. */
+  if (len > CC_PATH_EQ_MAX)
+    die("path substring compare: path literal too long (substr cap is CC_PATH_EQ_MAX)", lit);
+  int n = ++g_pc_counter;   /* unit-global unique: callback + struct live at unit scope */
+
+  /* deferred (unit scope, before the inners): the search-state ctx struct, then the
+   * bpf_loop callback that compares the N-byte window at offset i. */
+  {
+    Buf st; memset(&st, 0, sizeof st);
+    buf_printf(&st, "/* path_contains ctx: whole-path substring search state */\n");
+    buf_printf(&st, "struct %s_pc_ctx%d { __s64 plen; __s64 found; };\n", g_unit, n);
+    lines_push(g_deferred, st.p);
+  }
+  {
+    Buf cb; memset(&cb, 0, sizeof cb);
+    buf_printf(&cb, "/* path_contains callback: does the %zu-byte literal start at offset i? */\n", len);
+    buf_printf(&cb, "static long %s_pc_cb%d(__u32 i, void *ctx)\n{\n", g_unit, n);
+    buf_printf(&cb, "    struct %s_pc_ctx%d *c = ctx;\n", g_unit, n);
+    buf_printf(&cb, "    if ((__s64)i + %zu > c->plen) return 1;   /* window past end -> stop the loop */\n", len);
+    buf_printf(&cb, "    __u32 z = 0;\n");
+    buf_printf(&cb, "    char *buf = bpf_map_lookup_elem(&%s_path_scratch, &z);   /* re-lookup: fresh map-value bound */\n", g_unit);
+    buf_printf(&cb, "    if (!buf) return 1;\n");
+    buf_printf(&cb, "    __s64 m = 1;\n");
+    for (size_t j = 0; j < len; j++)
+      buf_printf(&cb, "    m = m && (buf[(i + %zu) & 4095] == %d);\n", j, (int)(unsigned char)lit[j]);
+    buf_printf(&cb, "    if (m) { c->found = 1; return 1; }   /* found -> stop early */\n");
+    buf_printf(&cb, "    return 0;\n}\n");
+    lines_push(g_deferred, cb.p);
+  }
+
+  /* call site: d_path the whole path into the scratch map, then bpf_loop the search
+   * with a CONSTANT 4096 bound (the callback breaks early at the real path end). */
+  lines_push(g_body, msprintf("__s64 _found%d = 0;", n));
+  lines_push(g_body, strdup("{"));
+  lines_push(g_body, msprintf("    __u32 _z%d = 0;", n));
+  lines_push(g_body, msprintf("    char *_buf%d = bpf_map_lookup_elem(&%s_path_scratch, &_z%d);", n, g_unit, n));
+  lines_push(g_body, msprintf("    if (_buf%d) {", n));
+  lines_push(g_body, msprintf("        __s64 _pr%d = bpf_d_path(%s, _buf%d, 4096);", n, pathexpr, n));
+  lines_push(g_body, msprintf("        if (_pr%d > %zu) {", n, len));   /* path at least as long as the literal */
+  lines_push(g_body, msprintf("            struct %s_pc_ctx%d _c%d = {};", g_unit, n, n));
+  lines_push(g_body, msprintf("            _c%d.plen = _pr%d - 1;", n, n));
+  lines_push(g_body, msprintf("            _c%d.found = 0;", n));
+  lines_push(g_body, msprintf("            bpf_loop(4096, &%s_pc_cb%d, &_c%d, 0);", g_unit, n, n));
+  lines_push(g_body, msprintf("            _found%d = _c%d.found;", n, n));
+  lines_push(g_body, strdup("        }"));
+  lines_push(g_body, strdup("    }"));
+  lines_push(g_body, strdup("}"));
+  buf_printf(b, "(_found%d)", n);
+}
+
+/* --------: tcp_sock field accessors ----------
+ * Production port of the Ruby oracle (codegen_bpf.rb TCP_SOCK_READERS/WRITERS/
+ * ADDERS + the `sk.<field>` dot sugar). Valid only inside a
+ * struct_ops/tcp_congestion_ops member (SO_TCP_CC), where the kernel hands us a
+ * TRUSTED `struct sock *` -- so we DIRECT-DEREF the field (NOT BPF_CORE_READ),
+ * mirroring how the kernel TCP stack itself touches these fields. The emitted C
+ * matches emit_tcp_sock_read/assign/compound byte-for-byte:
+ *   read     : ((__s64)((struct tcp_sock *)(unsigned long)(<sk>))->F)
+ *   assign   : ((struct tcp_sock *)(unsigned long)(<sk>))->F = (__u32)(<v>);
+ *   compound : ((struct tcp_sock *)(unsigned long)(<sk>))->F += (__u32)(<v>); */
+/* tcp_cc context = the method is a tcp_congestion_ops member. Mirror the Ruby
+ * oracle's detect_attach(method_name): a NAME-prefix check ("tcp_cc__"), not the
+ * class-derived so_kind. This covers BOTH surfaces -- `class X < BPF::TcpCC`
+ * (so_kind set, name synthesized to tcp_cc__<member>) and the top-level
+ * `def tcp_cc__<member>` form (so_kind unset but the name already carries the
+ * prefix, e.g. examples/observability/tcp_cc_reno.rb). */
+static int cc_in_tcp_cc(void) {
+  return g_method && g_method->name && !strncmp(g_method->name, "tcp_cc__", 8);
+}
+
+static const char *cc_tcp_sock_reader_field(const char *name) {   /* tcp_sock_<field>(sk) */
+  if (!name) return NULL;
+  if (!strcmp(name, "tcp_sock_snd_cwnd"))       return "snd_cwnd";
+  if (!strcmp(name, "tcp_sock_snd_ssthresh"))   return "snd_ssthresh";
+  if (!strcmp(name, "tcp_sock_snd_nxt"))        return "snd_nxt";
+  if (!strcmp(name, "tcp_sock_snd_una"))        return "snd_una";
+  if (!strcmp(name, "tcp_sock_packets_out"))    return "packets_out";
+  if (!strcmp(name, "tcp_sock_delivered"))      return "delivered";
+  if (!strcmp(name, "tcp_sock_snd_cwnd_cnt"))   return "snd_cwnd_cnt";
+  if (!strcmp(name, "tcp_sock_snd_cwnd_clamp")) return "snd_cwnd_clamp";
+  if (!strcmp(name, "tcp_sock_prior_cwnd"))     return "prior_cwnd";
+  return NULL;
+}
+static const char *cc_tcp_sock_writer_field(const char *name) {   /* tcp_sock_<field>_set(sk, v) */
+  if (!name) return NULL;
+  if (!strcmp(name, "tcp_sock_snd_cwnd_set"))     return "snd_cwnd";
+  if (!strcmp(name, "tcp_sock_snd_ssthresh_set")) return "snd_ssthresh";
+  if (!strcmp(name, "tcp_sock_snd_cwnd_cnt_set")) return "snd_cwnd_cnt";
+  return NULL;
+}
+static const char *cc_tcp_sock_adder_field(const char *name) {   /* tcp_sock_<field>_add(sk, d) */
+  if (!name) return NULL;
+  if (!strcmp(name, "tcp_sock_snd_cwnd_add"))     return "snd_cwnd";
+  if (!strcmp(name, "tcp_sock_snd_cwnd_cnt_add")) return "snd_cwnd_cnt";
+  return NULL;
+}
+/* is `name` a bare tcp_sock field (dot form sk.<field>)? == the 9 reader fields. */
+static int cc_tcp_sock_is_field(const char *name) {
+  if (!name) return 0;
+  static const char *const F[] = {
+    "snd_cwnd", "snd_ssthresh", "snd_nxt", "snd_una", "packets_out",
+    "delivered", "snd_cwnd_cnt", "snd_cwnd_clamp", "prior_cwnd", NULL };
+  for (int i = 0; F[i]; i++) if (!strcmp(name, F[i])) return 1;
+  return 0;
+}
+static void cc_emit_tcp_sock_read(Buf *b, const char *field, const char *recv_expr) {
+  buf_printf(b, "((__s64)((struct tcp_sock *)(unsigned long)(%s))->%s)", recv_expr, field);
+}
+/* push the field write/compound side-effect line; c_op is "=", "+=" or "-=". */
+static void cc_emit_tcp_sock_write(Lines *body, const char *field, const char *c_op,
+                                   const char *recv_expr, const char *val_expr) {
+  lines_push(body, msprintf("((struct tcp_sock *)(unsigned long)(%s))->%s %s (__u32)(%s);",
+                            recv_expr, field, c_op, val_expr));
 }
 
 /* lower an expression node -> append its C text to `b`. Stage-1 subset. */
@@ -1150,6 +1467,18 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
             return;
           }
           free(rs);
+        }
+        /* sk.<field> dot-read sugar (tcp_cc context) -> direct deref of the
+         * trusted struct_ops `sk`. Arrives as a CallNode: receiver=sk, name=<field>,
+         * no args. Mirrors codegen_bpf.rb try_tcp_sock_dot_call (reader branch). */
+        if (cc_in_tcp_cc() && cc_tcp_sock_is_field(name)) {
+          int args_id = nt_ref(ast, nid, "arguments");
+          int na = 0; if (args_id >= 0) nt_arr(ast, args_id, "arguments", &na);
+          if (na != 0) die("sk.<field> reader takes no args (Stage 1)", name);
+          char *rexpr = cc_expr_str(ast, recv);
+          cc_emit_tcp_sock_read(b, name, rexpr);
+          free(rexpr);
+          return;
         }
       }
     }
@@ -1278,7 +1607,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(oif);
       return;
     }
-    if (name && (!strcmp(name, "sk_lookup_tcp") || !strcmp(name, "sk_assign_tcp"))) {   /* socket lookup / steer */
+    if (name && (!strcmp(name, "sk_lookup_tcp") || !strcmp(name, "sk_assign_tcp"))) {
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 4) die("sk_lookup_tcp/sk_assign_tcp expects 4 args (saddr, daddr, sport, dport)", name);
@@ -1438,11 +1767,21 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       return;
     }
     /* zero-arg kernel-context builtins (s64(...) wraps the cast in a paren). */
-    if (name && !strcmp(name, "ktime_ns"))     { buf_puts(b, "((__s64)bpf_ktime_get_ns())"); return; }
+    if (name && !strcmp(name, "ktime_ns"))     { buf_puts(b, g_amp ? "((__s64)amp_ktime())" : "((__s64)bpf_ktime_get_ns())"); return; }   /* amp -> PHC helper (id 2) */
     if (name && (!strcmp(name, "pid") || !strcmp(name, "tgid")))
       { buf_puts(b, "((__s64)(bpf_get_current_pid_tgid() >> 32))"); return; }
     if (name && !strcmp(name, "tid"))          { buf_puts(b, "((__s64)(__u32)bpf_get_current_pid_tgid())"); return; }
     if (name && !strcmp(name, "cpu_id"))        { buf_puts(b, "((__s64)bpf_get_smp_processor_id())"); return; }
+    /* cgroup_id -- the current cgroup id (= kernfs id / cgroup-dir inode) for
+     * k8s pod correlation. In process-context hooks (kprobe/tracepoint/LSM/fmod_ret)
+     * it returns the id of the task's memory-cgroup dir under the v2 hierarchy, i.e.
+     * .../kubepods/.../pod<UID>/<container-id>, which userspace maps to the pod. */
+    if (name && !strcmp(name, "cgroup_id"))     { buf_puts(b, "((__s64)bpf_get_current_cgroup_id())"); return; }
+    /* ppid -- the calling process's PARENT tgid. Scalar read, so BPF_CORE_READ
+     * (probe_read; untrusted-safe), not a direct dereference. That distinction matters. Returns the
+     * INIT-namespace pid (like all BPF pids); container /proc pids differ. */
+    if (name && !strcmp(name, "ppid"))
+      { buf_puts(b, "((__s64)BPF_CORE_READ(bpf_get_current_task_btf(), real_parent, tgid))"); return; }
     if (name && (!strcmp(name, "lat_start") || !strcmp(name, "lat_end"))) {   /* keyed latency */
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
@@ -1471,8 +1810,8 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(cs);
       return;
     }
-    if (name && !strcmp(name, "stack_id"))      { buf_puts(b, "((__s64)bpf_get_stackid(ctx, &bpf_stacks, 0))"); return; }   /* kernel stack */
-    if (name && !strcmp(name, "user_stack_id")) { buf_puts(b, "((__s64)bpf_get_stackid(ctx, &bpf_stacks, (1ULL << 8)))"); return; }  /* user stack */
+    if (name && !strcmp(name, "stack_id"))      { buf_puts(b, "((__s64)bpf_get_stackid(ctx, &bpf_stacks, 0))"); return; }   /* kernel */
+    if (name && !strcmp(name, "user_stack_id")) { buf_puts(b, "((__s64)bpf_get_stackid(ctx, &bpf_stacks, (1ULL << 8)))"); return; }  /* user */
     if (name && !strcmp(name, "divu")) {   /* (__s64)((__u64)(a) / (__u64)(b)) */
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
@@ -1482,6 +1821,16 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       ce_print(ce_paren(ce_cast("__s64", ce_paren(q))), b);
       return;
     }
+    if (name && !strcmp(name, "i32")) {   /* read a 32-bit kernel arg correctly.
+        kprobe args arrive as __s64 (full register); a 32-bit `int` arg (e.g. tcp_cleanup_rbuf's
+        `copied`) has UNDEFINED upper 32 bits on arm64, so `arg > 0` is unreliable. i32(x) truncates
+        to 32 bits and sign-extends: ((__s64)(__s32)(x)). Do NOT use on pointer/64-bit args. */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 1) die("i32 expects 1 arg (a 32-bit kernel value)", NULL);
+      ce_print(ce_paren(ce_cast("__s64", ce_cast("__s32", ce_paren(ce_raw(cc_expr_str(ast, ids[0])))))), b);
+      return;
+    }
     if (name && !strcmp(name, "comm_hash")) {   /* 16B comm on stack, return first 8 bytes */
       int ch = ++g_if_counter;
       lines_push(g_body, msprintf("char _ch%d[16] = {0};", ch));
@@ -1489,7 +1838,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       buf_printf(b, "((__s64)(*((__u64 *)_ch%d)))", ch);
       return;
     }
-    if (name && (!strcmp(name, "xsk_redirect") || !strcmp(name, "dev_redirect"))) {   /* AF_XDP / DEVMAP redirect */
+    if (name && (!strcmp(name, "xsk_redirect") || !strcmp(name, "dev_redirect"))) {
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 1) die("xsk_redirect/dev_redirect expects 1 arg", name);
@@ -1499,7 +1848,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(q);
       return;
     }
-    if (name && !strcmp(name, "fifo_pop"))  { buf_puts(b, "spnl_fifo_pop()"); return; }   /* QUEUE map pop */
+    if (name && !strcmp(name, "fifo_pop"))  { buf_puts(b, "spnl_fifo_pop()"); return; }
     if (name && !strcmp(name, "lifo_pop"))  { buf_puts(b, "spnl_lifo_pop()"); return; }
     if (name && (!strcmp(name, "fifo_push") || !strcmp(name, "lifo_push"))) {
       int args_id = nt_ref(ast, nid, "arguments");
@@ -1510,7 +1859,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(v);
       return;
     }
-    if (name && !strcmp(name, "sock_addr_ip4"))  { buf_puts(b, "((__s64)(__u32)__builtin_bswap32(ctx->user_ip4))"); return; }   /* sock_addr */
+    if (name && !strcmp(name, "sock_addr_ip4"))  { buf_puts(b, "((__s64)(__u32)__builtin_bswap32(ctx->user_ip4))"); return; }
     if (name && !strcmp(name, "sock_addr_port")) { buf_puts(b, "((__s64)(__u32)__builtin_bswap16((__u16)ctx->user_port))"); return; }
     if (name && (!strcmp(name, "mim_inc") || !strcmp(name, "mim_get"))) {   /* map-in-map */
       int args_id = nt_ref(ast, nid, "arguments");
@@ -1530,7 +1879,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(pid);
       return;
     }
-    if (name && !strcmp(name, "task_load")) { buf_puts(b, "spnl_task_load()"); return; }   /* per-task local storage */
+    if (name && !strcmp(name, "task_load")) { buf_puts(b, "spnl_task_load()"); return; }
     if (name && (!strcmp(name, "task_store") || !strcmp(name, "task_incr") || !strcmp(name, "task_swap"))) {
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
@@ -1558,6 +1907,103 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       free(r);
       return;
     }
+    /* path_eq(file, "/usr/bin/curl") -- compare a `struct file *`'s full path
+     * against a compile-time literal. An expression (so it can drive `if`), unlike
+     * emit_path which is a statement.
+     *
+     * AOT is the whole trick: the literal's length and bytes are known at compile
+     * time, so this lowers to an exactly-sized stack buffer + an unrolled byte
+     * compare. Tetragon has to carry a string-map/LPM-trie machine because it
+     * cannot recompile per policy; spinel-ebpf burns the literal into the program.
+     *
+     * Buffer sizing (measured): bpf_d_path memmoves the result to buf[0] and
+     * returns strlen+1. Sizing the buffer to just the literal is not a limitation
+     * but the correct semantics -- a real path longer than the literal makes
+     * bpf_d_path fail (-ENAMETOOLONG) => no match, which is what we want anyway. */
+    if (name && !strcmp(name, "path_eq")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 2) die("path_eq expects (file, \"/literal/path\")", NULL);
+      /* nt_str already yields decoded bytes in both builds: the text-mode AST
+       * parser runs cc_unescape() on S-fields, and the in-process build reads the
+       * upstream NodeTable directly. Decoding here would double-decode. */
+      const char *lit = nt_str(ast, ids[1], "content");
+      if (!lit)
+        die("path_eq: the path must be a string literal (it is compiled into the compare)", NULL);
+      cc_require_dpath_ok("path_eq");
+      char *fexpr = cc_expr_str(ast, ids[0]);
+      /* the file's path: &((struct file *)file)->f_path */
+      char *pathexpr = msprintf("&((struct file *)(unsigned long)(%s))->f_path", fexpr);
+      cc_emit_path_eq(b, pathexpr, lit);
+      free(pathexpr); free(fexpr);
+      return;
+    }
+    /* path_starts_with(file, "/etc/secret/") -- does a `struct file *`'s full
+     * path begin with a compile-time literal PREFIX? The prefix sibling of path_eq
+     *: an expression (drives `if`), same bpf_d_path kernel gate. Because a
+     * matching path can be up to PATH_MAX long (prefix + suffix), it reads into a
+     * per-CPU 4096B scratch map, not a stack buffer (a small buffer would MISS long
+     * paths under the prefix = a bypass). See cc_emit_path_starts_with. */
+    if (name && !strcmp(name, "path_starts_with")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 2) die("path_starts_with expects (file, \"/literal/prefix/\")", NULL);
+      const char *lit = nt_str(ast, ids[1], "content");
+      if (!lit)
+        die("path_starts_with: the prefix must be a string literal (it is compiled into the compare)", NULL);
+      cc_require_dpath_ok("path_starts_with");
+      char *fexpr = cc_expr_str(ast, ids[0]);
+      char *pathexpr = msprintf("&((struct file *)(unsigned long)(%s))->f_path", fexpr);
+      cc_emit_path_starts_with(b, pathexpr, lit);
+      free(pathexpr); free(fexpr);
+      return;
+    }
+    /* path_contains(file, "/.ssh/") -- does a `struct file *`'s full path
+     * contain a compile-time literal SUBSTRING at ANY offset? The substring sibling
+     * of path_eq (exact) / path_starts_with (prefix); same bpf_d_path
+     * kernel gate. Because the literal can sit anywhere up to PATH_MAX, it is a
+     * whole-path sliding search via bpf_loop over the 4096 window positions (reading
+     * into the same per-CPU 4096B scratch as path_starts_with) -- a long path with the
+     * substring near the end must NOT bypass the deny. See cc_emit_path_contains. */
+    if (name && !strcmp(name, "path_contains")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 2) die("path_contains expects (file, \"/literal/substr/\")", NULL);
+      const char *lit = nt_str(ast, ids[1], "content");
+      if (!lit)
+        die("path_contains: the substring must be a string literal (it is compiled into the compare)", NULL);
+      cc_require_dpath_ok("path_contains");
+      char *fexpr = cc_expr_str(ast, ids[0]);
+      char *pathexpr = msprintf("&((struct file *)(unsigned long)(%s))->f_path", fexpr);
+      cc_emit_path_contains(b, pathexpr, lit);
+      free(pathexpr); free(fexpr);
+      return;
+    }
+    /* parent_path_eq("/usr/bin/curl") -- compare the CALLING process's PARENT
+     * executable path against a literal. The parent version of path_eq;
+     * Tetragon's matchParentBinaries equivalent.
+     *
+     * The hop chain t->real_parent->mm->exe_file->f_path uses DIRECT DEREF, not
+     * BPF_CORE_READ: bpf_d_path needs a trusted/rcu pointer, and the trusted-ness
+     * of bpf_get_current_task_btf() propagates through direct field derefs but is
+     * lost through BPF_CORE_READ (which returns a scalar). This is the crux:
+     * scalar reads (ppid) use BPF_CORE_READ, path reads (d_path) use direct deref. */
+    if (name && !strcmp(name, "parent_path_eq")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 1) die("parent_path_eq expects (\"/literal/path\")", NULL);
+      const char *lit = nt_str(ast, ids[0], "content");
+      if (!lit)
+        die("parent_path_eq: the path must be a string literal", NULL);
+      cc_require_dpath_ok("parent_path_eq");
+      int pt = ++g_if_counter;
+      lines_push(g_body, msprintf("struct task_struct *_pt%d = bpf_get_current_task_btf();", pt));
+      /* direct deref chain (keeps trusted-ness for bpf_d_path) */
+      char *pathexpr = msprintf("&_pt%d->real_parent->mm->exe_file->f_path", pt);
+      cc_emit_path_eq(b, pathexpr, lit);
+      free(pathexpr);
+      return;
+    }
     if (name && cc_pkt_canon(name)) {   /* pkt_* header access */
       Attach a = {0}; AttachKind k = g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE;
       if (a.sec) free(a.sec);
@@ -1567,6 +2013,20 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       cc_record_pkt(name, is_tc);
       buf_printf(b, "%s_%s(ctx)", is_tc ? "spnl_tc" : "spnl", name);
       return;
+    }
+    /* tcp_sock_<field>(sk) flat reader -> field value (expression). */
+    {
+      const char *rf = cc_tcp_sock_reader_field(name);
+      if (rf) {
+        if (!cc_in_tcp_cc()) die("tcp_sock_* is only valid inside tcp_cc__<member> methods", name);
+        int args_id = nt_ref(ast, nid, "arguments");
+        int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+        if (na != 1) die("tcp_sock_<field>(sk) expects 1 arg", name);
+        char *sk = cc_expr_str(ast, ids[0]);
+        cc_emit_tcp_sock_read(b, rf, sk);
+        free(sk);
+        return;
+      }
     }
     die("CallNode not yet ported (Stage 1)", name ? name : "?");
   }
@@ -1793,6 +2253,23 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
     }
     return last;
   }
+  if (!strcmp(ty, "CallOperatorWriteNode")) {   /* sk.<field> += v / -= v (dot compound) */
+    int recv = nt_ref(ast, nid, "receiver");
+    const char *read_name = nt_str(ast, nid, "name");   /* upstream stores read_name under "name" */
+    const char *op = nt_str(ast, nid, "binary_operator");
+    int v = nt_ref(ast, nid, "value");
+    if (recv < 0) die("CallOperatorWriteNode missing receiver (Stage 1)", NULL);
+    if (v < 0 || !read_name || !op)
+      die("CallOperatorWriteNode missing value/name/operator (Stage 1)", read_name ? read_name : "?");
+    if (!cc_in_tcp_cc() || !cc_tcp_sock_is_field(read_name))
+      die("op-write only supported on tcp_sock fields in tcp_cc context (Stage 1)", read_name);
+    const char *c_op = !strcmp(op, "+") ? "+=" : (!strcmp(op, "-") ? "-=" : NULL);
+    if (!c_op) die("tcp_sock <field> op= : only += / -= supported (Stage 1)", op);
+    char *rexpr = cc_expr_str(ast, recv), *ve = cc_expr_str(ast, v);
+    cc_emit_tcp_sock_write(body, read_name, c_op, rexpr, ve);
+    free(rexpr); free(ve);
+    return strdup("0");
+  }
   if (!strcmp(ty, "CallNode")) {
     const char *name = nt_str(ast, nid, "name");
     if (name && !strcmp(name, "spnl_emit")) {   /* ringbuf reserve/submit block */
@@ -1800,6 +2277,11 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 1) die("spnl_emit expects 1 arg", NULL);
       char *val = cc_expr_str(ast, ids[0]);
+      if (g_amp) {   /* amp-m7: publish to the ring via the runtime helper */
+        lines_push(body, msprintf("amp_emit(%s);", val));
+        free(val);
+        return strdup("0");
+      }
       int e = ++g_if_counter;
       lines_push(body, strdup("{"));
       lines_push(body, msprintf("    struct %s_event *_e%d = bpf_ringbuf_reserve(&%s_events, sizeof(*_e%d), 0);", g_unit, e, g_unit, e));
@@ -1912,7 +2394,7 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       free(pid);
       return strdup("0");
     }
-    if (name && (!strcmp(name, "leak_record") || !strcmp(name, "leak_forget"))) {   /* memleak track */
+    if (name && (!strcmp(name, "leak_record") || !strcmp(name, "leak_forget"))) {
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       int want = !strcmp(name, "leak_record") ? 3 : 1;
@@ -1976,6 +2458,473 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       cc_emit_flow_del(body, mn);
       return strdup("0");
     }
+    if (name && !strcmp(name, "emit_path")) {   /* full path via bpf_d_path */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 1) die("emit_path expects 1 arg (a `struct file *` attach param)", NULL);
+      /* bpf_d_path is kernel-gated -- see CC_DPATH_OK (shared with path_eq). */
+      Attach a = {0};
+      (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
+      int allowed = 0;
+      for (int i = 0; a.sec && CC_DPATH_OK[i]; i++)
+        if (!strcmp(a.sec, CC_DPATH_OK[i])) { allowed = 1; break; }
+      if (!allowed)
+        die("emit_path: bpf_d_path is kernel-gated; measured-OK hooks are "
+            "def lsm__file_open / fmod_ret__security_file_open / "
+            "fmod_ret__security_file_permission (got SEC)", a.sec ? a.sec : "<none>");
+      if (a.sec) free(a.sec);
+      char *fexpr = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      lines_push(body, strdup("{"));
+      lines_push(body, msprintf("    struct %s_str_event *_pe%d = bpf_ringbuf_reserve(&%s_str_events, sizeof(*_pe%d), 0);", g_unit, e, g_unit, e));
+      lines_push(body, msprintf("    if (_pe%d) {", e));
+      { char *var = msprintf("_pe%d", e); cc_push_evt_hdr(body, "        ", var); free(var); }
+      /* measured: bpf_d_path writes back-to-front then memmoves the result to
+       * buf[0] and returns strlen+1, but the pre-memmove copy is left in the tail.
+       * Zero first so nothing past the NUL is emitted from the reserved ringbuf slot. */
+      lines_push(body, msprintf("        __builtin_memset(_pe%d->str, 0, sizeof(_pe%d->str));", e, e));
+      lines_push(body, msprintf("        bpf_d_path(&((struct file *)(unsigned long)(%s))->f_path, _pe%d->str, sizeof(_pe%d->str));", fexpr, e, e));
+      lines_push(body, msprintf("        bpf_ringbuf_submit(_pe%d, 0);", e));
+      lines_push(body, strdup("    }"));
+      lines_push(body, strdup("}"));
+      free(fexpr);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_parent_path")) {   /* parent process exe path via bpf_d_path */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      (void)ids;
+      if (na != 0) die("emit_parent_path expects no args (reads current task's parent)", NULL);
+      /* same bpf_d_path kernel gate as emit_path. */
+      Attach a = {0};
+      (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
+      int allowed = 0;
+      for (int i = 0; a.sec && CC_DPATH_OK[i]; i++)
+        if (!strcmp(a.sec, CC_DPATH_OK[i])) { allowed = 1; break; }
+      if (!allowed)
+        die("emit_parent_path: bpf_d_path is kernel-gated; measured-OK hooks are "
+            "def lsm__file_open / fmod_ret__security_file_open / "
+            "fmod_ret__security_file_permission (got SEC)", a.sec ? a.sec : "<none>");
+      if (a.sec) free(a.sec);
+      int e = ++g_if_counter;
+      /* direct-deref chain: task->real_parent->mm->exe_file->f_path stays trusted for bpf_d_path */
+      lines_push(body, strdup("{"));
+      lines_push(body, msprintf("    struct task_struct *_pt%d = bpf_get_current_task_btf();", e));
+      lines_push(body, msprintf("    struct %s_str_event *_pe%d = bpf_ringbuf_reserve(&%s_str_events, sizeof(*_pe%d), 0);", g_unit, e, g_unit, e));
+      lines_push(body, msprintf("    if (_pe%d) {", e));
+      { char *var = msprintf("_pe%d", e); cc_push_evt_hdr(body, "        ", var); free(var); }
+      lines_push(body, msprintf("        __builtin_memset(_pe%d->str, 0, sizeof(_pe%d->str));", e, e));
+      lines_push(body, msprintf("        bpf_d_path(&_pt%d->real_parent->mm->exe_file->f_path, _pe%d->str, sizeof(_pe%d->str));", e, e, e));
+      lines_push(body, msprintf("        bpf_ringbuf_submit(_pe%d, 0);", e));
+      lines_push(body, strdup("    }"));
+      lines_push(body, strdup("}"));
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "sock_owner_set")) {   /* record sock ptr -> owning process (process ctx) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* sock_owner_set(sk): called in a process-context probe (e.g. kprobe/tcp_v4_connect).
+       * Keys the correlation map by sock ptr and stores the current pid/comm. emit_connect
+       * (softirq ESTABLISHED, where the current task is swapper/0) recovers the owner via
+       * this map. Same sock ptr appears as skaddr in inet_sock_set_state (verified). */
+      if (na != 1) die("sock_owner_set expects (sk) -- the struct sock * from a connect probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_sock_owner_set, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk} }, 3);
+      free(sk);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "req_start")) {   /* record L7 request send time keyed by sock */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* req_start(sk): in a send probe (kprobe/tcp_sendmsg, process ctx). Records send ktime +
+       * pid/comm keyed by sock, but ONLY for the first send of a request (does not overwrite
+       * mid-request bursts). emit_l7 (in the recv probe) computes the round-trip and deletes.
+       * A second send overlapping an open request marks outstanding+=1 / mux=1 (* multiplexing guard -- see emit_l7). */
+      if (na != 1) die("req_start expects (sk) -- the struct sock * from a send probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_req_start, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk} }, 3);
+      free(sk);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_l7")) {   /* emit L7 round-trip latency (send->recv) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* emit_l7(sk): in a recv probe (kprobe/tcp_cleanup_rbuf, process ctx, fires AFTER data is
+       * copied to the app = "response visible"). Looks up req_start[sk]; if present, packs one
+       * record {process, peer, start_ktime, duration_ns} and deletes the entry (next send = new
+       * request). duration = time-to-first-response-byte = L7 round-trip (verified).
+       * mux guard (in the template): once >1 requests were ever outstanding on this sock
+       * (HTTP/2 / pipelining) it is poisoned (mux=1) -- control-frame sends would restart a bogus
+       * 1-outstanding measurement, so the whole connection is suppressed for its life (drain
+       * outstanding, keep the poisoned entry, never emit garbage). HTTP/1.x keep-alive never
+       * multiplexes, so it keeps emitting clean per-request RTT. */
+      if (na != 1) die("emit_l7 expects (sk) -- the struct sock * from a recv probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_emit_l7, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk} }, 3);
+      free(sk);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "http_req_start")) {   /* capture HTTP request (method/path) at send */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* http_req_start(sk, msg): in kprobe/tcp_sendmsg (process ctx). Reads the first 64 bytes of the
+       * send buffer; if it looks like an HTTP request (real method, NOT an "HTTP" response), stores
+       * {start, pid, comm, req[64]} keyed by sock (first request send only). Server-side response-sends
+       * start with "HTTP" so they never match -> only the CLIENT request is captured. QNAME-style:
+       * kernel does a bounded copy, method/path parsing is done in userspace. */
+      if (na != 2) die("http_req_start expects (sk, msg) from a send probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_http_req_start, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg} }, 4);
+      free(sk); free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "http_resp_stash")) {   /* stash recv buffer at recvmsg entry */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* http_resp_stash(sk, msg): in kprobe/tcp_recvmsg ENTRY. The response bytes are only in the user
+       * buffer AFTER the copy, so we stash {sk, buffer-start} keyed by tid and read it in the kretprobe
+       * (tcp_recvmsg is static-linkage so fexit is denied). */
+      if (na != 2) die("http_resp_stash expects (sk, msg) from a recv probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_http_resp_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg} }, 4);
+      free(sk); free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "http_emit")) {   /* emit HTTP L7 RED span (method/path/status/duration) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* http_emit(ret): in kretprobe/tcp_recvmsg. Reads the stashed recv buffer (response bytes now
+       * copied), correlates with the pending request by sock, and emits ONE combined record
+       * {process, peer, start_ktime, duration, req[64], resp[16]}. Parsing (method/path/status) is
+       * done in userspace. ret (int) uses i32-style read for the >0 guard. */
+      if (na != 1) die("http_emit expects (ret) -- the tcp_recvmsg return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_http_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "redis_req_start")) {   /* capture Redis (RESP) request at send */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* redis_req_start(sk, msg, size): in kprobe/tcp_sendmsg (process ctx). Mirrors http_req_start but
+       * the filter is a RESP command sniff (spnl_is_redis_cmd: array-of-bulk-strings "*<digit>").
+       * Redis messages are SHORT ("SET foo bar" = 31B), so a fixed 64B bpf_probe_read_user -EFAULTs
+       * past the send buffer (HTTP never hit this -- requests are long). Bound the read to the actual
+       * send length (`size` = tcp_sendmsg PARM3, the reliable count -- msg_iter.count read wrong here),
+       * like emit_tcp_stream. Stores {start, pid, comm, req[64], cgid} keyed by sock (first send
+       * only). Command parsing is userspace. */
+      if (na != 3) die("redis_req_start expects (sk, msg, size) from a tcp_sendmsg probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      char *size = cc_expr_str(ast, ids[2]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_redis_req_start, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg}, {"@SIZE@", size} }, 5);
+      free(sk); free(msg); free(size);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "redis_resp_stash")) {   /* stash recv buffer at recvmsg entry */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* redis_resp_stash(sk, msg): in kprobe/tcp_recvmsg ENTRY. Identical to http_resp_stash -- the reply
+       * bytes are only in the user buffer AFTER the copy, so stash {sk, buffer-start} by tid and read it
+       * in the kretprobe. */
+      if (na != 2) die("redis_resp_stash expects (sk, msg) from a recv probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_redis_resp_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg} }, 4);
+      free(sk); free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "redis_emit")) {   /* emit Redis L7 RED span (command/error/duration) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* redis_emit(ret): in kretprobe/tcp_recvmsg. Mirrors http_emit but the reply-type guard accepts any
+       * RESP reply prefix (+ - : $ *) instead of "HTTP". Emits ONE combined record
+       * {process, peer, start_ktime, duration, req[64], resp[16]}; command/error parsing is userspace.
+       * The reply read is bounded to the bytes received (ret): short replies like "+OK\r\n" (5B)
+       * would -EFAULT on a fixed 16B read past the recv buffer. */
+      if (na != 1) die("redis_emit expects (ret) -- the tcp_recvmsg return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_redis_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "ssl_req_start")) {   /* capture TLS-plaintext HTTP request at SSL_write */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* ssl_req_start(ssl, buf): in uprobe/SSL_write (process ctx). buf (PARM2) is the PLAINTEXT
+       * before encryption. Reuses the HTTP channel's http_pending map + spnl_is_http_req filter, keyed by the
+       * SSL* connection object (PARM1) instead of a sock. No peer (daddr/dport=0 -> userspace marks
+       * url.scheme=https). same parser, only the hook/key differ. */
+      if (na != 2) die("ssl_req_start expects (ssl, buf) from an SSL_write uprobe", NULL);
+      char *ssl = cc_expr_str(ast, ids[0]);
+      char *buf = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_ssl_req_start, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SSL@", ssl}, {"@BUF@", buf} }, 4);
+      free(ssl); free(buf);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "ssl_resp_stash")) {   /* stash SSL_read buffer at uprobe entry */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* ssl_resp_stash(ssl, buf): in uprobe/SSL_read ENTRY. The decrypted plaintext lands in buf only
+       * AFTER SSL_read returns, so stash {ssl, buf} by tid and read it in the uretprobe. */
+      if (na != 2) die("ssl_resp_stash expects (ssl, buf) from an SSL_read uprobe", NULL);
+      char *ssl = cc_expr_str(ast, ids[0]);
+      char *buf = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_ssl_resp_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SSL@", ssl}, {"@BUF@", buf} }, 4);
+      free(ssl); free(buf);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "ssl_emit")) {   /* emit TLS-plaintext HTTP L7 RED span at SSL_read return */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* ssl_emit(ret): in uretprobe/SSL_read. Reads the stashed (now-decrypted) buffer, correlates
+       * with the pending request by SSL*, and emits ONE combined record into the HTTP channel's http_events.
+       * daddr/dport/family = 0 (no sock) -> userspace sets url.scheme=https and omits peer. */
+      if (na != 1) die("ssl_emit expects (ret) -- the SSL_read return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_ssl_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "go_tls_write")) {   /* Go crypto/tls.(*Conn).Write plaintext -> request span */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* go_tls_write(conn, ptr, len): in uprobe/crypto/tls.(*Conn).Write (Go client, process ctx). The Go
+       * slice arg (b []byte) decomposes to ptr(=data)/len in registers; on arm64 PT_REGS_PARM reads them
+       *. ptr is the PLAINTEXT before encryption. Reads min(len, 64) bytes (bound by len,
+       * a fixed read -EFAULTs on short Go request buffers), and if it looks like an HTTP request emits ONE
+       * request-only http_event into the HTTP channel's http_events (method/path parsed in userspace; no sock ->
+       * daddr=0 -> url.scheme=https; status/duration=0 until (*Conn).Read is added).
+       * conn (PARM1) is the *Conn; unused here (request-only), kept for future response correlation. */
+      if (na != 3) die("go_tls_write expects (conn, ptr, len) from a Go crypto/tls.(*Conn).Write uprobe", NULL);
+      char *conn = cc_expr_str(ast, ids[0]);
+      char *ptr = cc_expr_str(ast, ids[1]);
+      char *len = cc_expr_str(ast, ids[2]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_go_tls_write, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@PTR@", ptr}, {"@LEN@", len} }, 4);
+      free(conn); free(ptr); free(len);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "go_tls_req")) {   /* Go crypto/tls.(*Conn).Write -> len-bound request stash (full RED) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* go_tls_req(conn, ptr, len): stash the request in http_pending keyed by conn (the *Conn), with a
+       * len-bounded read (fixed read -EFAULTs on short Go requests). The len-bound, Go-native
+       * request half of the full RED flow (paired with go_tls_resp_stash + go_tls_emit). */
+      if (na != 3) die("go_tls_req expects (conn, ptr, len) from a Go crypto/tls.(*Conn).Write uprobe", NULL);
+      char *conn = cc_expr_str(ast, ids[0]);
+      char *ptr = cc_expr_str(ast, ids[1]);
+      char *len = cc_expr_str(ast, ids[2]);
+      int e = ++g_if_counter; char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_go_tls_req, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@CONN@", conn}, {"@PTR@", ptr}, {"@LEN@", len} }, 5);
+      free(conn); free(ptr); free(len);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "go_tls_resp_stash")) {   /* Go (*Conn).Read entry -- stash recv buf by g register */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* go_tls_resp_stash(conn, ptr): in uprobe/(*Conn).Read ENTRY. The decrypted response lands in the
+       * buffer only AFTER Read returns, so stash {conn, ptr} keyed by the GOROUTINE (g register,
+       * ctx->regs[28]) -- not tid, which can migrate M during a blocking Read. Read it at the RET
+       * (go_tls_emit via go_uret). Needs ctx forwarded (uses_go_gptr). */
+      if (na != 2) die("go_tls_resp_stash expects (conn, ptr) from a Go (*Conn).Read uprobe", NULL);
+      char *conn = cc_expr_str(ast, ids[0]);
+      char *ptr = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter; char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_go_tls_resp_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@CONN@", conn}, {"@PTR@", ptr} }, 4);
+      free(conn); free(ptr);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "go_tls_emit")) {   /* Go (*Conn).Read RET (go_uret) -- correlate + full RED span */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* go_tls_emit(ret): at a (*Conn).Read RET (attached via go_uret). Reads the g register to find the
+       * stashed {conn, buf}, reads min(ret,16) of the response ("HTTP/1.1 NNN.."), correlates the request
+       * by conn (http_pending), and emits ONE full RED span (method/path + status + duration). */
+      if (na != 1) die("go_tls_emit expects (ret) -- the (*Conn).Read return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter; char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_go_tls_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "offcpu_recv_stash")) {   /* stash server recv buffer (request in) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* offcpu_recv_stash(sk, msg): kprobe/tcp_recvmsg entry on a SERVER. Stash the recv buffer by
+       * tid so offcpu_begin can read the request (method/path) at the kretprobe. */
+      if (na != 2) die("offcpu_recv_stash expects (sk, msg) from a recv probe", NULL);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_offcpu_recv_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@MSG@", msg} }, 3);
+      free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "offcpu_begin")) {   /* open the request window when the server got a request */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* offcpu_begin(ret): kretprobe/tcp_recvmsg. Read the stashed request bytes; if it is an HTTP
+       * request (spnl_is_http_req), open a per-tid off-CPU window {start, offcpu=0, req[64]}. The tid
+       * is the SERVER handler thread whose sleep/io/spin we then measure until the response send.
+       * hdr_ext also gets the request head (128B best-effort traceparent inheritance). */
+      if (na != 1) die("offcpu_begin expects (ret) -- the tcp_recvmsg return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_offcpu_begin, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "offcpu_account")) {   /* accumulate voluntary off-CPU per active window */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* offcpu_account(prev_pid, prev_state, next_pid): tp/sched/sched_switch. `ctx` is forwarded
+       * (uses_stack_trace). prev going off-CPU voluntarily (prev_state != 0) records the sleep start
+       * + the wait's kernel stack (why it sleeps); next coming back adds the delta. Only tids with an
+       * open window are accounted. */
+      if (na != 3) die("offcpu_account expects (prev_pid, prev_state, next_pid)", NULL);
+      char *pprev = cc_expr_str(ast, ids[0]);
+      char *pstate = cc_expr_str(ast, ids[1]);
+      char *pnext = cc_expr_str(ast, ids[2]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_offcpu_account, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@PPREV@", pprev}, {"@PSTATE@", pstate}, {"@PNEXT@", pnext} }, 5);
+      free(pprev); free(pstate); free(pnext);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "offcpu_emit")) {   /* close the window at response send, emit breakdown */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* offcpu_emit(sk, msg): kprobe/tcp_sendmsg (server sends the response). If a window is open for
+       * this tid and the buffer is an HTTP response, emit {method/path, status, duration, offcpu,
+       * wait_stack} and close. duration - offcpu = on-CPU. */
+      if (na != 2) die("offcpu_emit expects (sk, msg) from a send probe", NULL);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_offcpu_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@MSG@", msg} }, 3);
+      free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_connect")) {   /* packed connect event (process + remote + srtt) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* emit_connect(skaddr, daddr, dport, family, oldstate): one socket-state event
+       * becomes one packed record. A single tracepoint fire writes it atomically, so
+       * there is no way for separate string records to desync. The pid and comm are
+       * read internally; srtt_us comes from the socket through CO-RE, since the
+       * pointer is untrusted. The record is about the remote end, and the previous
+       * state is what lets userspace decide the direction
+       * the raw previous TCP state. A six-argument handler gets past the five-register limit through the caps struct. */
+      if (na != 7) die("emit_connect expects (skaddr, daddr, dport, family, oldstate, daddr6_hi, daddr6_lo)", NULL);
+      char *skaddr = cc_expr_str(ast, ids[0]);
+      char *daddr  = cc_expr_str(ast, ids[1]);
+      char *dport  = cc_expr_str(ast, ids[2]);
+      char *family = cc_expr_str(ast, ids[3]);
+      char *oldstate = cc_expr_str(ast, ids[4]);
+      char *daddr6_hi = cc_expr_str(ast, ids[5]);
+      char *daddr6_lo = cc_expr_str(ast, ids[6]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_emit_connect_head, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb} }, 2);
+      /* softirq ESTABLISHED for external connects runs as swapper/0; recover the
+       * real owner recorded at connect time (process ctx) by sock-ptr lookup. */
+      if (g_uses_sock_owner)
+        tpl_emit_lines(body, tpl_bi_emit_connect_owner, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SKADDR@", skaddr} }, 3);
+      tpl_emit_lines(body, tpl_bi_emit_connect_tail, (TplSlot[]){ {"@E@", _eb}, {"@SKADDR@", skaddr}, {"@DADDR@", daddr}, {"@DPORT@", dport}, {"@FAMILY@", family}, {"@OLDSTATE@", oldstate}, {"@DADDR6_HI@", daddr6_hi}, {"@DADDR6_LO@", daddr6_lo} }, 8);
+      free(skaddr); free(daddr); free(dport); free(family); free(oldstate); free(daddr6_hi); free(daddr6_lo);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_dns")) {   /* resolver-independent DNS query (socket :53) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* emit_dns(msg): the first 64 bytes of the DNS payload -- the header and the
+       * QNAME -- become one record. Turning the length-prefixed labels into a dotted
+       * name happens in userspace; walking them in the kernel makes verifier state
+       * explode. The pid and comm are read internally. Watching the socket rather
+       * than a resolver library is what catches a program with its own resolver. */
+      if (na != 1) die("emit_dns expects (msg) -- the udp_sendmsg msghdr", NULL);
+      char *msg = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_emit_dns, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@MSG@", msg} }, 3);
+      free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "dns_req_start")) {   /* record DNS query start keyed by (sock,txid) */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* dns_req_start(sk, msg): in kprobe/udp_sendmsg (process ctx, filter :53 in the probe). Reads the
+       * DNS transaction ID (payload bytes 0..1, big-endian) from the send buffer and records the send
+       * ktime keyed by (sock<<16 | txid) so A+AAAA on one socket stay distinct. dns_emit correlates. */
+      if (na != 2) die("dns_req_start expects (sk, msg) from a udp_sendmsg probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_dns_req_start, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg} }, 4);
+      free(sk); free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "dns_resp_stash")) {   /* stash DNS recv buffer at udp_recvmsg entry */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* dns_resp_stash(sk, msg): in kprobe/udp_recvmsg ENTRY. The response bytes are only in the user
+       * buffer AFTER the copy, so we stash {sk, buffer-start} keyed by tid and read it in the kretprobe
+       * (mirror of the HTTP channel's http_resp_stash). */
+      if (na != 2) die("dns_resp_stash expects (sk, msg) from a udp_recvmsg probe", NULL);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_dns_resp_stash, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg} }, 4);
+      free(sk); free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "dns_emit")) {   /* emit DNS response with RTT at udp_recvmsg return */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* dns_emit(ret): in kretprobe/udp_recvmsg. Reads the stashed recv buffer (response bytes now
+       * copied), takes the response transaction ID, correlates with the pending query by
+       * (sock<<16 | txid), and emits ONE dns_event {process, raw[64] (QNAME echoed in the response),
+       * duration_ns = RTT}. Reuses the dns_events ringbuf; the QNAME is parsed in userspace.
+       * ret (int) uses the i32-style read for the >0 guard. */
+      if (na != 1) die("dns_emit expects (ret) -- the udp_recvmsg return value", NULL);
+      char *ret = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_dns_emit, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@RET@", ret} }, 3);
+      free(ret);
+      return strdup("0");
+    }
     if (name && !strcmp(name, "emit_comm")) {   /* comm via str ringbuf */
       int e = ++g_if_counter;
       lines_push(body, strdup("{"));
@@ -1987,6 +2936,77 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       lines_push(body, strdup("    }"));
       lines_push(body, strdup("}"));
       return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_tcp_payload")) {   /* generic L7 send-buffer capture via str ringbuf */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* emit_tcp_payload(msg): from a tcp_sendmsg (or udp_sendmsg) probe, copy the first 128
+       * bytes of the send buffer to the str ringbuf for userspace L7 parsing (e.g. Redis RESP).
+       * TCP sibling of emit_dns: kernel is PROTOCOL-AGNOSTIC (just grabs bytes), parsing
+       * is userspace. Reuses the str_events ringbuf + the spnl_stream %s print path. The
+       * 256B str[] is memset first so the copied 128B stay NUL-terminated (RESP has no NUL). */
+      if (na != 1) die("emit_tcp_payload expects (msg) -- the tcp_sendmsg msghdr", NULL);
+      char *msg = cc_expr_str(ast, ids[0]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_emit_tcp_payload, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@MSG@", msg} }, 3);
+      free(msg);
+      return strdup("0");
+    }
+    if (name && !strcmp(name, "emit_tcp_stream")) {   /* sock-keyed, length-bounded L7 stream capture */
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      /* emit_tcp_stream(sk, msg, size): from a kprobe/tcp_sendmsg (sk=PARM1, msg=PARM2, size=PARM3),
+       * emit ONE packed record {sock, len, raw[128]} so userspace can group L7 fragments PER
+       * CONNECTION (by sock ptr) and reassemble byte-exactly (bounded by the real send length).
+       * Sock-aware upgrade of emit_tcp_payload (the earlier form, which had no sock and no length -> multi-
+       * connection interleaving broke reassembly). Length-bounded copy: `size` is an unbounded
+       * scalar from tcp_sendmsg, so cap it to 128 (a proven bound the verifier accepts for
+       * bpf_probe_read_user's size argument, dst = raw[128]). raw is NOT NUL-terminated; userspace
+       * reads exactly `len` bytes (hex-printed to avoid CRLF/NUL mangling). */
+      if (na != 3) die("emit_tcp_stream expects (sk, msg, size) from a tcp_sendmsg probe", NULL);
+      char *sk   = cc_expr_str(ast, ids[0]);
+      char *msg  = cc_expr_str(ast, ids[1]);
+      char *size = cc_expr_str(ast, ids[2]);
+      int e = ++g_if_counter;
+      char _eb[16]; snprintf(_eb, sizeof _eb, "%d", e);
+      tpl_emit_lines(body, tpl_bi_emit_tcp_stream, (TplSlot[]){ {"@UNIT@", g_unit}, {"@E@", _eb}, {"@SK@", sk}, {"@MSG@", msg}, {"@SIZE@", size} }, 5);
+      free(sk); free(msg); free(size);
+      return strdup("0");
+    }
+    /* tcp_sock_<field>_set(sk, v) / _add(sk, d) flat writers/adders (statement). */
+    {
+      const char *wf = cc_tcp_sock_writer_field(name);
+      const char *af = wf ? NULL : cc_tcp_sock_adder_field(name);
+      if (wf || af) {
+        if (!cc_in_tcp_cc()) die("tcp_sock_* is only valid inside tcp_cc__<member> methods", name);
+        int args_id = nt_ref(ast, nid, "arguments");
+        int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+        if (na != 2) die("tcp_sock_<field>_set/_add(sk, value) expects 2 args", name);
+        char *sk = cc_expr_str(ast, ids[0]), *v = cc_expr_str(ast, ids[1]);
+        cc_emit_tcp_sock_write(body, wf ? wf : af, wf ? "=" : "+=", sk, v);
+        free(sk); free(v);
+        return strdup("0");
+      }
+    }
+    /* sk.<field> = v dot-write sugar. Arrives as CallNode name="<field>=",
+     * receiver=sk, 1 arg. Mirrors codegen_bpf.rb try_tcp_sock_dot_call (setter). */
+    if (name) {
+      size_t nl = strlen(name);
+      int recv = nt_ref(ast, nid, "receiver");
+      if (recv >= 0 && nl > 1 && name[nl - 1] == '=' && cc_in_tcp_cc()) {
+        char *field = malloc(nl); memcpy(field, name, nl - 1); field[nl - 1] = '\0';
+        if (cc_tcp_sock_is_field(field)) {
+          int args_id = nt_ref(ast, nid, "arguments");
+          int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+          if (na != 1) die("sk.<field>= expects 1 arg", name);
+          char *rexpr = cc_expr_str(ast, recv), *v = cc_expr_str(ast, ids[0]);
+          cc_emit_tcp_sock_write(body, field, "=", rexpr, v);
+          free(rexpr); free(v); free(field);
+          return strdup("0");
+        }
+        free(field);
+      }
     }
   }
   return cc_expr_str(ast, nid);
@@ -2094,7 +3114,7 @@ static char *cc_times_call(AST *ast, int nid, Lines *body) {
 
   const char *rty = nt_type(ast, recv);
   if (rty && !strcmp(rty, "IntegerNode"))
-    die("n.times open-coded iterator (literal N) not yet ported (Stage 1)", NULL);   /* literal-N open-coded iterator */
+    die("n.times open-coded iterator (literal N) not yet ported (Stage 1)", NULL);
 
   char *fn = cc_func_name(g_method), *qn = cc_qual_name(g_method);
   int lc = ++g_loop_counter;
@@ -2201,7 +3221,7 @@ static int cc_body_uses_call(AST *ast, int nid, const char *name) {
 /* scan a subtree for emit-family calls, OR-ing the per-unit
  * ringbuf channels in use into *f (bit0=int spnl_emit, 1=str, 2=pair, 3=emit3,
  * 4=emit4). Pre-scan so the channel sections emit before the method bodies. */
-enum { EMIT_INT = 1, EMIT_STR = 2, EMIT_PAIR = 4, EMIT_E3 = 8, EMIT_E4 = 16 };
+enum { EMIT_INT = 1, EMIT_STR = 2, EMIT_PAIR = 4, EMIT_E3 = 8, EMIT_E4 = 16, EMIT_CONN = 32, EMIT_DNS = 64, EMIT_L7 = 128, EMIT_L7STREAM = 256 };
 static void cc_scan_emit(AST *ast, int nid, int *f) {
   if (nid < 0) return;
   const char *ty = nt_type(ast, nid);
@@ -2214,9 +3234,17 @@ static void cc_scan_emit(AST *ast, int nid, int *f) {
       else if (!strcmp(nm, "spnl_emit_str"))  *f |= EMIT_STR;
       else if (!strcmp(nm, "emit_comm"))      *f |= EMIT_STR;   /* comm via str ringbuf */
       else if (!strcmp(nm, "emit_argv"))      *f |= EMIT_STR;   /* argv via str ringbuf */
+      else if (!strcmp(nm, "emit_path"))      *f |= EMIT_STR;   /* full path via bpf_d_path */
+      else if (!strcmp(nm, "emit_parent_path")) *f |= EMIT_STR; /* parent exe path via bpf_d_path */
+      else if (!strcmp(nm, "emit_tcp_payload")) *f |= EMIT_STR;  /* L7 send buffer via str ringbuf */
+      else if (!strcmp(nm, "emit_tcp_stream")) *f |= EMIT_L7STREAM;  /* sock-keyed packed L7 stream record */
       else if (!strcmp(nm, "spnl_emit_pair")) *f |= EMIT_PAIR;
       else if (!strcmp(nm, "spnl_emit3"))     *f |= EMIT_E3;
       else if (!strcmp(nm, "spnl_emit4"))     *f |= EMIT_E4;
+      else if (!strcmp(nm, "emit_connect"))   *f |= EMIT_CONN;  /* packed connect event */
+      else if (!strcmp(nm, "emit_dns"))       *f |= EMIT_DNS;   /* DNS query event */
+      else if (!strcmp(nm, "dns_emit"))       *f |= EMIT_DNS;   /* DNS RTT event reuses the same ringbuf */
+      else if (!strcmp(nm, "emit_l7"))        *f |= EMIT_L7;    /* L7 latency event */
     }
   }
   SpNode *n = node_at(ast, nid);
@@ -2294,9 +3322,207 @@ static AttachKind cc_detect_attach(const char *name, Attach *a) {
   return a->kind;
 }
 
-/* hand-written tracepoint field schema (mirrors Ruby TRACEPOINT_FIELDS).
- * Host has no BTF (the oracle), so codegen uses these tables exactly. Each entry
- * is "cat/event" + a NULL-terminated list of "field:type" (type int / ipv4). */
+/* --------: BTF-driven tracepoint schema (Phase 1, production) ---------- */
+/* Bring the BTF frontend that was built for the (retired) Ruby oracle into the
+ * production C codegen. Shell `bpftool btf dump file <btf> format c` -- the SAME BTF
+ * the build already dumps for vmlinux.h -- cache the text, and classify a
+ * `trace_event_raw_<event>` struct member -> "int"/"ipv4"/"ipv6"/NULL. BEST-EFFORT:
+ * on a host without bpftool / /sys/kernel/btf/vmlinux the reader is unavailable and
+ * callers fall back to the hand-written TP_FIELDS tables below, so the host golden
+ * gate (tools/golden.rb) stays table-based and BYTE-IDENTICAL. In the build container
+ * BTF is the source of truth (validated == tables by tools/stage2_verify.sh).
+ *   env SPNL_BTF=<path>|off   BTF source (default /sys/kernel/btf/vmlinux; off=disable)
+ *   env SPNL_BPFTOOL=<path>   bpftool binary (default `bpftool`)
+ * Mirrors src/spinel_ebpf/btf_schema.rb (parser + type classification). */
+static int   g_btf_state = 0;     /* 0=unloaded, 1=available, 2=unavailable */
+static char *g_btf_text  = NULL;  /* full `format c` dump (NUL-terminated) */
+
+static int cc_btf_available(void) {
+  if (g_btf_state) return g_btf_state == 1;
+  g_btf_state = 2;                                   /* assume unavailable */
+  const char *path = getenv("SPNL_BTF");
+  if (path && !strcmp(path, "off")) return 0;
+  if (!path || !*path) path = "/sys/kernel/btf/vmlinux";
+  if (access(path, R_OK) != 0) return 0;             /* no BTF here (e.g. macOS host) */
+  const char *tool = getenv("SPNL_BPFTOOL");
+  if (!tool || !*tool) tool = "bpftool";
+  char cmd[1024];
+  snprintf(cmd, sizeof cmd, "%s btf dump file %s format c 2>/dev/null", tool, path);
+  FILE *p = popen(cmd, "r");
+  if (!p) return 0;
+  size_t cap = 1u << 20, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (!buf) { pclose(p); return 0; }
+  for (;;) {
+    if (len + 4096 > cap) { cap *= 2; char *nb = (char *)realloc(buf, cap);
+                            if (!nb) { free(buf); pclose(p); return 0; } buf = nb; }
+    size_t n = fread(buf + len, 1, cap - len, p);
+    len += n;
+    if (n == 0) break;
+  }
+  int rc = pclose(p);
+  if (rc != 0 || len == 0) { free(buf); return 0; }
+  char *fb = (char *)realloc(buf, len + 1);
+  if (fb) buf = fb;
+  buf[len] = '\0';
+  g_btf_text = buf;
+  g_btf_state = 1;
+  return 1;
+}
+
+static int cc_str_in(const char *s, const char *const *list) {
+  for (int i = 0; list[i]; i++) if (!strcmp(s, list[i])) return 1;
+  return 0;
+}
+/* Type spellings bpftool emits, mirroring btf_schema.rb#scalar_int?/byte_type?. */
+static const char *const CC_SCALAR_INTS[] = {
+  "__u8","__u16","__u32","__u64","__s8","__s16","__s32","__s64",
+  "u8","u16","u32","u64","s8","s16","s32","s64",
+  "int","unsigned int","short","unsigned short","long","unsigned long",
+  "long long","unsigned long long","char","unsigned char","signed char",
+  "bool","_Bool","size_t","ssize_t","pid_t","uid_t","gid_t","loff_t",
+  "sector_t","dev_t","umode_t","u_int","u_long","__kernel_pid_t",
+  "long int","long unsigned int","short int","short unsigned int",
+  "long long int","long long unsigned int", NULL };
+static const char *const CC_BYTE_TYPES[]  = { "__u8","u8","unsigned char","char","__s8","s8","u_char", NULL };
+static const char *const CC_UBYTE_TYPES[] = { "__u8","u8","unsigned char","u_char", NULL };
+
+/* Collapse tabs+runs of spaces to single spaces and rtrim (in place). */
+static void cc_squeeze_spaces(char *s) {
+  char *w = s; int prev_sp = 0;
+  for (char *r = s; *r; r++) {
+    char c = (*r == '\t') ? ' ' : *r;
+    if (c == ' ') { if (prev_sp) continue; prev_sp = 1; } else prev_sp = 0;
+    *w++ = c;
+  }
+  while (w > s && w[-1] == ' ') w--;
+  *w = '\0';
+}
+
+/* Parse a trimmed member decl (no leading ws, no trailing ';') into name/type/ptr/arr.
+ * Returns 1 on success, 0 to skip (bitfield, fn ptr, malformed). */
+static int cc_btf_parse_member(const char *decl, char *name, size_t ncap,
+                               char *type, size_t tcap, int *is_ptr, int *arr) {
+  if (strchr(decl, ':') || strchr(decl, '(')) return 0;   /* bitfield / fn ptr */
+  char d[256];
+  size_t L = strlen(decl);
+  if (L == 0 || L >= sizeof d) return 0;
+  memcpy(d, decl, L + 1);
+  *arr = -1;
+  char *lb = strrchr(d, '[');
+  if (lb) { char *rb = strchr(lb, ']'); if (!rb) return 0; *arr = atoi(lb + 1); *lb = '\0'; }
+  *is_ptr = 0;
+  for (char *q = d; *q; q++) if (*q == '*') { *q = ' '; *is_ptr = 1; }
+  size_t e = strlen(d);
+  while (e > 0 && (d[e-1] == ' ' || d[e-1] == '\t')) d[--e] = '\0';
+  if (e == 0) return 0;
+  char *sp = d + e;
+  while (sp > d && sp[-1] != ' ' && sp[-1] != '\t') sp--;
+  if (*sp == '\0' || strlen(sp) >= ncap) return 0;
+  strcpy(name, sp);
+  size_t tl = (size_t)(sp - d);
+  while (tl > 0 && (d[tl-1] == ' ' || d[tl-1] == '\t')) tl--;
+  if (tl >= tcap) return 0;
+  memcpy(type, d, tl); type[tl] = '\0';
+  cc_squeeze_spaces(type);
+  return 1;
+}
+
+/* Body between the braces of `struct <sname> { ... \n};`, or NULL. */
+static const char *cc_btf_struct_body(const char *sname, size_t *out_len) {
+  if (!cc_btf_available()) return NULL;
+  char needle[256];
+  int nn = snprintf(needle, sizeof needle, "struct %s {", sname);
+  if (nn < 0 || (size_t)nn >= sizeof needle) return NULL;
+  char *s = strstr(g_btf_text, needle);
+  if (!s) return NULL;
+  char *open = strchr(s, '{');
+  if (!open) return NULL;
+  char *close = strstr(open, "\n};");
+  if (!close) return NULL;
+  *out_len = (size_t)(close - (open + 1));
+  return open + 1;
+}
+static int cc_btf_has_struct(const char *sname) { size_t l; return cc_btf_struct_body(sname, &l) != NULL; }
+
+/* Classify a field of `sname` -> "int"/"ipv4"/"ipv6"/NULL (mirrors parse_member). */
+static const char *cc_btf_field_type(const char *sname, const char *field) {
+  size_t blen;
+  const char *body = cc_btf_struct_body(sname, &blen);
+  if (!body) return NULL;
+  const char *p = body, *end = body + blen;
+  while (p < end) {
+    const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+    const char *lend = nl ? nl : end;
+    const char *ls = p;
+    while (ls < lend && (*ls == ' ' || *ls == '\t')) ls++;
+    const char *semi = (const char *)memchr(ls, ';', (size_t)(lend - ls));
+    if (semi) {
+      size_t dl = (size_t)(semi - ls);
+      char decl[256];
+      if (dl > 0 && dl < sizeof decl) {
+        memcpy(decl, ls, dl); decl[dl] = '\0';
+        char nm[128], ty[200]; int is_ptr, arr;
+        if (cc_btf_parse_member(decl, nm, sizeof nm, ty, sizeof ty, &is_ptr, &arr)
+            && !strcmp(nm, field)) {
+          if (is_ptr) return "int";
+          if (arr >= 0) {
+            if (cc_str_in(ty, CC_BYTE_TYPES)  && arr == 4)  return "ipv4";
+            if (cc_str_in(ty, CC_UBYTE_TYPES) && arr == 16) return "ipv6";
+            return NULL;
+          }
+          if (cc_str_in(ty, CC_SCALAR_INTS)) return "int";
+          return NULL;
+        }
+      }
+    }
+    if (!nl) break;
+    p = nl + 1;
+  }
+  return NULL;
+}
+
+/* Comma-joined member names of `sname` for a diagnostic (malloc'd), or NULL. */
+static char *cc_btf_member_list(const char *sname) {
+  size_t blen;
+  const char *body = cc_btf_struct_body(sname, &blen);
+  if (!body) return NULL;
+  size_t cap = 1024, used = 0;
+  char *out = (char *)malloc(cap); if (!out) return NULL; out[0] = '\0';
+  const char *p = body, *end = body + blen;
+  while (p < end) {
+    const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+    const char *lend = nl ? nl : end;
+    const char *ls = p;
+    while (ls < lend && (*ls == ' ' || *ls == '\t')) ls++;
+    const char *semi = (const char *)memchr(ls, ';', (size_t)(lend - ls));
+    if (semi) {
+      size_t dl = (size_t)(semi - ls);
+      char decl[256];
+      if (dl > 0 && dl < sizeof decl) {
+        memcpy(decl, ls, dl); decl[dl] = '\0';
+        char nm[128], ty[200]; int is_ptr, arr;
+        if (cc_btf_parse_member(decl, nm, sizeof nm, ty, sizeof ty, &is_ptr, &arr)) {
+          size_t nln = strlen(nm);
+          if (used + nln + 3 > cap) { cap = (used + nln + 3) * 2; char *nb = (char *)realloc(out, cap);
+                                      if (!nb) { free(out); return NULL; } out = nb; }
+          if (used) { memcpy(out + used, ", ", 2); used += 2; }
+          memcpy(out + used, nm, nln); used += nln; out[used] = '\0';
+        }
+      }
+    }
+    if (!nl) break;
+    p = nl + 1;
+  }
+  return out;
+}
+
+/* hand-written tracepoint field schema -- the FALLBACK when BTF is
+ * unavailable (host golden run) and the source of `--emit-ir`-era goldens. In the
+ * build container the BTF reader above overrides these (validated byte-identical).
+ * Each entry is "cat/event" + a NULL-terminated list of "field:type" (int / ipv4).
+ * IPv6 (daddr_v6[16]) is handled by the <base>6_hi/<base>6_lo split convention in
+ * cc_attach_extractor, so it needs no per-event entry here. */
 typedef struct { const char *key; const char *fields[12]; } TpFields;
 static const TpFields TP_FIELDS[] = {
   {"sched/sched_switch", {"prev_pid:int","prev_prio:int","prev_state:int","next_pid:int","next_prio:int", NULL}},
@@ -2333,8 +3559,15 @@ static const char *cc_tp_field_type(const char *key, const char *field) {
   }
   return NULL;
 }
-/* struct to cast ctx to: override table, else trace_event_raw_<event> (malloc'd). */
+/* struct to cast ctx to (malloc'd). a *complete* trace_event_raw_<event> in BTF
+ * wins (source of truth); else the template-override table (DECLARE_EVENT_CLASS cases,
+ * which BTF can't map event->template); else the default name. The output string is
+ * identical to the pre-BTF path for every case, so goldens are unaffected -- BTF makes
+ * this the source of truth in-container and enables validation. */
 static char *cc_tp_struct(const char *key, const char *ev) {
+  char *def = msprintf("trace_event_raw_%s", ev);
+  if (cc_btf_has_struct(def)) return def;                 /* complete BTF struct */
+  free(def);
   for (int i = 0; TP_STRUCT_OVERRIDE[i].key; i++)
     if (!strcmp(TP_STRUCT_OVERRIDE[i].key, key)) return strdup(TP_STRUCT_OVERRIDE[i].name);
   return msprintf("trace_event_raw_%s", ev);
@@ -2354,10 +3587,47 @@ static char *cc_attach_extractor(const Attach *a, const char *ctype, int i, cons
       if (a->tp_struct) return msprintf("(%s)((struct %s *)ctx)->args[%d]", ctype, a->tp_struct, i);
       else {   /* named tracepoint -- match the param name to a struct field. */
         char *key = msprintf("%s/%s", a->tp_cat, a->tp_event);
-        const char *ft = cc_tp_field_type(key, pname);
-        if (!ft) { die("named tracepoint field schema unknown (Stage 1)", key); }
-        char *st = cc_tp_struct(key, a->tp_event);
+        char *st  = cc_tp_struct(key, a->tp_event);       /* BTF-first struct name */
         char *r;
+        size_t pl = strlen(pname);
+        /* IPv6 address split convention. A param `<base>6_hi`/`<base>6_lo` reads the
+         * hi/lo 8 bytes of the kernel's `<base>_v6` __u8[16] field (daddr6_hi -> daddr_v6),
+         * same hi/lo convention as the earlier pkt_ip6_*. Reading the array's second half off
+         * ctx directly is rejected ("dereference of modified ctx ptr" -- clang CSEs the base
+         * pointer), so copy the 16 bytes into a stack buffer with bpf_probe_read_kernel and
+         * split (verifier-clean, offset-portable via the ctx->..._v6 field). Replaces the earlier
+         * hand-written ipv6hi/ipv6lo TP_FIELDS entries; BTF validates <base>_v6 is a 16-byte
+         * array when available. */
+        int half = (pl >= 4 && !strcmp(pname + pl - 4, "6_hi")) ? 0
+                 : (pl >= 4 && !strcmp(pname + pl - 4, "6_lo")) ? 1 : -1;
+        if (half >= 0) {
+          char base[128]; size_t bl = pl - 4;
+          if (bl == 0 || bl >= sizeof base) die("named tracepoint ipv6 param malformed", pname);
+          memcpy(base, pname, bl); base[bl] = '\0';
+          char *v6 = msprintf("%s_v6", base);
+          if (cc_btf_available()) {
+            const char *ft6 = cc_btf_field_type(st, v6);
+            if (!ft6 || strcmp(ft6, "ipv6"))
+              die("named tracepoint ipv6 param: BTF field is not a 16-byte address", v6);
+          }
+          if (half == 0)
+            r = msprintf("(__s64)({ __u8 _d6[16] = {}; bpf_probe_read_kernel(_d6, 16, ((struct %s *)ctx)->%s); *(__u64 *)_d6; })", st, v6);
+          else
+            r = msprintf("(__s64)({ __u8 _d6[16] = {}; bpf_probe_read_kernel(_d6, 16, ((struct %s *)ctx)->%s); *(__u64 *)(_d6 + 8); })", st, v6);
+          free(v6); free(key); free(st);
+          return r;
+        }
+        /* Non-v6: BTF-derived type wins; fall back to the hand-written table. */
+        const char *ft = cc_btf_available() ? cc_btf_field_type(st, pname) : NULL;
+        if (!ft) ft = cc_tp_field_type(key, pname);
+        if (!ft) {                                        /* no silent fallback */
+          if (cc_btf_available()) {
+            char *avail = cc_btf_member_list(st);
+            die(msprintf("named tracepoint %s has no field '%s' (BTF %s available: %s)",
+                         key, pname, st, avail ? avail : "?"), NULL);
+          }
+          die("named tracepoint field schema unknown (Stage 1)", key);
+        }
         if (!strcmp(ft, "ipv4")) r = msprintf("(__s64)(*(__u32 *)(((struct %s *)ctx)->%s))", st, pname);
         else                     r = msprintf("(%s)((struct %s *)ctx)->%s", ctype, st, pname);
         free(key); free(st);
@@ -2601,7 +3871,7 @@ static void cc_emit_pkt_helper(Buf *o, const char *name, int tc) {
   die("emit_pkt_helper: unknown builtin (Stage 1)", name);
 }
 
-/* ---------- reactor DSL (module + include BPF::EventLoop + `on :kind`).
+/* --------: reactor DSL (module + include BPF::EventLoop + `on :kind`).
  * The module's `on` blocks aren't `def`s, so spinel's IR omits them; the Ruby
  * partition synthesizes a top-level method per `on` by walking the AST. We mirror
  * that here, appending synthesized Method entries to ir->m. ---------- */
@@ -2659,6 +3929,9 @@ static const ReactorKind *cc_reactor_kind(const char *k) {
     {"tracepoint", "tracepoint__", "__", 2, 0},
     {"user_cmd", "user_ringbuf__cmd_handler", "", 0, 0},
     {"uprobe", "uprobe__react", "", 1, 1}, {"uretprobe", "uretprobe__react", "", 1, 1},
+    /* go_uret shares the uprobe SEC/codegen (SEC("uprobe"), method
+     * uprobe__react<N>); glue.c attaches it at every RET offset (see go_ret flag). */
+    {"go_uret", "uprobe__react", "", 1, 1},
     {"usdt", "usdt__react__", "", 3, 1}, {"perf_event", "perf_event__main", "", 0, 0},
     {NULL, NULL, NULL, 0, 0}
   };
@@ -2722,15 +3995,198 @@ static void cc_synthesize_reactor(IR *ir, AST *ast) {
   }
 }
 
+/* tag flat top-level struct_ops methods. The class form
+ * (`class X < BPF::Qdisc/SchedExt/TcpCC`) sets so_kind/so_member during IR build
+ * (ir_parse / fill_ir_from_compiler). The flat form `def qdisc__enqueue(...)` at
+ * top level is a plain method whose name already carries the `<prefix>__<member>`
+ * shape but was left so_kind == SO_NONE -- so it fell through to a regular method
+ * (SEC("syscall"), no bundle). Mirror cc_in_tcp_cc's NAME-prefix approach: for any
+ * UNTAGGED method (so_kind == SO_NONE) whose name is `<prefix>__<member>` where
+ * <member> is a REAL member of that kind (present in SO_*_MEMBERS), tag it exactly
+ * as the class form does. Prefix-matches-but-not-a-member (e.g. `def qdisc__helper`)
+ * stays SO_NONE = a normal method (no die -- only well-formed struct_ops registers).
+ * ADDITIVE: only fires for SO_NONE, so the already-tagged class form is untouched. */
+static void cc_tag_flat_struct_ops(IR *ir) {
+  static const struct { const char *prefix; size_t plen; int kind; } K[] = {
+    { "tcp_cc__",    8,  SO_TCP_CC    },
+    { "sched_ext__", 11, SO_SCHED_EXT },
+    { "qdisc__",     7,  SO_QDISC     },
+  };
+  for (int i = 0; i < ir->n; i++) {
+    Method *me = &ir->m[i];
+    if (me->so_kind != SO_NONE || !me->name) continue;
+    for (int k = 0; k < 3; k++) {
+      if (strncmp(me->name, K[k].prefix, K[k].plen)) continue;
+      const char *member = me->name + K[k].plen;   /* points into me->name (stable) */
+      if (cc_so_member(K[k].kind, member)) {        /* only real members register */
+        me->so_kind = K[k].kind;
+        me->so_member = member;
+      }
+      break;   /* prefix matched (member or not); no other prefix can match */
+    }
+  }
+}
+
+/* amp-m7 trigger DSL (convention over method name).
+ *   timer_<ms>  -> AMP_TRIG_TIMER, param = ms       (M7 runtime calls every <ms> ms)
+ *   irq_<n>     -> AMP_TRIG_IRQ,   param = NVIC IRQ  (call on IRQ n; TPM4=74)
+ *   cmd         -> AMP_TRIG_CMD,   param = 0         (the command ring from the application core, equivalent to a user ring buffer)
+ *   otherwise   -> AMP_TRIG_MANUAL (runtime calls explicitly)
+ * The trigger table rides in the same .bpf.c under #ifdef SPNL_AMP_MANIFEST so
+ * clang -target bpf ignores it; the M7 loader compiles the file with that macro
+ * to learn which handler fires on which source. */
+enum { AMP_TRIG_MANUAL = 0, AMP_TRIG_TIMER = 1, AMP_TRIG_IRQ = 2, AMP_TRIG_CMD = 3 };
+static int amp_all_digits(const char *s) {
+  if (!*s) return 0;
+  for (; *s; s++) if (*s < '0' || *s > '9') return 0;
+  return 1;
+}
+static int amp_trigger_of(const char *name, unsigned *param) {
+  *param = 0;
+  if (!strncmp(name, "timer_", 6) && amp_all_digits(name + 6)) { *param = (unsigned)strtoul(name + 6, 0, 10); return AMP_TRIG_TIMER; }
+  if (!strncmp(name, "irq_", 4)   && amp_all_digits(name + 4)) { *param = (unsigned)strtoul(name + 4, 0, 10); return AMP_TRIG_IRQ; }
+  if (!strcmp(name, "cmd")) return AMP_TRIG_CMD;
+  return AMP_TRIG_MANUAL;
+}
+static const char *amp_trigger_kw(int kind) {
+  switch (kind) { case AMP_TRIG_TIMER: return "AMP_TRIG_TIMER"; case AMP_TRIG_IRQ: return "AMP_TRIG_IRQ";
+                  case AMP_TRIG_CMD: return "AMP_TRIG_CMD"; default: return "AMP_TRIG_MANUAL"; }
+}
+
+/* amp-m7 allowlist. v0 lowers only ivar RMW, integer arithmetic,
+ * `if`/locals and `spnl_emit`. Any other builtin/method call would lower to an
+ * `spnl_*`/`bpf_*` symbol the amp preamble never defines and fail at clang; catch
+ * it at codegen time with a clear message (partition failure is a loud,
+ * immediate error, never a silent/late fallback). CallNodes that ARE allowed:
+ * binary operators (a + b, @x > 5, ...) and spnl_emit. */
+static void amp_scan_supported(AST *ast, int nid) {
+  if (nid < 0) return;
+  const char *ty = nt_type(ast, nid);
+  if (!ty) return;
+  if (!strcmp(ty, "DefNode") || !strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) return;
+  if (!strcmp(ty, "CallNode")) {
+    const char *nm = nt_str(ast, nid, "name");
+    if (nm && !cc_is_binary_op(nm) && strcmp(nm, "spnl_emit") != 0 && strcmp(nm, "ktime_ns") != 0) {
+      char msg[256];
+      snprintf(msg, sizeof msg,
+        "amp-m7 (--target amp-m7) does not support '%s' in v0. "
+        "Supported: ivar RMW (@x/@x += n), integer arithmetic, if/locals, spnl_emit, ktime_ns. "
+        "Move this logic to the A55 side, or extend the amp helper set", nm);
+      die(msg, nm);
+    }
+  }
+  SpNode *n = node_at(ast, nid);
+  for (int i = 0; i < n->nr; i++) amp_scan_supported(ast, n->r[i].ref);
+  for (int i = 0; i < n->na; i++)
+    for (int k = 0; k < n->a[i].n; k++) amp_scan_supported(ast, n->a[i].ids[k]);
+}
+
+/* amp-m7 .bpf.c. Emits an h2.c-shaped translation unit (no
+ * vmlinux/maps/SEC) -- each eligible method becomes a plain `int f(void *ctx)`,
+ * ivar -> static-memory RMW at a baked carveout address, spnl_emit -> amp_emit().
+ * clang -target bpf compiles this to bytecode the micro-bpf ARMv7E-M JIT AOTs.
+ * Kept fully separate from the Linux path so golden output stays byte-identical. */
+static char *amp_codegen_program(IR *ir, AST *ast, const char *base) {
+  g_ir = ir;
+  g_unit = cc_sanitize(base);
+  g_amp = 1;
+  g_amp_nivars = 0;
+  int n = 0;
+  for (int i = 0; i < ir->n; i++) if (cc_method_eligible(&ir->m[i])) n++;
+  if (n == 0) die("amp-m7: no eBPF-eligible handler method found", base);
+
+  /* lower every handler body first (populates the ivar registry via cc_ivar_map). */
+  Lines *m_bodies = calloc(ir->n > 0 ? ir->n : 1, sizeof(Lines));
+  for (int i = 0; i < ir->n; i++) {
+    if (!cc_method_eligible(&ir->m[i])) continue;
+    if (ir->m[i].nparams != 0) die("amp-m7 handler takes no params (v0)", ir->m[i].name);
+    amp_scan_supported(ast, ir->m[i].body_id);   /* loud die on unsupported builtins */
+    cc_emit_method_body(ast, &ir->m[i], &m_bodies[i]);
+  }
+
+  Buf out; memset(&out, 0, sizeof out);
+  buf_printf(&out,
+    "/* generated by spinel-ebpf --target amp-m7. Build:\n"
+    " *   clang -O2 -target bpf -c %s.bpf.c -o %s.bpf.o\n"
+    " * then host-AOT to ARMv7E-M via the micro-bpf JIT. */\n"
+    "typedef unsigned int __u32;\n"
+    "typedef long long __s64;\n"
+    "#ifndef SPNL_AMP_IVARS_BASE\n"
+    "#define SPNL_AMP_IVARS_BASE %#010xu   /* = AMP_IVARS_BASE (spnl/amp_abi_imx95m7.h); single-pass default, override at build */\n"
+    "#endif\n"
+    "/* spnl_emit -> amp_emit(): helper id 1; the M7 runtime publishes to the DDR ring. */\n"
+    "static unsigned long long (*amp_emit)(unsigned long long) = (void *)1;\n"
+    "/* ktime_ns -> amp_ktime(): helper id 2; the M7 runtime returns NETC PHC ns (gPTP-synced). */\n"
+    "static unsigned long long (*amp_ktime)(void) = (void *)2;\n",
+    base, base, AMP_IVARS_BASE_MIRROR);
+
+  for (int i = 0; i < ir->n; i++) {
+    if (!cc_method_eligible(&ir->m[i])) continue;
+    char *fn = cc_func_name(&ir->m[i]);
+    buf_printf(&out, "\nint %s(void *ctx)\n{\n    (void)ctx;\n", fn);
+    for (int k = 0; k < m_bodies[i].n; k++)
+      buf_printf(&out, "    %s\n", m_bodies[i].v[k]);
+    if (ir->m[i].ret == CC_TY_VOID) buf_printf(&out, "    return 0;\n");
+    buf_printf(&out, "}\n");
+    free(fn);
+    lines_free(&m_bodies[i]);
+  }
+  free(m_bodies);
+
+  /* trigger manifest. Rides under #ifdef SPNL_AMP_MANIFEST so the probe
+   * build (clang -target bpf) ignores it; the M7 loader compiles this same file
+   * with -DSPNL_AMP_MANIFEST to wire each handler to its trigger source. */
+  buf_printf(&out,
+    "\n#ifdef SPNL_AMP_MANIFEST   /* M7 loader reads this; clang -target bpf skips it */\n"
+    "enum { AMP_TRIG_MANUAL = 0, AMP_TRIG_TIMER = 1, AMP_TRIG_IRQ = 2, AMP_TRIG_CMD = 3 };\n"
+    "/* fixed-ABI manifest fields the M7 loader gates on.\n"
+    " *   amp_abi_version -- must equal spnl/amp_abi_imx95m7.h AMP_ABI_VERSION;\n"
+    " *                     the loader rejects a version mismatch loudly (no silent\n"
+    " *                     breakage across firmware/blob ABI revisions).\n"
+    " *   amp_ivars_size  -- bytes of the IVARS carveout this probe uses (= 4 * #ivars);\n"
+    " *                     the loader zeroes exactly this span per slot-install so a\n"
+    " *                     hot-swapped probe never reads the previous probe's ivars. */\n"
+    "static const unsigned amp_abi_version = %uu;\n"
+    "static const unsigned amp_ivars_size  = %uu;\n"
+    "struct amp_trigger { const char *fn; int kind; unsigned param; };\n"
+    "static const struct amp_trigger amp_triggers[] = {\n",
+    AMP_ABI_VERSION_MIRROR, (unsigned)(g_amp_nivars * 4));
+  for (int i = 0; i < ir->n; i++) {
+    if (!cc_method_eligible(&ir->m[i])) continue;
+    char *fn = cc_func_name(&ir->m[i]);
+    unsigned param = 0;
+    int kind = amp_trigger_of(fn, &param);
+    buf_printf(&out, "    { \"%s\", %s, %u },\n", fn, amp_trigger_kw(kind), param);
+    free(fn);
+  }
+  buf_printf(&out,
+    "};\n"
+    "static const unsigned amp_triggers_n = sizeof(amp_triggers)/sizeof(amp_triggers[0]);\n"
+    "#endif /* SPNL_AMP_MANIFEST */\n");
+
+  g_amp = 0;
+  return out.p ? out.p : strdup("");
+}
+
 /* Build the full .bpf.c text (mirrors Ruby CodegenBpf.emit). Returns malloc'd
  * string; this is the function the Stage-2 in-process plugin will hook. */
 static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
+  if (getenv("SPNL_AMP_M7")) return amp_codegen_program(ir, ast, base);
   g_ir = ir;
+  cc_tag_flat_struct_ops(ir);   /* flat `def <prefix>__<member>` -> struct_ops member */
   g_unit = cc_sanitize(base);
+  g_uses_sock_owner = 0;   /* reset per unit */
+  g_uses_l7 = 0;           /* reset per unit */
+  g_uses_http_l7 = 0;      /* reset per unit */
+  g_uses_offcpu = 0;       /* reset per unit */
+  g_uses_dns_lat = 0;      /* reset per unit */
+  g_uses_redis_l7 = 0;     /* reset per unit */
   int n_ebpf = 0, uses_pt_regs = 0, uses_usdt = 0, emit_flags = 0;
   int uses_blocklist = 0, uses_cidr = 0, uses_path_counter = 0;
+  int uses_path_scratch = 0;  /* path_starts_with -> per-unit PERCPU_ARRAY d_path scratch (PATH_MAX) */
   int uses_histogram = 0, uses_latency = 0, uses_hist_keyed = 0, uses_hist_linear = 0;
   int uses_stack_trace = 0;
+  int uses_go_gptr = 0;      /* go_tls_resp_stash/emit read the g register (ctx->regs[28]) -> ctx forward + go_recv_stash */
   int uses_off_cpu = 0;      /* off_cpu_start/observe */
   int uses_sched_ext = 0, uses_qdisc = 0, uses_tcp_cc = 0;   /* struct_ops kinds */
   int uses_qdisc_fifo = 0;   /* queue_push/queue_pop */
@@ -2756,6 +4212,8 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     if (cc_body_uses_call(ast, bdy, "blocklist_match"))      uses_blocklist = 1;
     if (cc_body_uses_call(ast, bdy, "cidr_blocklist_match")) uses_cidr = 1;
     if (cc_body_uses_call(ast, bdy, "path_counter_inc"))     uses_path_counter = 1;
+    if (cc_body_uses_call(ast, bdy, "path_starts_with") ||
+        cc_body_uses_call(ast, bdy, "path_contains"))        uses_path_scratch = 1;
     /* histogram + latency. hist_observe_by also needs spnl_hist_log2
      * from the plain histogram section, so it sets uses_histogram too. */
     if (cc_body_uses_call(ast, bdy, "hist_observe") || cc_body_uses_call(ast, bdy, "hist_observe_by")) uses_histogram = 1;
@@ -2770,34 +4228,76 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     if (cc_body_uses_call(ast, bdy, "off_cpu_start") || cc_body_uses_call(ast, bdy, "off_cpu_observe")) {
       uses_off_cpu = 1; uses_histogram = 1; uses_hist_keyed = 1; uses_stack_trace = 1;
     }
+    /* sock_owner_set -> per-unit socket->owner correlation map (emit_connect correlates). */
+    if (cc_body_uses_call(ast, bdy, "sock_owner_set")) g_uses_sock_owner = 1;
+    /* req_start/emit_l7 -> per-unit send-time correlation map (L7 round-trip latency). */
+    if (cc_body_uses_call(ast, bdy, "req_start") || cc_body_uses_call(ast, bdy, "emit_l7")) g_uses_l7 = 1;
+    /* http_req_start/http_resp_stash/http_emit -> HTTP L7 RED (method/path/status/duration).
+     * ssl_req_start/ssl_resp_stash/ssl_emit reuse the SAME maps/struct/filter (TLS plaintext). */
+    if (cc_body_uses_call(ast, bdy, "http_req_start") || cc_body_uses_call(ast, bdy, "http_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "http_emit") ||
+        cc_body_uses_call(ast, bdy, "ssl_req_start") || cc_body_uses_call(ast, bdy, "ssl_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "ssl_emit") ||
+        cc_body_uses_call(ast, bdy, "go_tls_write") ||
+        cc_body_uses_call(ast, bdy, "go_tls_req") || cc_body_uses_call(ast, bdy, "go_tls_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "go_tls_emit")) g_uses_http_l7 = 1;   /* Go crypto/tls plaintext -> http_events */
+    /* go_tls_resp_stash/emit key the recv-stash by the Go g register (goroutine),
+     * not tid (which migrates on a blocking Read). Needs ctx forwarded (regs[28]). */
+    if (cc_body_uses_call(ast, bdy, "go_tls_resp_stash") || cc_body_uses_call(ast, bdy, "go_tls_emit"))
+        uses_go_gptr = 1;
+    /* redis_req_start/redis_resp_stash/redis_emit -> Redis L7 RED (command/error/duration).
+     * Mirrors the HTTP channel with its own dedicated maps (RESP != HTTP filter/parse). */
+    if (cc_body_uses_call(ast, bdy, "redis_req_start") || cc_body_uses_call(ast, bdy, "redis_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "redis_emit")) g_uses_redis_l7 = 1;
+    /* off-CPU-during-request correlation. Reuses spnl_is_http_req; the sched_switch
+     * accounting needs bpf_stacks + ctx (uses_stack_trace, like off_cpu_start). */
+    if (cc_body_uses_call(ast, bdy, "offcpu_recv_stash") || cc_body_uses_call(ast, bdy, "offcpu_begin") ||
+        cc_body_uses_call(ast, bdy, "offcpu_account") || cc_body_uses_call(ast, bdy, "offcpu_emit")) g_uses_offcpu = 1;
+    if (cc_body_uses_call(ast, bdy, "offcpu_account")) uses_stack_trace = 1;
+    /* dns_req_start/dns_resp_stash/dns_emit -> DNS RTT. Query (udp_sendmsg) records the
+     * start keyed by (sock,txid); recv (udp_recvmsg entry-stash + kretprobe) correlates by the
+     * response txid -> duration. Reuses the dns_events ringbuf (dns_emit sets EMIT_DNS). */
+    if (cc_body_uses_call(ast, bdy, "dns_req_start") || cc_body_uses_call(ast, bdy, "dns_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "dns_emit")) g_uses_dns_lat = 1;
     /* struct_ops kinds (from class X < BPF::SchedExt/Qdisc/TcpCC synthesis). */
     if (ir->m[i].so_kind == SO_SCHED_EXT) uses_sched_ext = 1;
     else if (ir->m[i].so_kind == SO_QDISC) uses_qdisc = 1;
     else if (ir->m[i].so_kind == SO_TCP_CC) uses_tcp_cc = 1;
-    if (cc_body_uses_call(ast, bdy, "queue_push") || cc_body_uses_call(ast, bdy, "queue_pop")) uses_qdisc_fifo = 1;  /* FIFO qdisc */
+    if (cc_body_uses_call(ast, bdy, "queue_push") || cc_body_uses_call(ast, bdy, "queue_pop")) uses_qdisc_fifo = 1;
     if (cc_body_uses_call(ast, bdy, "kfield") || cc_body_uses_call(ast, bdy, "kptr") ||
-        cc_body_uses_call(ast, bdy, "field_exists")) uses_kfield = 1;  /* CO-RE field access */
+        cc_body_uses_call(ast, bdy, "field_exists") ||
+        cc_body_uses_call(ast, bdy, "ppid") ||
+        cc_body_uses_call(ast, bdy, "emit_connect") ||
+        cc_body_uses_call(ast, bdy, "emit_dns") ||
+        cc_body_uses_call(ast, bdy, "emit_l7") ||
+        cc_body_uses_call(ast, bdy, "http_req_start") || cc_body_uses_call(ast, bdy, "http_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "http_emit") ||
+        cc_body_uses_call(ast, bdy, "dns_req_start") || cc_body_uses_call(ast, bdy, "dns_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "emit_tcp_payload") ||
+        cc_body_uses_call(ast, bdy, "emit_tcp_stream") ||
+        cc_body_uses_call(ast, bdy, "redis_req_start") || cc_body_uses_call(ast, bdy, "redis_resp_stash") ||
+        cc_body_uses_call(ast, bdy, "offcpu_recv_stash") || cc_body_uses_call(ast, bdy, "offcpu_emit")) uses_kfield = 1;  /* ppid + the srtt + the msg + the peer + the http + the offcpu msg + the dns req/resp msg + the tcp payload msg + the tcp stream msg + the redis msg -> BPF_CORE_READ */
     if (cc_body_uses_call(ast, bdy, "task_load") || cc_body_uses_call(ast, bdy, "task_store") ||
-        cc_body_uses_call(ast, bdy, "task_incr") || cc_body_uses_call(ast, bdy, "task_swap")) uses_task_storage = 1;  /* task storage */
-    if (cc_body_uses_call(ast, bdy, "mim_inc") || cc_body_uses_call(ast, bdy, "mim_get")) uses_map_in_map = 1;  /* map-in-map */
-    if (cc_body_uses_call(ast, bdy, "fifo_push") || cc_body_uses_call(ast, bdy, "fifo_pop")) uses_fifo = 1;  /* QUEUE map */
+        cc_body_uses_call(ast, bdy, "task_incr") || cc_body_uses_call(ast, bdy, "task_swap")) uses_task_storage = 1;
+    if (cc_body_uses_call(ast, bdy, "mim_inc") || cc_body_uses_call(ast, bdy, "mim_get")) uses_map_in_map = 1;
+    if (cc_body_uses_call(ast, bdy, "fifo_push") || cc_body_uses_call(ast, bdy, "fifo_pop")) uses_fifo = 1;
     if (cc_body_uses_call(ast, bdy, "lifo_push") || cc_body_uses_call(ast, bdy, "lifo_pop")) uses_lifo = 1;
-    if (cc_body_uses_call(ast, bdy, "xsk_redirect")) uses_xskmap = 1;   /* AF_XDP redirect */
+    if (cc_body_uses_call(ast, bdy, "xsk_redirect")) uses_xskmap = 1;
     if (cc_body_uses_call(ast, bdy, "dev_redirect")) uses_devmap = 1;
-    if (cc_body_uses_call(ast, bdy, "leak_record") || cc_body_uses_call(ast, bdy, "leak_forget")) uses_leak_track = 1;  /* memleak track */
-    if (cc_body_uses_call(ast, bdy, "lock_edge")) uses_lock_edge = 1;  /* deadlock detection */
-    if (cc_body_uses_call(ast, bdy, "lat_start") || cc_body_uses_call(ast, bdy, "lat_end")) uses_keyed_lat = 1;  /* keyed latency */
-    if (cc_body_uses_call(ast, bdy, "depth_inc") || cc_body_uses_call(ast, bdy, "depth_dec")) uses_depth = 1;  /* depth-collapse */
-    if (cc_body_uses_call(ast, bdy, "fib_lookup") || cc_body_uses_call(ast, bdy, "fib_lookup6")) uses_fib = 1;  /* FIB route lookup */
+    if (cc_body_uses_call(ast, bdy, "leak_record") || cc_body_uses_call(ast, bdy, "leak_forget")) uses_leak_track = 1;
+    if (cc_body_uses_call(ast, bdy, "lock_edge")) uses_lock_edge = 1;
+    if (cc_body_uses_call(ast, bdy, "lat_start") || cc_body_uses_call(ast, bdy, "lat_end")) uses_keyed_lat = 1;
+    if (cc_body_uses_call(ast, bdy, "depth_inc") || cc_body_uses_call(ast, bdy, "depth_dec")) uses_depth = 1;
+    if (cc_body_uses_call(ast, bdy, "fib_lookup") || cc_body_uses_call(ast, bdy, "fib_lookup6")) uses_fib = 1;
     if (cc_body_uses_call(ast, bdy, "skb_load_u16") || cc_body_uses_call(ast, bdy, "skb_load_u32") ||
         cc_body_uses_call(ast, bdy, "skb_store_u16") || cc_body_uses_call(ast, bdy, "skb_store_u32") ||
         cc_body_uses_call(ast, bdy, "l3_csum_replace") || cc_body_uses_call(ast, bdy, "l4_csum_replace") ||
         cc_body_uses_call(ast, bdy, "l3_csum_replace_ip") || cc_body_uses_call(ast, bdy, "l4_csum_replace_ip") ||
-        cc_body_uses_call(ast, bdy, "sk_lookup_tcp") || cc_body_uses_call(ast, bdy, "sk_assign_tcp")) uses_csum = 1;  /* skb csum + socket lookup/steer */
+        cc_body_uses_call(ast, bdy, "sk_lookup_tcp") || cc_body_uses_call(ast, bdy, "sk_assign_tcp")) uses_csum = 1;
     if (cc_body_uses_call(ast, bdy, "arena_set") || cc_body_uses_call(ast, bdy, "arena_get") ||
         cc_body_uses_call(ast, bdy, "arena_hash_set") || cc_body_uses_call(ast, bdy, "arena_hash_get") ||
         cc_body_uses_call(ast, bdy, "arena_hash_del") || cc_body_uses_call(ast, bdy, "arena_list_push") ||
-        cc_body_uses_call(ast, bdy, "arena_list_sum")) uses_arena = 1;  /* arena data structures */
+        cc_body_uses_call(ast, bdy, "arena_list_sum")) uses_arena = 1;
     Attach ai;
     cc_detect_attach(ir->m[i].name, &ai);
     /* PT_REGS_PARM<N> macros (bpf_tracing.h) for probe-family with params. */
@@ -2831,6 +4331,7 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   Lines deferred; memset(&deferred, 0, sizeof deferred);
   g_deferred = &deferred;
   g_loop_counter = 0;
+  g_pc_counter = 0;   /* path_contains callback ids, unit scope */
   Lines *m_bodies = calloc(ir->n > 0 ? ir->n : 1, sizeof(Lines));
   for (int i = 0; i < ir->n; i++) {
     if (!cc_method_eligible(&ir->m[i])) continue;
@@ -2856,8 +4357,8 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   buf_puts(&out, "#include \"vmlinux.h\"\n#include <bpf/bpf_helpers.h>\n");
   {
     const char *extras[6]; int ne = 0;
-    if (emit_flags) extras[ne++] = "#include \"spnl/types.h\"";   /* any emit-family channel */
-    if (g_n_pkt > 0 || uses_fib || uses_csum || g_n_flow > 0) extras[ne++] = "#include <bpf/bpf_endian.h>";   /* bpf_ntohs/htonl: pkt_* / fib / skb csum / flow */
+    if (emit_flags || g_uses_http_l7 || g_uses_redis_l7 || g_uses_offcpu) extras[ne++] = "#include \"spnl/types.h\"";   /* any emit-family channel, plus the HTTP, Redis and off-CPU event headers */
+    if (g_n_pkt > 0 || uses_fib || uses_csum || g_n_flow > 0 || g_uses_l7 || g_uses_http_l7 || g_uses_redis_l7) extras[ne++] = "#include <bpf/bpf_endian.h>";   /* bpf_ntohs and bpf_htonl: the pkt_* builtins, fib lookups, skb checksums, flows, and the peer port of the L7, HTTP and Redis channels */
     if (uses_pt_regs || uses_usdt || uses_sched_ext || uses_qdisc || uses_tcp_cc)
       extras[ne++] = "#include <bpf/bpf_tracing.h>";  /* PT_REGS_PARM / usdt / BPF_PROG */
     if (uses_usdt) extras[ne++] = "#include <bpf/usdt.bpf.h>";       /* bpf_usdt_arg */
@@ -2882,31 +4383,19 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   /* per-unit int-event ringbuf channel. */
   if (uses_ringbuf) {
     SECTION_SEP();
-    buf_puts(&out, "/* === per-unit int-event channel === */\n");
-    buf_printf(&out, "struct %s_event {\n", g_unit);
-    buf_puts(&out, "    struct spnl_event_hdr hdr;\n    __s64 value;\n};\n\n");
-    buf_puts(&out, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n    __uint(max_entries, 256 * 1024);\n");
-    buf_printf(&out, "} %s_events SEC(\".maps\");\n", g_unit);
+    tpl_emit(&out, tpl_emit_int, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
   }
 
   /* per-unit string-event channel (char str[256] payload). */
   if (emit_flags & EMIT_STR) {
     SECTION_SEP();
-    buf_puts(&out, "/* === per-unit string-event channel === */\n");
-    buf_printf(&out, "struct %s_str_event {\n", g_unit);
-    buf_puts(&out, "    struct spnl_event_hdr hdr;\n    char str[256];\n};\n\n");
-    buf_puts(&out, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n    __uint(max_entries, 256 * 1024);\n");
-    buf_printf(&out, "} %s_str_events SEC(\".maps\");\n", g_unit);
+    tpl_emit(&out, tpl_emit_str, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
   }
 
   /* per-unit pair-event channel (two __s64 values per event). */
   if (emit_flags & EMIT_PAIR) {
     SECTION_SEP();
-    buf_puts(&out, "/* === per-unit pair-event channel === */\n");
-    buf_printf(&out, "struct %s_pair_event {\n", g_unit);
-    buf_puts(&out, "    struct spnl_event_hdr hdr;\n    __s64 a;\n    __s64 b;\n};\n\n");
-    buf_puts(&out, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n    __uint(max_entries, 256 * 1024);\n");
-    buf_printf(&out, "} %s_pair_events SEC(\".maps\");\n", g_unit);
+    tpl_emit(&out, tpl_emit_pair, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
   }
 
   /* per-unit N-tuple event channels (3-tuple a,b,c / 4-tuple a,b,c,d). */
@@ -2921,6 +4410,120 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     buf_puts(&out, "};\n\n");
     buf_puts(&out, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n    __uint(max_entries, 256 * 1024);\n");
     buf_printf(&out, "} %s_emit%d_events SEC(\".maps\");\n", g_unit, n);
+  }
+
+  /* per-unit packed connect-event channel (1 socket-state event = 1 record).
+   * declared in record_schema.h (cc_rec_conn), like DNS -- field provenance
+   * (cgid = pod attribution, oldstate = direction, daddr6_* = IPv6)
+   * now lives with the fields, and the userspace mirror is generated from the same
+   * table instead of hand-typed offsets. */
+  if (emit_flags & EMIT_CONN) {
+    SECTION_SEP();
+    cc_rec_emit_channel(&out, &cc_rec_conn, g_unit);
+  }
+
+  /* per-unit sock-keyed L7 stream channel (1 tcp_sendmsg fragment = 1 packed record).
+   * The sock-aware upgrade of the earlier str channel: {sock, len, raw[128]} lets userspace group
+   * fragments per connection (by sock ptr) and reassemble byte-exactly (bounded by the real send
+   * length). raw is length-bounded, NOT NUL-terminated (userspace reads exactly `len` bytes). */
+  if (emit_flags & EMIT_L7STREAM) {
+    SECTION_SEP();
+    cc_rec_emit_channel(&out, &cc_rec_l7stream, g_unit);   /* record_schema.h */
+  }
+
+  /* per-unit socket->owner correlation map. connect (process ctx) records
+   * sock ptr -> owning process; emit_connect (softirq ESTABLISHED -> swapper/0)
+   * recovers the real process by sock-ptr lookup. Reused by the send/recv latency correlation.
+   * cgid field: k8s pod attribution. */
+  if (g_uses_sock_owner) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_sock_owner, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
+  }
+
+  /* per-unit DNS-event channel (raw DNS payload; QNAME parsed in userspace).
+   * the layout is declared in record_schema.h (cc_rec_dns) instead of a
+   * template -- field provenance (cgid = pod attribution, duration_ns =
+   * RTT) now lives with the fields themselves. */
+  if (emit_flags & EMIT_DNS) {
+    SECTION_SEP();
+    cc_rec_emit_channel(&out, &cc_rec_dns, g_unit);
+  }
+
+  /* DNS request/response latency correlation. dns_req_start (udp_sendmsg) records the
+   * query start keyed by (sock<<16 | txid) so A+AAAA on one socket stay distinct; the recv side
+   * (udp_recvmsg entry-stash by tid + kretprobe) reads the response txid and computes the RTT.
+   * Response payload is only in the user buffer after the copy, so -- like the HTTP channel's tcp_recvmsg --
+   * we stash {sk, buf} at entry and read it at the kretprobe. */
+  if (g_uses_dns_lat) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_dns_latency, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);   /* dns_pending value: (sock<<16|txid) -> start_ns */
+  }
+
+  /* per-unit L7 send-time correlation map + round-trip latency channel.
+   * req_start (send probe, process ctx) records send ktime keyed by sock ptr;
+   * emit_l7 (recv probe) computes the round-trip and emits one packed record.
+   * Same sock-ptr key space as the earlier sock_owner (adjacent map). Field provenance:
+   * cgid = k8s pod attribution; outstanding/mux = multiplexing guard
+   * (pending map value, not an emit record). */
+  if (g_uses_l7) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_l7_req_state, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
+  }
+  if (emit_flags & EMIT_L7) {
+    SECTION_SEP();
+    /* record_schema.h (cc_rec_l7); cgid field = k8s pod attribution. */
+    cc_rec_emit_channel(&out, &cc_rec_l7, g_unit);
+  }
+
+  /* HTTP L7 RED -- pending request (send) + recv-buffer stash (recvmsg entry) +
+   * combined event (kretprobe). method/path/status parsed in userspace (kernel bounded copy).
+   * cgid fields: k8s pod attribution. */
+  if (g_uses_http_l7) {
+    SECTION_SEP();
+    buf_puts(&out, "/* === per-unit HTTP L7 RED === */\n");
+    /* verifier-safe HTTP request-method check (fixed comparisons, no loop). Excludes "HTTP"
+     * responses and non-HTTP traffic, so only client request-sends are captured. */
+    buf_puts(&out, tpl_http_req_check);
+    tpl_emit(&out, tpl_http_l7, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);   /* pending + recv-stash maps */
+    cc_rec_emit_channel(&out, &cc_rec_http, g_unit);                     /* the record itself */
+  }
+
+  /* Go g-keyed recv stash -- go_tls_resp_stash/emit correlate a Read's entry->RET by the
+   * goroutine (g register, ctx->regs[28]) instead of tid (which migrates on a blocking Read). Reuses
+   * the http_stash_st {sk, buf} value; keyed by __u64 g-pointer. Only emitted when uses_go_gptr. */
+  if (uses_go_gptr) {
+    SECTION_SEP();
+    buf_puts(&out, "/* === per-unit Go g-keyed recv stash === */\n");
+    buf_puts(&out, "struct {\n    __uint(type, BPF_MAP_TYPE_HASH);\n    __uint(max_entries, 4096);\n");
+    buf_printf(&out, "    __type(key, __u64);\n    __type(value, struct %s_http_stash_st);\n", g_unit);
+    buf_printf(&out, "} %s_go_recv_stash SEC(\".maps\");\n", g_unit);
+  }
+
+  /* Redis RED metrics -- the same shape as the HTTP channel, with its own maps, since RESP is not HTTP. pending request (send) +
+   * recv-buffer stash (recvmsg entry) + combined event (kretprobe). command/error parsed in userspace.
+   * The template's spnl_is_redis_cmd is the verifier-safe RESP request sniff: array-of-bulk-strings
+   * header "*<1-9>" (Redis commands are always multi-bulk arrays) reliably marks client request-sends.
+   * cgid fields: k8s pod attribution. */
+  if (g_uses_redis_l7) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_redis_l7, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);   /* sniff + pending/stash maps */
+    cc_rec_emit_channel(&out, &cc_rec_redis, g_unit);                     /* the record itself */
+  }
+
+  /* off-CPU-during-request correlation. Server request window (recv->send) per tid;
+   * sched_switch accumulates voluntary off-CPU + captures the wait's kernel stack. Reuses
+   * spnl_is_http_req + bpf_stacks (uses_stack_trace). "why is this L7 span slow".
+   * Field provenance: cgid = k8s pod attribution; start_ktime = request-window
+   * the real start time of the window, used both to correlate children from other
+   * records and to place the span accurately; hdr_ext holds the first 128 bytes of
+   * the request, a bounded copy from which userspace parses any traceparent. */
+  if (g_uses_offcpu) {
+    SECTION_SEP();
+    buf_puts(&out, "/* === per-unit off-CPU L7 correlation === */\n");
+    if (!g_uses_http_l7)   /* spnl_is_http_req is otherwise emitted by the HTTP L7 block */
+      buf_puts(&out, tpl_http_req_check);
+    tpl_emit(&out, tpl_offcpu_l7, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);   /* stash + window maps */
+    cc_rec_emit_channel(&out, &cc_rec_offcpu, g_unit);                     /* the record itself */
   }
 
   /* per-class ivar HASH maps (one section per used class). */
@@ -3044,6 +4647,16 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   if (uses_path_counter) {
     SECTION_SEP();
     buf_puts(&out, tpl_path_counter);
+  }
+
+  /* per-unit d_path scratch for path_starts_with. A path under the prefix
+   * can be up to PATH_MAX (4096) long; a small stack buffer would -ENAMETOOLONG
+   * and MISS it = a deny/audit bypass. 4096 doesn't fit the 512B BPF stack,
+   * so use a per-CPU array (one char[4096] slot). Declared once per unit even when
+   * path_starts_with is used multiple times (gated on the single uses flag). */
+  if (uses_path_scratch) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_path_scratch, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
   }
 
   /* outstanding-allocation map (memleak) + record/forget helpers. */
@@ -3191,7 +4804,16 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     Attach a; int is_attach = cc_detect_attach(me->name, &a);
     /* the inner takes the kernel ctx first when it's a ctx-prefixed attach
      * (xdp/tc/sk/iter) OR a tracing-family handler in a unit that uses stack traces. */
-    int ctx_first = is_attach && (a.ctx_prefixed || (uses_stack_trace && cc_is_tracing_kind(a.kind)));
+    int ctx_first = is_attach && (a.ctx_prefixed || ((uses_stack_trace || uses_go_gptr) && cc_is_tracing_kind(a.kind)));
+    /* caps struct at the wrapper->inner boundary. BPF passes call args in
+     * r1-r5, so the effective register count (ctx forward + N extracted params)
+     * caps at 5. When it would exceed 5, pack every extracted arg into a stack
+     * struct and pass its pointer (1 reg); the inner expands them back to
+     * param-named locals in a prologue so the body codegen is unchanged. Fires
+     * only when nreg > 5 -- ≤5 keeps the scalar form byte-identical (H2). */
+    int nreg = (ctx_first ? 1 : 0) + me->nparams;
+    int use_caps = is_attach && !a.ctx_prefixed && me->nparams > 0 && nreg > 5;
+    if (use_caps && me->nparams > 16) die("attach handler exceeds 16 args (caps cap of 16)", me->name);
 
     SECTION_SEP();
     /* inner */
@@ -3203,8 +4825,17 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     } else {
       buf_printf(&out, "/* impl: %s : %s */\n", qn, ty_legacy_name(me->ret));
     }
+    if (use_caps) {   /* struct packing the extracted args (declared before the inner) */
+      buf_printf(&out, "struct %s_args {\n", fn);
+      for (int k = 0; k < me->nparams; k++)
+        buf_printf(&out, "    %s p%d;\n", ty_to_c(me->ptypes[k]), k);
+      buf_puts(&out, "};\n");
+    }
     buf_printf(&out, "static __noinline %s %s_inner(", cret, fn);
-    {                                    /* ctx-prefixed (xdp/tc) take the kernel ctx first */
+    if (use_caps) {   /* (ctx?, struct <fn>_args *__a) -- 1 pointer instead of N args */
+      if (ctx_first) buf_printf(&out, "%sctx, ", a.ctx_type);
+      buf_printf(&out, "struct %s_args *__a", fn);
+    } else {                             /* ctx-prefixed (xdp/tc) take the kernel ctx first */
       int wrote = 0;
       if (ctx_first) { buf_printf(&out, "%sctx", a.ctx_type); wrote = 1; }
       for (int k = 0; k < me->nparams; k++) {
@@ -3214,6 +4845,9 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
       if (!wrote) buf_puts(&out, "void");
     }
     buf_puts(&out, ")\n{\n");
+    if (use_caps)   /* expand the packed args back to param-named locals */
+      for (int k = 0; k < me->nparams; k++)
+        buf_printf(&out, "    %s %s = __a->p%d;\n", ty_to_c(me->ptypes[k]), me->pnames[k], k);
     for (int k = 0; k < m_bodies[i].n; k++) { char *t = cc_indent_each(m_bodies[i].v[k]); buf_puts(&out, t); buf_puts(&out, "\n"); free(t); }   /* pre-lowered */
     buf_puts(&out, "}\n");
 
@@ -3232,6 +4866,24 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
       /* bpf_iter is invoked once per object + a final NULL terminator;
        * skip the body on that terminator so counters don't over-count. */
       if (a.iter_guard) buf_puts(&out, "    if (!ctx->task) return 0;\n");
+      if (use_caps) {   /* fill the caps struct, pass its pointer to the inner (1 reg) */
+        buf_printf(&out, "    struct %s_args __a = {};\n", fn);
+        for (int k = 0; k < me->nparams; k++) {
+          char *ex = cc_attach_extractor(&a, ty_to_c(me->ptypes[k]), k, me->pnames[k]);
+          buf_printf(&out, "    __a.p%d = %s;\n", k, ex);
+          free(ex);
+        }
+        Buf call; memset(&call, 0, sizeof call);
+        buf_printf(&call, "%s_inner(", fn);
+        if (ctx_first) buf_puts(&call, "ctx, ");
+        buf_puts(&call, "&__a)");
+        if (a.verdict)               buf_printf(&out, "    return (int)%s;\n}\n", call.p);  /* lsm/fmod (verdict) */
+        else if (me->ret == CC_TY_VOID) buf_printf(&out, "    %s;\n    return 0;\n}\n", call.p);
+        else                         buf_printf(&out, "    (void)%s;\n    return 0;\n}\n", call.p);
+        free(call.p);
+        free(fn); free(qn);
+        continue;
+      }
       /* inner call: ctx-first kinds forward ctx; tracing kinds also pass extracted
        * args (ctx_prefixed attach kinds have no params, so they pass ctx only). */
       Buf call; memset(&call, 0, sizeof call);
@@ -3361,12 +5013,12 @@ static void cc_fill_params(Compiler *c, Scope *s, Method *me) {
   free(pnb.p); free(ptb.p);
 }
 
-/* Synthesized userspace consumer/driver/named-handler methods (__spnl_*,
+/* synthesized userspace consumer/driver/named-handler methods (__spnl_*,
  * lowered from the `on_emit` / `on_emit :name` DSL) run in userspace draining
  * the emit ringbuf via FFI. They must never enter the eBPF IR -- exclude them
  * from both the in-process IR (fill_ir_from_compiler) and the .ir text.
  *
- * For --instrument --instrument-self, the workload + the agent live in one
+ * --instrument --instrument-self combines the workload + the agent in one
  * unit. The workload methods (the self-uprobe *targets*) are eBPF-eligible (pure
  * int) but must stay native. The CLI passes their names in $SPNL_EBPF_EXCLUDE
  * (comma-separated); exclude them here too so they don't enter the eBPF IR. */

@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 #
-# spinel-ebpf — eBPF C (.bpf.c) codegen for ebpf-tagged methods.
+# spinel-ebpf -- eBPF C (.bpf.c) codegen for ebpf-tagged methods.
 #
 # Scope (MVP):
 #   - Input: IR + AST + Partition::Result (from partition.classify)
@@ -45,7 +45,7 @@ module SpinelEbpf
     }.freeze
 
     # C type for a *local variable* declaration, keyed by spinel's
-    # inferred type (sourced from the IR scope records — see IR#scope_locals).
+    # inferred type (sourced from the IR scope records -- see IR#scope_locals).
     # Deliberately conservative: every scalar maps to __s64 so the generated
     # .bpf.c stays byte-identical with the earlier blanket-__s64 behaviour
     # (spinel's `int` is signed 64-bit and has no unsigned variant, and locals
@@ -73,13 +73,13 @@ module SpinelEbpf
     # Names that the codegen treats as built-in eBPF intrinsics rather than
     # ordinary method calls. spnl_emit(x) -> ringbuf reserve/submit/return 0.
     # pkt_* builtins access XDP packet headers and require an
-    # implicit `ctx` (struct xdp_md *) in scope — emit_method passes ctx
+    # implicit `ctx` (struct xdp_md *) in scope -- emit_method passes ctx
     # into the inner function for :xdp attaches.
     # IPv6 address builtins added (hi/lo split since __s64 can't hold a
     # full 128bit value). pkt_l4_proto / pkt_l4_sport / pkt_l4_dport /
     # pkt_tcp_flags / pkt_l4_payload_len are extended below to also walk
     # ETH_P_IPV6 (0x86DD) packets. Extension headers (Hop-by-Hop, Routing,
-    # Fragment, ...) are out of scope — if ip6h->nexthdr is not TCP/UDP
+    # Fragment, ...) are out of scope -- if ip6h->nexthdr is not TCP/UDP
     # directly, builtins return 0 (caller-visible signal: "not L4 we know").
     PKT_BUILTINS = %w[
       pkt_len pkt_eth_proto pkt_l4_proto pkt_ip4_src pkt_ip4_dst
@@ -92,7 +92,7 @@ module SpinelEbpf
     # chain accessor map. `pkt.l4.proto` reads through a 3-element
     # CallNode chain that bottoms out in `pkt` (no receiver, no args).
     # Mapping the chain back to the flat builtin lets us share the existing
-    # pkt_builtin_call implementation — only the surface syntax changes.
+    # pkt_builtin_call implementation -- only the surface syntax changes.
     # `pkt.byte_at(off)` is handled separately since it takes an argument.
     # `pkt.ip6.src_hi` etc. for IPv6.
     PKT_CHAIN_MAP = {
@@ -112,16 +112,16 @@ module SpinelEbpf
       %w[pkt tcp seq]           => "pkt_tcp_seq",
       %w[pkt tcp ack]           => "pkt_tcp_ack",
     }.freeze
-    # blocklist_match(ip_host_order) — checks a HASH map populated from
+    # blocklist_match(ip_host_order) -- checks a HASH map populated from
     # userspace via sp_bpf_blocklist_add() / _del(). Returns 1 if the IP is in
     # the blocklist, 0 otherwise. Use inside :ebpf methods (typically TC/XDP).
-    # path_counter_inc(key) — increments bpf_path_counts[key] atomically.
+    # path_counter_inc(key) -- increments bpf_path_counts[key] atomically.
     # Designed for L7 metrics (key = path enum/hash, value = hit count).
-    # reuseport_hash / worker_select(idx) — for SO_REUSEPORT BPF programs.
+    # reuseport_hash / worker_select(idx) -- for SO_REUSEPORT BPF programs.
     # reuseport_hash returns ctx->hash (kernel-computed 5-tuple hash) as int;
     # worker_select(idx) calls bpf_sk_select_reuseport to pick the socket at
     # bpf_worker_sockets[idx]. Use only inside sk_reuseport__<name> methods.
-    # xdp_match_health / xdp_reply_health — M004 kernel-side static
+    # xdp_match_health / xdp_reply_health -- kernel-side static
     # response fast path. xdp_match_health returns 1 when the XDP frame is an
     # IPv4/TCP packet whose payload starts with "GET /health "; xdp_reply_health
     # rewrites the same packet in place to be a 200 OK response and returns
@@ -129,7 +129,7 @@ module SpinelEbpf
     # tcp_sock_* / inet_sock_* field accessors. Each maps to a
     # `BPF_CORE_READ(tcp_sk(sk_as_ptr), <field>)` and is only valid inside
     # tcp_cc__<member> methods (where the kernel hands us a real `struct
-    # sock *`). The Ruby side passes `sk` as a normal __s64 — we cast back
+    # sock *`). The Ruby side passes `sk` as a normal __s64 -- we cast back
     # to the typed pointer at the call site. Add-style helpers
     # (`tcp_sock_snd_cwnd_add`) write to the same fields.
     TCP_SOCK_READERS = {
@@ -155,7 +155,7 @@ module SpinelEbpf
     TCP_SOCK_BUILTINS = (TCP_SOCK_READERS.keys + TCP_SOCK_WRITERS.keys + TCP_SOCK_ADDERS.keys).freeze
 
     # bare field names (without the "tcp_sock_" prefix). Used by the
-    # dot-form sugar — `sk.snd_cwnd` looks up `snd_cwnd` directly.
+    # dot-form sugar -- `sk.snd_cwnd` looks up `snd_cwnd` directly.
     TCP_SOCK_FIELDS = (
       TCP_SOCK_READERS.values + TCP_SOCK_WRITERS.values + TCP_SOCK_ADDERS.values
     ).uniq.to_set.freeze
@@ -313,7 +313,7 @@ module SpinelEbpf
       # pre-scan bodies for `stack_id` / `user_stack_id` calls so the
       # ctx-forwarding decision in emit_method sees the flag before it
       # computes ctx_prefix / params_decl. This is the only flag that
-      # needs pre-knowledge — other flags (uses_ringbuf etc.) only affect
+      # needs pre-knowledge -- other flags (uses_ringbuf etc.) only affect
       # post-body section emission, which happens after method_blocks.
       ctx.uses_stack_trace = ebpf_methods.any? { |mi| stack_trace_referenced?(ast, mi) }
 
@@ -349,7 +349,7 @@ module SpinelEbpf
       sections << emit_offcpu_types_and_map(ctx) if ctx.uses_offcpu
       classes_used.each { |cls| sections << emit_ivar_maps(ctx, cls) }
       sections << emit_toplevel_ivar_maps(ctx, top_ivars) unless top_ivars.empty?
-      # bpf_arena — sparse mmap-able shared memory backing arena_set/get.
+      # bpf_arena -- sparse mmap-able shared memory backing arena_set/get.
       sections << emit_arena_map(ctx) if ctx.uses_arena
       # pkt_* header-access helpers (only what was used).
       sections << emit_pkt_helpers(ctx) unless ctx.pkt_builtins_used.empty?
@@ -360,16 +360,16 @@ module SpinelEbpf
       sections << emit_syncookie_helpers(ctx) unless ctx.syncookie_used.empty?
       # Roadmap #4/#4b/#5b: shared IP/TCP checksum helpers (when a reply is built).
       sections << emit_reply_csum_helpers if ctx.uses_tcp_reply || ctx.uses_tcp_synack || ctx.uses_synack_cookie || !ctx.reply_bodies.empty?
-      # Roadmap #4: tcp_reply_header — turn the packet into a header-only TCP reply
+      # Roadmap #4: tcp_reply_header -- turn the packet into a header-only TCP reply
       # (swap endpoints, set seq/ack/flags, recompute checksums) for XDP_TX.
       sections << emit_tcp_reply_helper if ctx.uses_tcp_reply
-      # Roadmap #4b: tcp_reply_synack — SYN-ACK with the MSS option (syncookie).
+      # Roadmap #4b: tcp_reply_synack -- SYN-ACK with the MSS option (syncookie).
       sections << emit_tcp_synack_helper if ctx.uses_tcp_synack
       # Roadmap #4b': integrated SYN -> SYN-ACK+cookie (bundle sequence).
       sections << emit_synack_cookie_helper if ctx.uses_synack_cookie
-      # Roadmap #5b: tcp_reply_data — data response (adjust_tail + body + csum).
+      # Roadmap #5b: tcp_reply_data -- data response (adjust_tail + body + csum).
       sections << emit_tcp_reply_data(ctx) unless ctx.reply_bodies.empty?
-      # Roadmap #5a: payload_starts(prefix) — per-prefix TCP payload matcher.
+      # Roadmap #5a: payload_starts(prefix) -- per-prefix TCP payload matcher.
       sections << emit_payload_matchers(ctx) unless ctx.payload_matchers.empty?
       # Section output is driven by a data table rather than a hand-written chain of
       # `sections << emit_X(ctx) if ctx.uses_X`. A plugin can insert a section
@@ -394,7 +394,7 @@ module SpinelEbpf
       if ctx.uses_sched_ext
         sections.insert(2, emit_sched_ext_preamble(ctx))
       end
-      # real FIFO qdisc preamble — bpf_list_head + spin_lock +
+      # real FIFO qdisc preamble -- bpf_list_head + spin_lock +
       # skb_node wrapper struct + bpf_obj_new / bpf_list_push_back macros.
       # Must come before the Qdisc_ops member bodies that reference them.
       if ctx.uses_qdisc_fifo
@@ -437,7 +437,7 @@ module SpinelEbpf
 
     # does method `mi`'s body call the builtin `name`? Used for the
     # uses_sock_owner pre-scan (emit_connect must know at body-lowering time
-    # whether to emit the correlation lookup — mirrors stack_trace_referenced?).
+    # whether to emit the correlation lookup -- mirrors stack_trace_referenced?).
     def body_calls?(ast, mi, name)
       bid = mi.body_id
       return false if !bid || bid < 0
@@ -480,10 +480,10 @@ module SpinelEbpf
     # C11 reserved words. If a Ruby identifier (local var / param /
     # top-level method) happens to match one, we suffix `_` to keep the
     # emitted .bpf.c compile-clean. Ruby allows e.g. `def add(double); end`
-    # — without sanitization that becomes `__s64 add(__s64 double)` and
+    # -- without sanitization that becomes `__s64 add(__s64 double)` and
     # clang refuses. C99/C11 additions (_Bool, restrict, inline) included.
     # NOT included: typedefs from vmlinux.h (size_t etc.) since they're not
-    # keywords — they just shadow if reused. C++ keywords (class, new,
+    # keywords -- they just shadow if reused. C++ keywords (class, new,
     # delete, ...) are also out of scope: we compile with `-x c`.
     C_KEYWORDS = %w[
       auto break case char const continue default do double else enum extern
@@ -507,16 +507,16 @@ module SpinelEbpf
       :ir, :ast, :partition, :base_name, :unit_name, :uses_ringbuf,
       :uses_str_ringbuf,     # separate ringbuf for spnl_emit_str
       :uses_pair_ringbuf,    # separate ringbuf for spnl_emit_pair
-      :uses_emit3_ringbuf,   # spnl_emit3(a, b, c) — 3-tuple ringbuf
-      :uses_emit4_ringbuf,   # spnl_emit4(a, b, c, d) — 4-tuple ringbuf
-      :uses_conn_ringbuf,    # emit_connect — packed connect-event ringbuf
-      :uses_dns_ringbuf,     # emit_dns — DNS-event ringbuf
-      :uses_dns_latency,     # dns_req_start/dns_resp_stash/dns_emit — DNS RTT (txid-keyed)
-      :uses_sock_owner,      # sock_owner_set — sock->owner correlation map
-      :uses_l7,              # req_start/emit_l7 — send->recv L7 latency correlation
-      :uses_http_l7,         # http_req_start/http_resp_stash/http_emit — HTTP L7 RED
-      :uses_redis_l7,        # redis_req_start/redis_resp_stash/redis_emit — Redis L7 RED
-      :uses_offcpu,          # offcpu_* — off-CPU-during-request correlation
+      :uses_emit3_ringbuf,   # spnl_emit3(a, b, c) -- 3-tuple ringbuf
+      :uses_emit4_ringbuf,   # spnl_emit4(a, b, c, d) -- 4-tuple ringbuf
+      :uses_conn_ringbuf,    # emit_connect -- packed connect-event ringbuf
+      :uses_dns_ringbuf,     # emit_dns -- DNS-event ringbuf
+      :uses_dns_latency,     # dns_req_start/dns_resp_stash/dns_emit -- DNS RTT (txid-keyed)
+      :uses_sock_owner,      # sock_owner_set -- sock->owner correlation map
+      :uses_l7,              # req_start/emit_l7 -- send->recv L7 latency correlation
+      :uses_http_l7,         # http_req_start/http_resp_stash/http_emit -- HTTP L7 RED
+      :uses_redis_l7,        # redis_req_start/redis_resp_stash/redis_emit -- Redis L7 RED
+      :uses_offcpu,          # offcpu_* -- off-CPU-during-request correlation
       :ebpf_methods_by_name,
       :loop_counter,         # monotonically growing id for callback names
       :deferred_functions,   # array of "static int <cb>(__u32 i, void *_raw) {...}"
@@ -530,7 +530,7 @@ module SpinelEbpf
       :uses_tcp_slice,            # true if any xdp__tcp_slice__<name> method exists
       :uses_dynptr,               # true if any :ebpf method uses pkt_dynptr_* builtins
       :uses_user_ringbuf,         # true if any user_ringbuf__<name> callback exists
-      :user_ringbuf_cb_name,      # the cb name (m[1]) — used by drain builtin to reference it
+      :user_ringbuf_cb_name,      # the cb name (m[1]) -- used by drain builtin to reference it
       :uses_tail_call,            # true if PROG_ARRAY + tail_call should be emitted
       :tail_targets,              # Array of xdp_tail__<name> in declaration order
       :uses_cpumap,               # true if any :ebpf method calls cpumap_redirect
@@ -556,18 +556,18 @@ module SpinelEbpf
       :uses_qdisc_fifo,           # any :ebpf method calls queue_push / queue_pop
       :uses_kfield,               # any :ebpf method calls kfield / a kptr dot accessor (needs BPF_CORE_READ)
       :uses_fib,                  # any :ebpf method calls fib_lookup (struct bpf_fib_lookup stack local + bpf_fib_lookup; needs bpf_endian.h)
-      :uses_csum,                 # any :ebpf method calls l3_csum_replace / l4_csum_replace (bpf_htons → needs bpf_endian.h)
+      :uses_csum,                 # any :ebpf method calls l3_csum_replace / l4_csum_replace (bpf_htons  ->  needs bpf_endian.h)
       :uses_arena,                # any :ebpf method calls arena_set / arena_get (BPF_MAP_TYPE_ARENA + __arena global; needs clang -mcpu=v3)
       :uses_task_storage,         # any :ebpf method calls task_load / task_store (TASK_STORAGE map)
       :uses_map_in_map,           # any :ebpf method calls mim_inc / mim_get (ARRAY_OF_MAPS)
       :uses_fifo,                 # any :ebpf method calls fifo_push / fifo_pop (QUEUE)
       :uses_lifo,                 # any :ebpf method calls lifo_push / lifo_pop (STACK)
       :uses_leak_track,           # any :ebpf method calls leak_record / leak_forget (bpf_allocs HASH)
-      :uses_lock_edge,            # any :ebpf method calls lock_edge (bpf_lock_edges HASH — deadlock)
+      :uses_lock_edge,            # any :ebpf method calls lock_edge (bpf_lock_edges HASH -- deadlock)
       :uses_keyed_lat,            # any :ebpf method calls lat_start / lat_end (arbitrary-key latency)
       :uses_depth,                # any :ebpf method calls depth_inc / depth_dec (instrument depth-collapse)
       :flow_maps,                 # Roadmap #2: Hash<name(String) => [field(String)]> declared via flow_map.
-      :flow_map_kinds,            # Roadmap #2: Hash<name => Set<:xdp|:tc>> — which ctx each flow map is used in.
+      :flow_map_kinds,            # Roadmap #2: Hash<name => Set<:xdp|:tc>> -- which ctx each flow map is used in.
       :syncookie_used,            # Roadmap #3: Set of :gen/:check tcp_syncookie_* builtins used.
       :uses_tcp_reply,            # Roadmap #4: true if any method calls tcp_reply_header.
       :uses_tcp_synack,           # Roadmap #4b: true if any method calls tcp_reply_synack (MSS option).
@@ -636,7 +636,7 @@ module SpinelEbpf
                     ctx.uses_tcp_slice || ctx.uses_fib || ctx.uses_csum || ctx.uses_l7 || ctx.uses_http_l7 || ctx.uses_redis_l7
       extras << "#include <bpf/bpf_endian.h>" if need_endian
       # struct_ops wrappers use the BPF_PROG macro from
-      # bpf_tracing.h to bridge `__u64 *ctx` → typed kernel-struct args.
+      # bpf_tracing.h to bridge `__u64 *ctx`  ->  typed kernel-struct args.
       # kprobe/kretprobe with params lowers each to PT_REGS_PARM<i>(ctx)
       # which is also declared in bpf_tracing.h. The include was previously
       # skipped for plain probes so kprobes with 3+ params failed to compile.
@@ -712,7 +712,7 @@ module SpinelEbpf
 
     # per-unit N-tuple event channel. n in {3, 4}. The struct field
     # names match the host parse contract: 3-tuple = (a, b, c), 4-tuple =
-    # (a, b, c, d). Anything beyond 4 deferred to a future Edoc — by then
+    # (a, b, c, d). Anything beyond 4 deferred to a future Edoc -- by then
     # users will have hit the limits of fixed-arity emit and a variadic
     # design will be motivated by concrete need.
     def emit_n_tuple_event_types_and_map(ctx, n)
@@ -868,7 +868,7 @@ module SpinelEbpf
       RB
     end
 
-    # HTTP L7 RED — pending request (send) + recv-buffer stash (recvmsg entry) +
+    # HTTP L7 RED -- pending request (send) + recv-buffer stash (recvmsg entry) +
     # combined event (kretprobe). method/path/status parsed in userspace (kernel bounded copy).
     def emit_http_types_and_map(ctx)
       u = ctx.unit_name
@@ -1105,7 +1105,7 @@ module SpinelEbpf
     # pair that was referenced from a method body. struct xdp_md and
     # struct __sk_buff both expose data/data_end at the same field names with
     # PTR_TO_PACKET / PTR_TO_PACKET_END verifier semantics, so the C body is
-    # bit-for-bit identical — only the signature (ctx type and helper name)
+    # bit-for-bit identical -- only the signature (ctx type and helper name)
     # differs between XDP and TC variants.
     def emit_pkt_helpers(ctx)
       blocks = []
@@ -1125,8 +1125,8 @@ module SpinelEbpf
         <<~LEN
           /* total packet length (data_end - data). Always safe.
            * The intermediate unsigned-long conversion forces the verifier to
-           * see both sides as scalars before the subtraction — otherwise pkt_end
-           * leaks into downstream arithmetic (L001). */
+           * see both sides as scalars before the subtraction -- otherwise pkt_end
+           * leaks into downstream arithmetic. */
           static __noinline __s64 #{fn_prefix}_#{name}(#{ctx_decl})
           {
               unsigned long e = (unsigned long)(long)ctx->data_end;
@@ -1150,7 +1150,7 @@ module SpinelEbpf
         <<~L4P
           /* L4 protocol (TCP=6, UDP=17, ICMP=1, ICMPv6=58), or 0 if not
            * IPv4 nor IPv6 / truncated.
-           * For IPv6 we return ip6h->nexthdr directly — if it's an
+           * For IPv6 we return ip6h->nexthdr directly -- if it's an
            * extension header (Hop-by-Hop=0, Routing=43, Fragment=44, ...)
            * the caller sees that value as-is (extension header walking is
            * out of scope for this builtin). */
@@ -1316,7 +1316,7 @@ module SpinelEbpf
 
     # IPv6 address half (hi=upper 64 bits / lo=lower 64 bits) in host
     # byte order. __s64 return is consistent with pkt_ip4_src/dst even though
-    # the high bit may make values appear "negative" in Ruby — that's a
+    # the high bit may make values appear "negative" in Ruby -- that's a
     # consequence of the 64-bit signed return, not a bug.
     # `in6_u.u6_addr32[i]` is the portable vmlinux.h path (anonymous union
     # member). bpf_ntohl on each 32-bit half then combined into one __u64
@@ -1383,7 +1383,7 @@ module SpinelEbpf
         /* per-unit CIDR blocklist (LPM_TRIE). Populated from userspace via
          * sp_bpf_cidr_blocklist_add(ip_host_order, prefixlen) / _del, read from
          * BPF via spnl_cidr_blocklist_match(ip_host_order). The key's data[] is
-         * big-endian (network order) — the trie matches bits MSB-first. */
+         * big-endian (network order) -- the trie matches bits MSB-first. */
         struct spnl_cidr_key {
             __u32 prefixlen;
             __u8  data[4];
@@ -1660,13 +1660,13 @@ module SpinelEbpf
     # bpf_get_current_pid_tgid), value = bpf_ktime_get_ns() captured at
     # latency_start. latency_end reads/deletes and returns the delta in ns.
     # 10240 max_entries supports high concurrency; on overflow new starts
-    # silently fail (BPF_ANY would have replaced an older entry — accept that).
+    # silently fail (BPF_ANY would have replaced an older entry -- accept that).
     LATENCY_MAP_NAME = "bpf_lat_starts"
     LATENCY_MAX_ENTRIES = 10240
 
     def emit_latency_map_and_helper(_ctx)
       <<~LAT
-        /* per-unit kprobe→kretprobe latency timing.
+        /* per-unit kprobe-to-kretprobe latency timing.
          * key=tid (current_pid_tgid lower 32), value=entry ktime_ns. */
         struct {
             __uint(type, BPF_MAP_TYPE_HASH);
@@ -1703,11 +1703,11 @@ module SpinelEbpf
     #
     # IMPORTANT (measured): on this kernel, two separate
     # bpf_task_storage_get() calls in ONE program execution return DIFFERENT
-    # storage objects — so task_load() followed by task_store() in the SAME
+    # storage objects -- so task_load() followed by task_store() in the SAME
     # handler does NOT round-trip. Each op below does a SINGLE get, so use:
     #   - task_incr(delta) for per-task accumulation (counter), and
     #   - task_store / task_load in SEPARATE probes (e.g. fentry stores an entry
-    #     timestamp, fexit loads it) — the classic BEGIN/END pattern.
+    #     timestamp, fexit loads it) -- the classic BEGIN/END pattern.
     TASK_STORAGE_MAP_NAME = "bpf_task_store"
 
     def emit_task_storage_map_and_helper(_ctx)
@@ -1749,7 +1749,7 @@ module SpinelEbpf
             return *v;
         }
 
-        /* single-get read-modify-write — store `value`, return the prior
+        /* single-get read-modify-write -- store `value`, return the prior
          * value. One bpf_task_storage_get, so it stays clear of the two-get
          * aliasing quirk. */
         static __always_inline __s64 spnl_task_swap(__s64 value)
@@ -1891,7 +1891,7 @@ module SpinelEbpf
     def emit_histogram_keyed_map_and_helper(_ctx)
       <<~HISTK
         /* keyed log2 histogram (#{HISTOGRAM_KEYED_MAX_KEYS} keys * #{HISTOGRAM_SLOTS} slots).
-         * The value struct is #{HISTOGRAM_SLOTS * 8} bytes — too large to put on the BPF
+         * The value struct is #{HISTOGRAM_SLOTS * 8} bytes -- too large to put on the BPF
          * stack (512B limit). We stash a pre-zeroed template in a per-CPU
          * ARRAY of size 1 and use it for new-key initialization. */
         struct spnl_hist_struct { __u64 buckets[#{HISTOGRAM_SLOTS}]; };
@@ -1964,7 +1964,7 @@ module SpinelEbpf
     # PERF_MAX_STACK_DEPTH = 127 is the kernel-default cap; each entry is a
     # __u64 array of that many PCs. 16384 max_entries (~16M when full) is
     # the bcc convention. Host symbolicates via /proc/kallsyms (kernel)
-    # or /proc/<pid>/maps + ELF (user — userspace responsibility for MVP).
+    # or /proc/<pid>/maps + ELF (user -- userspace responsibility for MVP).
     STACK_TRACE_MAP_NAME    = "bpf_stacks"
     STACK_TRACE_MAX_ENTRIES = 16384
     PERF_MAX_STACK_DEPTH    = 127
@@ -1985,7 +1985,7 @@ module SpinelEbpf
 
     # off-CPU tracking. key = pid (lower 32 of bpf_get_current_pid_tgid),
     # value = (entry timestamp, captured kernel stack id). Used together with
-    # bpf_hist_keyed + bpf_stacks — when a task comes back
+    # bpf_hist_keyed + bpf_stacks -- when a task comes back
     # on-CPU we look up its entry, compute delta ns, and bin
     # hist_observe_by(stack_id, delta) so the keyed-hist row for that stack
     # accumulates total off-CPU time. Map name ≤ 15 chars.
@@ -2033,7 +2033,7 @@ module SpinelEbpf
             __u32 stack_id = e->stack_id;
             bpf_map_delete_elem(&#{OFF_CPU_MAP_NAME}, &pid);
 
-            /* Inline hist_observe_by(stack_id, delta) — keyed log2 hist. */
+            /* Inline hist_observe_by(stack_id, delta) -- keyed log2 hist. */
             __u64 k = (__u64)stack_id;
             struct spnl_hist_struct *cur =
                 bpf_map_lookup_elem(&#{HISTOGRAM_KEYED_MAP_NAME}, &k);
@@ -2057,7 +2057,7 @@ module SpinelEbpf
     # SO_REUSEPORT worker sockarray. Each entry holds a listening socket
     # from a worker process (userspace populates via bpf_map_update_elem with
     # the socket fd). The sk_reuseport program uses bpf_sk_select_reuseport
-    # to pick which entry handles an incoming SYN — consistent hashing on
+    # to pick which entry handles an incoming SYN -- consistent hashing on
     # ctx->hash is the typical lookup. Map name fits the 15-char cap.
     REUSEPORT_SOCKARRAY_NAME = "bpf_worker_socks"
     REUSEPORT_SOCKARRAY_MAX  = 64
@@ -2078,7 +2078,7 @@ module SpinelEbpf
       SR
     end
 
-    # M004 fast-path constants. The request prefix is 12 bytes (no path
+    # fast-path constants. The request prefix is 12 bytes (no path
     # variability) so we can unroll the byte-by-byte compare; the response is
     # fixed at 41 bytes (HTTP/1.0 200 OK + Content-Length: 3 + body "OK\n").
     M004_REQUEST_PREFIX  = "GET /health "
@@ -2146,7 +2146,7 @@ module SpinelEbpf
       <<~REPLY
         /* hand-craft a 200 OK response packet in place and return XDP_TX.
          * Returns XDP_PASS on any error so kernel falls back to the userspace path.
-         * Designed for /health (41-byte response) — fits within MSS without splitting. */
+         * Designed for /health (41-byte response) -- fits within MSS without splitting. */
         static __noinline __s64 spnl_xdp_reply_health(struct xdp_md *ctx)
         {
             void *data     = (void *)(long)ctx->data;
@@ -2247,7 +2247,7 @@ module SpinelEbpf
             /* support TCP headers with options. Linux loopback always
              * carries the TS option (thl=32). The original check
              * `thl != 20` silently returned XDP_PASS for almost every real
-             * packet — that is the dominant explanation for the earlier
+             * packet -- that is the dominant explanation for the earlier
              * reliability ceiling. Accept thl in {20, 32}; for thl=32 the
              * verifier needs a fresh bounds check that establishes
              * accessible-prefix length, not just `pointer < data_end`. */
@@ -2271,8 +2271,8 @@ module SpinelEbpf
 
             /* Payload checksum is fixed (we just wrote a constant body), so
              * use a codegen-time precomputed partial sum instead of looping
-             * over packet bytes — the verifier rejects pointer arithmetic on
-             * the in-packet u16 pointer (L001 family). */
+             * over packet bytes -- the verifier rejects pointer arithmetic on
+             * the in-packet u16 pointer. */
             tcp_csum += 0x#{M004_RESPONSE_CSUM_PARTIAL.to_s(16)}; /* precomputed payload partial csum (#{M004_RESPONSE_BODY.length} bytes) */
             while (tcp_csum >> 16) tcp_csum = (tcp_csum & 0xffff) + (tcp_csum >> 16);
             tcp->check = (__u16)~tcp_csum;
@@ -2282,7 +2282,7 @@ module SpinelEbpf
       REPLY
     end
 
-    # emit the full pure-XDP TCP slice — maps (bpf_conntab + counters),
+    # emit the full pure-XDP TCP slice -- maps (bpf_conntab + counters),
     # all helpers (csum/swap_mac/build_*), and the state machine entry
     # `spnl_tcp_slice_main(ctx)`. The per-method wrapper (emitted from
     # emit_method when attach kind is :xdp_tcp_slice) is a thin SEC("xdp")
@@ -2303,11 +2303,10 @@ module SpinelEbpf
 
     def emit_tcp_slice_bundle(ctx)
       # when `kernel_cache "/path","body"` declarations exist, serve the
-      # first one from the slice (single-route MVP). Otherwise keep the M004
-      # /health defaults so existing xdp__tcp_slice__ programs are byte-identical.
-      # kernel_cache turns this slice into a multi-route cache —
+      # first one from the slice (single-route MVP). Otherwise keep the # /health defaults so existing xdp__tcp_slice__ programs are byte-identical.
+      # kernel_cache turns this slice into a multi-route cache --
       # each declared path is a slot (declaration order) served from bpf_kc_resp.
-      # With no declaration the slice keeps the M004 /health default.
+      # With no declaration the slice keeps the /health default.
       kc_decls       = ctx && ctx.ast ? KernelCache.declarations(ctx.ast) : []
       kc_entry       = kc_decls.first
       port           = TCP_SLICE_PORT
@@ -2347,7 +2346,7 @@ module SpinelEbpf
              * SHRINK for real clients, so native XDP_TX works on NICs like nxp_enetc4
              * that drop adjust_tail-GROWN frames), and checksums the variable-length
              * payload via this precomputed partial sum + a FIXED 20-byte header
-             * bpf_csum_diff — avoiding a variable-length bpf_csum_diff (which the
+             * bpf_csum_diff -- avoiding a variable-length bpf_csum_diff (which the
              * verifier rejects after a variable adjust_tail). 0/unset => CAP fallback. */
             struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -2383,7 +2382,7 @@ module SpinelEbpf
         end
       # a CAP-sized cache response usually exceeds the request
       # payload, so the frame must be grown BEFORE build_response writes into it
-      # (M004 /health fit in-place over the GET payload; a cache response won't).
+      # (/health fit in-place over the GET payload; a cache response won't).
       # Mirrors the SYN path: adjust_tail then re-fetch+revalidate eth/iph/tcp.
       # Seqs are computed from the original packet just above, so this is safe.
       pregrow =
@@ -2698,7 +2697,7 @@ PCFN
                 return XDP_PASS;
             }
 
-            /* RST: clean up state, and cancel the timer too — map_delete
+            /* RST: clean up state, and cancel the timer too -- map_delete
              * implicitly cancels but explicit cancel is safer when both
              * paths (XDP and timer callback) race on the same value. */
             if (tcp->rst) {
@@ -2808,9 +2807,9 @@ PCFN
             }
 
             /* FIN from client.
-             *  - state==2 (RESP_SENT): first FIN → build FIN-ACK, transition
+             *  - state==2 (RESP_SENT): first FIN  ->  build FIN-ACK, transition
              *    to CLOSED.
-             *  - state==3 (CLOSED):   retransmit → rebuild same FIN-ACK
+             *  - state==3 (CLOSED):   retransmit  ->  rebuild same FIN-ACK
              *    using the stored seqs (client_seq already advanced by FIN).
              *
              * In both cases we send the same packet shape (eth+ip+tcp ACK,
@@ -2822,7 +2821,7 @@ PCFN
                     spnl_tcp_slice_inc(8); /* CNT_FIN_RX */
                     cli_seq_for_ack = bpf_ntohl(tcp->seq) + payload_len + 1;
                 } else {
-                    /* CLOSED → retransmit. state.client_seq already includes
+                    /* CLOSED  ->  retransmit. state.client_seq already includes
                      * the +1 for the original FIN slot. */
                     spnl_tcp_slice_inc(16); /* CNT_FIN_RETX */
                     cli_seq_for_ack = st->client_seq;
@@ -2856,8 +2855,8 @@ PCFN
             }
 
             /* Data path. Two cases handle the same packet shape:
-             *  - state==1 (ESTABLISHED): first GET → send response, advance state
-             *  - state==2 (RESP_SENT)  : GET retransmit → re-send response
+             *  - state==1 (ESTABLISHED): first GET  ->  send response, advance state
+             *  - state==2 (RESP_SENT)  : GET retransmit  ->  re-send response
              *                            using the seqs we already saved
              */
             if (payload_len > 0 && (st->state == 1 || st->state == 2)) {
@@ -2923,7 +2922,7 @@ PCFN
     # verifier-safe representation of the XDP frame (incl. multi-buf
     # fragments). `bpf_dynptr_slice` returns either a direct pointer to
     # the frame bytes OR a pointer to the caller-supplied buffer if the
-    # bytes are split across fragments — either way the verifier knows
+    # bytes are split across fragments -- either way the verifier knows
     # `len` bytes are accessible. This decouples the codegen from the
     # manual `pkt + N > data_end` dance used elsewhere.
     #
@@ -2955,7 +2954,7 @@ PCFN
       "min_tso_segs"=> { ret: "__u32", typed_params: "struct sock *sk" },
     }.freeze
 
-    # sched_ext_ops member signatures (subset — the most common
+    # sched_ext_ops member signatures (subset -- the most common
     # ones for a basic CPU scheduler like scx_simple). `sleepable: true`
     # forces SEC("struct_ops.s/<m>") so the member can call sleepable
     # kfuncs (e.g. scx_bpf_create_dsq in init). The hot-path ops
@@ -3005,7 +3004,7 @@ PCFN
     SCHED_EXT_DEFAULT_NAME = "spnl_sx"      # 15-char limit for sched_ext name
     QDISC_DEFAULT_ID       = "spnl_qdisc"   # 15-char limit for Qdisc_ops.id
 
-    # struct_ops registry — drives both the per-method emission path
+    # struct_ops registry -- drives both the per-method emission path
     # (member function wrappers) and the bundle-level emission path
     # (`SEC(".struct_ops") struct <type> <symbol> = { ... };`).
     STRUCT_OPS_REGISTRY = {
@@ -3033,7 +3032,7 @@ PCFN
         symbol:      "spnl_qdisc_ops",
         name_field:  :id,
         default_name: QDISC_DEFAULT_ID,
-        # same reasoning as sched_ext — link form is required so
+        # same reasoning as sched_ext -- link form is required so
         # libbpf can manage the qdisc type lifetime (register on attach,
         # unregister on bpf_link__destroy). tc instances refer to this
         # type by its id ("spnl_qdisc") via `tc qdisc add dev <dev> root
@@ -3085,12 +3084,12 @@ PCFN
       wrapper_body = if ret_c == "void"
                        "    (void)#{func_name}_inner(#{casts});"
                      elsif ret_c.end_with?("*")
-                       # struct sk_buff *, etc. — caller expects pointer
+                       # struct sk_buff *, etc. -- caller expects pointer
                        "    return (#{ret_c})(unsigned long)#{func_name}_inner(#{casts});"
                      else
                        "    return (#{ret_c})#{func_name}_inner(#{casts});"
                      end
-      # BPF_PROG macro chokes on a literal `void` arg list — it must be
+      # BPF_PROG macro chokes on a literal `void` arg list -- it must be
       # absent entirely when there are no kernel-supplied parameters.
       bpf_prog_args = info[:typed_params] == "void" ? "" : ", #{info[:typed_params]}"
       # sched_ext init/exit need ".s" (sleepable) so they can call
@@ -3114,7 +3113,7 @@ PCFN
 
     # generic struct_ops bundle emit. Reads STRUCT_OPS_REGISTRY
     # and uses the per-kind member array stored in ctx. The SEC name varies
-    # by kind — sched_ext uses ".struct_ops.link" for lifetime-managed
+    # by kind -- sched_ext uses ".struct_ops.link" for lifetime-managed
     # registration; tcp_cc / qdisc use plain ".struct_ops".
     def emit_struct_ops_bundle(ctx, kind)
       reg = STRUCT_OPS_REGISTRY[kind] || raise("unknown struct_ops kind #{kind}")
@@ -3149,7 +3148,7 @@ PCFN
     # scx_bpf_consume / SCX_DSQ_GLOBAL / SCX_SLICE_DFL etc. directly.
     #
     # The kfunc externs use `__weak` so the loader doesn't fail when the
-    # running kernel lacks an entry — we surface as a runtime "operation
+    # running kernel lacks an entry -- we surface as a runtime "operation
     # not supported" rather than a load error.
     def emit_sched_ext_preamble(_ctx)
       <<~PRE
@@ -3182,7 +3181,7 @@ PCFN
       PRE
     end
 
-    # real FIFO qdisc preamble — bpf_list_head + spin_lock +
+    # real FIFO qdisc preamble -- bpf_list_head + spin_lock +
     # wrapper struct used by queue_push / queue_pop builtins to actually
     # queue packets, rather than only dropping them.
     #
@@ -3249,7 +3248,7 @@ PCFN
       <<~CM
         /* CPUMAP for XDP per-CPU fanout. Entries are populated from
          * userspace (e.g. via bpftool map update or libbpf). Value is a
-         * 64-bit `bpf_cpumap_val { __u32 qsize; __u32 prog_id; }` — userspace
+         * 64-bit `bpf_cpumap_val { __u32 qsize; __u32 prog_id; }` -- userspace
          * supplies a `qsize` (typically 192) and optionally a secondary
          * XDP prog id to run on the destination CPU. */
         struct {
@@ -3261,7 +3260,7 @@ PCFN
       CM
     end
 
-    # AF_XDP XSKMAP — XDP redirects matched frames to user-space AF_XDP
+    # AF_XDP XSKMAP -- XDP redirects matched frames to user-space AF_XDP
     # (XSK) sockets. Slots are populated from userspace (bind an XSK to a
     # queue, then update the map). Apple container is single-queue so real
     # redirect isn't measurable here, but the codegen + verifier path are
@@ -3324,7 +3323,7 @@ PCFN
           ""
         end
       <<~UCMD
-        /* USER_RINGBUF for host→kernel command channel.
+        /* USER_RINGBUF for host -> kernel command channel.
          * Records are __u64 commands (interpretation up to the user). */
         struct {
             __uint(type, BPF_MAP_TYPE_USER_RINGBUF);
@@ -3364,10 +3363,10 @@ PCFN
         /* bpf_dynptr-backed XDP byte access. vmlinux.h (CO-RE BTF)
          * already declares bpf_dynptr_from_xdp / bpf_dynptr_slice as
          * `__weak __ksym` externs with `u64 offset`, so we don't redeclare
-         * them here — just use them.
+         * them here -- just use them.
          *
          * Read a single byte from an XDP frame at runtime offset. The
-         * verifier validates the 1-byte access via the dynptr — no manual
+         * verifier validates the 1-byte access via the dynptr -- no manual
          * `data + off > data_end` check needed in the caller. */
         static __noinline __s64 spnl_pkt_dynptr_byte_at(struct xdp_md *ctx, __s64 off)
         {
@@ -3385,11 +3384,11 @@ PCFN
     # Helper for {sport,dport}: ports live at offset 0 / 2 of the L4 header
     # (true for both TCP and UDP). Returns 0 if not TCP/UDP or truncated.
     # IPv6 branch added. Extension headers (nexthdr != TCP/UDP directly)
-    # are out of scope — we return 0 in that case.
+    # are out of scope -- we return 0 in that case.
     # Roadmap (Ruby tcp_slice) #1: read a 32-bit TCP header field (seq at offset 4,
     # ack_seq at offset 8) in host byte order, 0 if not TCP / truncated. TCP-only
     # (seq/ack are meaningless for UDP). IPv4 + IPv6 branches, each with its own
-    # bounds check (L001 family). Mirrors pkt_l4_port_helper but reads __be32.
+    # bounds check. Mirrors pkt_l4_port_helper but reads __be32.
     def pkt_tcp_u32_field_helper(name, offset, ctx_decl, fn_prefix)
       field = name.sub("pkt_tcp_", "")
       end_off = offset + 4
@@ -3472,10 +3471,10 @@ PCFN
     #   Glue.c attaches via bpf_program__attach_tcx() reading $SPNL_TCX_IFACE.
     # `sk_reuseport__<name>` -> SEC("sk_reuseport"), ctx = struct sk_reuseport_md *.
     #   Body returns SK_PASS / SK_DROP. Used for SO_REUSEPORT worker selection
-    #   (M003 multi-worker HTTP server). Attach is application-specific
+    #   (multi-worker HTTP server). Attach is application-specific
     #   (setsockopt(SO_ATTACH_REUSEPORT_EBPF)) so the libbpf skeleton's
-    #   default __attach() is a no-op for these programs — that's expected.
-    # sockmap / sk_msg / sk_skb (M004 building block).
+    #   default __attach() is a no-op for these programs -- that's expected.
+    # sockmap / sk_msg / sk_skb (building block).
     #   `sk_msg__<name>`           -> SEC("sk_msg"),               ctx = struct sk_msg_md *
     #   `sk_skb__verdict__<name>`  -> SEC("sk_skb/stream_verdict"), ctx = struct __sk_buff *
     #   `sk_skb__parser__<name>`   -> SEC("sk_skb/stream_parser"),  ctx = struct __sk_buff *
@@ -3499,20 +3498,20 @@ PCFN
       # fentry__<func>(arg1, ...) and fexit__<func>(arg1, ..., ret).
       [/\Afentry__(.+)\z/,              :fentry],
       [/\Afexit__(.+)\z/,               :fexit],
-      # BPF_PROG_TYPE_LSM — security hook (needs CONFIG_BPF_LSM + the bpf
+      # BPF_PROG_TYPE_LSM -- security hook (needs CONFIG_BPF_LSM + the bpf
       # LSM active). `def lsm__<hook>(args..., ret)`; return 0 to allow, a
       # negative errno to deny. Args/ret arrive like fexit (ctx[i]).
       [/\Alsm__(.+)\z/,                 :lsm],
-      # BPF_MODIFY_RETURN (fmod_ret) — override a function's return value
+      # BPF_MODIFY_RETURN (fmod_ret) -- override a function's return value
       # (error injection). `def fmod_ret__<func>(args..., ret)`; the handler's
       # return value replaces the function's. Target must be fmod-able
       # (ALLOW_ERROR_INJECTION / security_* hooks).
       [/\Afmod_ret__(.+)\z/,            :fmod_ret],
-      # USER_RINGBUF host→kernel command channel. The Ruby method is
+      # USER_RINGBUF host -> kernel command channel. The Ruby method is
       # treated as a static callback (no SEC), invoked by
       # `bpf_user_ringbuf_drain` for each pending record.
       [/\Auser_ringbuf__(.+)\z/,        :user_ringbuf],
-      # BPF_PROG_TYPE_SOCK_OPS — TCP socket state observation. Attach
+      # BPF_PROG_TYPE_SOCK_OPS -- TCP socket state observation. Attach
       # is cgroup-scoped (BPF_CGROUP_SOCK_OPS), so glue.c will attach to
       # $SPNL_CGROUP_PATH (default /sys/fs/cgroup) when set.
       [/\Asock_ops__(.+)\z/,            :sock_ops],
@@ -3618,7 +3617,7 @@ PCFN
       "TCP_FLAG_URG" => 0x20,
       "TCP_FLAG_ECE" => 0x40,
       "TCP_FLAG_CWR" => 0x80,
-      # BPF_SOCK_OPS_* event codes — selectable by `sock_ops_op` inside
+      # BPF_SOCK_OPS_* event codes -- selectable by `sock_ops_op` inside
       # a `def sock_ops__<name>(skops)` callback.
       "BPF_SOCK_OPS_TIMEOUT_INIT"           => 1,
       "BPF_SOCK_OPS_RWND_INIT"              => 2,
@@ -3679,7 +3678,7 @@ PCFN
     end.freeze
 
     # macro-valued constants (paths that resolve to C macro names rather
-    # than integer literals — useful when the value is bigger than __s64 can
+    # than integer literals -- useful when the value is bigger than __s64 can
     # express, like SCX_DSQ_GLOBAL = (1ULL << 63) | 1). Lowering emits the
     # macro name verbatim; the macro itself is provided by emit_sched_ext_preamble.
     MACRO_PATHS = {
@@ -3699,14 +3698,14 @@ PCFN
         when :kprobe, :kretprobe
           return { kind: kind, sec: "#{kind}/#{m[1]}",   ctx_type: "struct pt_regs *" }
         when :uprobe, :uretprobe
-          # SEC name is just "uprobe" / "uretprobe" — libbpf reads the
+          # SEC name is just "uprobe" / "uretprobe" -- libbpf reads the
           # SEC to set program type; binary path + func offset are supplied
           # at attach time via bpf_program__attach_uprobe_opts() in glue.c.
           return { kind: kind, sec: kind.to_s,
                    up_func: m[1], ctx_type: "struct pt_regs *" }
         when :usdt
           # SEC("usdt") + bpf_program__attach_usdt() in glue.c. Args
-          # are read via bpf_usdt_arg(ctx, i, &val) — see extract_attach_args.
+          # are read via bpf_usdt_arg(ctx, i, &val) -- see extract_attach_args.
           return { kind: kind, sec: "usdt",
                    usdt_provider: m[1], usdt_name: m[2],
                    ctx_type: "struct pt_regs *" }
@@ -3723,15 +3722,15 @@ PCFN
         when :lsm
           # BPF_PROG_TYPE_LSM. SEC("lsm/<hook>"); args (and the trailing
           # prior-verdict `ret`) read as ctx[i] like fexit. Return value is the
-          # access decision (0 = allow, negative errno = deny) — propagated.
+          # access decision (0 = allow, negative errno = deny) -- propagated.
           return { kind: kind, sec: "lsm/#{m[1]}", lsm_hook: m[1], ctx_type: "__u64 *" }
         when :fmod_ret
           # BPF_MODIFY_RETURN. SEC("fmod_ret/<func>"); args + trailing
           # `ret` read as ctx[i] like fexit. The handler's return value
-          # replaces the traced function's return — propagated.
+          # replaces the traced function's return -- propagated.
           return { kind: kind, sec: "fmod_ret/#{m[1]}", fmod_func: m[1], ctx_type: "__u64 *" }
         when :user_ringbuf
-          # USER_RINGBUF callback. Not a SEC entrypoint — emitted as
+          # USER_RINGBUF callback. Not a SEC entrypoint -- emitted as
           # a static fn called by bpf_user_ringbuf_drain. The "ctx_type"
           # field is unused (emit_method short-circuits this kind).
           return { kind: kind, cb_name: m[1], sec: nil, ctx_type: nil }
@@ -3769,7 +3768,7 @@ PCFN
           return { kind: kind, sec: "xdp", xdp_name: m[1], ctx_type: "struct xdp_md *" }
         when :xdp_tcp_slice
           # pure-XDP TCP slice. The Ruby method body is treated as a
-          # marker — codegen emits a complete state-machine + helpers.
+          # marker -- codegen emits a complete state-machine + helpers.
           return { kind: kind, sec: "xdp", ts_name: m[1], ctx_type: "struct xdp_md *" }
         when :xdp_tail
           # tail-callable XDP sub-program. Same SEC("xdp") as a
@@ -3806,7 +3805,7 @@ PCFN
           return { kind: kind, name: m[1], sec: "syscall", ctx_type: "void *" }
         when :perf_event
           # SEC("perf_event") + per-CPU perf_event_open() driven by
-          # glue.c. Body usually doesn't take typed params — perf_event
+          # glue.c. Body usually doesn't take typed params -- perf_event
           # callbacks receive `struct bpf_perf_event_data *` (the sample's
           # registers), which we forward as ctx when stack_id() is used.
           return { kind: kind, pe_name: m[1], sec: "perf_event",
@@ -3828,14 +3827,14 @@ PCFN
       when :kprobe, :kretprobe, :uprobe, :uretprobe
         # signal license_and_includes() that we need bpf_tracing.h
         # for the PT_REGS_PARM<N> macros. Caller passes ctx so we can set
-        # the flag — for callers that don't (legacy code paths), the
+        # the flag -- for callers that don't (legacy code paths), the
         # macros may still be in scope via another include but this is
         # the supported route.
         # uprobe/uretprobe use the same pt_regs-based arg extraction
-        # as kprobe — userspace function args are in the same registers.
+        # as kprobe -- userspace function args are in the same registers.
         ctx.uses_pt_regs_parm = true if ctx && !params.empty?
         # kprobe entry params are the kernel function's
-        # arguments — resolve them by name from BTF when possible (kretprobe's
+        # arguments -- resolve them by name from BTF when possible (kretprobe's
         # param is the return value, and uprobe/uretprobe are userspace, so
         # those stay positional).
         kp_idxs = attach[:kind] == :kprobe ? btf_arg_indices(kprobe_target_func(attach), params) : nil
@@ -3902,7 +3901,7 @@ PCFN
         end
         []
       when :tc_ingress, :tc_egress
-        # MVP: same policy as XDP — no per-param extraction.
+        # MVP: same policy as XDP -- no per-param extraction.
         # pkt_* builtins receive ctx (struct __sk_buff *) implicitly.
         unless params.empty?
           raise UnsupportedNode,
@@ -3938,7 +3937,7 @@ PCFN
       when :usdt
         params.each_with_index.map do |(_n, _t), i|
           # bpf_usdt_arg returns 0 on success, -1 if the argument index is
-          # out of range. We don't bail on -1 — the temporary remains 0,
+          # out of range. We don't bail on -1 -- the temporary remains 0,
           # which is a reasonable fallback for missing args.
           "long _usdt_arg#{i} = 0; (void)bpf_usdt_arg(ctx, #{i}, &_usdt_arg#{i});"
         end
@@ -3950,7 +3949,7 @@ PCFN
     # hardcoded mapping of tracepoint event -> available field names + types.
     # Extending this requires adding entries (eventually we'd lookup via BTF at
     # codegen time). Field names must match the kernel's trace_event_raw_<event>
-    # struct. Param matching is **by name** — declare Ruby block params with the
+    # struct. Param matching is **by name** -- declare Ruby block params with the
     # same name as the struct field you want.
     TRACEPOINT_FIELDS = {
       "sched/sched_switch" => {
@@ -3986,7 +3985,7 @@ PCFN
         "sport" => "int", "dport" => "int", "family" => "int", "protocol" => "int",
         "saddr" => "ipv4", "daddr" => "ipv4",
         # IPv6 daddr (daddr_v6[16]) is read via the <base>6_hi/<base>6_lo
-        # split convention (daddr6_hi -> daddr_v6), not a table entry — see
+        # split convention (daddr6_hi -> daddr_v6), not a table entry -- see
         # extract_named_tracepoint_args. BTF validates it is a 16-byte array.
       },
       # hard/soft IRQ handlers (bcc hardirqs / softirqs). entry/exit pairs;
@@ -4052,7 +4051,7 @@ PCFN
       btf_fields = btf.available? ? btf.struct_fields(struct_name) : nil
       unless table_fields || btf_fields
         raise UnsupportedNode,
-              "tracepoint #{key} field schema unknown — add it to TRACEPOINT_FIELDS or use sys_enter_*/sys_exit_* " \
+              "tracepoint #{key} field schema unknown -- add it to TRACEPOINT_FIELDS or use sys_enter_*/sys_exit_* " \
               "(BTF auto-derivation found no complete struct for #{struct_name.inspect})"
       end
 
@@ -4104,7 +4103,7 @@ PCFN
     def emit_method(ctx, mi)
       func_name = method_func_name(mi)
 
-      # pure-XDP TCP slice. The Ruby body is treated as a marker — the
+      # pure-XDP TCP slice. The Ruby body is treated as a marker -- the
       # entire state machine + maps + helpers are emitted via
       # emit_tcp_slice_bundle (sections-level). Here we just emit the SEC("xdp")
       # entry that calls into spnl_tcp_slice_main.
@@ -4129,7 +4128,7 @@ PCFN
         return emit_struct_ops_member(ctx, mi, ts_attach)
       end
 
-      # xdp_tail__<name> — track this method as a tail-call target.
+      # xdp_tail__<name> -- track this method as a tail-call target.
       # The wrapper is still SEC("xdp") (so libbpf loads it as an XDP
       # prog), but glue.c will skip auto-attach and instead insert the
       # prog into spnl_prog_array at the slot matching declaration order.
@@ -4151,7 +4150,7 @@ PCFN
         ctx.timer_handler_name = ts_attach[:name]
         ctx.timer_interval_ns = mi.dsl_timer_interval_ns ||
           raise(UnsupportedNode, "timer handler #{mi.method_name} missing interval")
-        # void return — verifier requires bpf_timer callbacks to return
+        # void return -- verifier requires bpf_timer callbacks to return
         # literal 0, so we emit our own `return 0;` after the body and
         # don't want MethodEmitter to insert a `return <last_expr>;`.
         body_emitter = MethodEmitter.new(ctx: ctx, mi: mi, return_type: "void", params: [])
@@ -4171,7 +4170,7 @@ PCFN
               return 0;
           }
 
-          /* arm prog — fired once by userspace at load time via
+          /* arm prog -- fired once by userspace at load time via
            * bpf_prog_test_run. SEC("syscall") requires `__u64 *ctx` so
            * libbpf can size the arg from BTF. */
           SEC("syscall")
@@ -4191,7 +4190,7 @@ PCFN
 
       # USER_RINGBUF callback. The Ruby method becomes a static
       # `long cb(struct bpf_dynptr *, void *)` invoked by
-      # bpf_user_ringbuf_drain — no SEC, no userspace-visible name. The
+      # bpf_user_ringbuf_drain -- no SEC, no userspace-visible name. The
       # body sees the first dynptr-read u64 as the param value.
       if ts_attach && ts_attach[:kind] == :user_ringbuf
         ctx.uses_user_ringbuf = true
@@ -4200,7 +4199,7 @@ PCFN
         raise UnsupportedNode, "user_ringbuf__#{ts_attach[:cb_name]} expects 1 param (the value)" if params.length != 1
         pname, ptype = params[0]
         c_type = SPINEL_TYPE_TO_C[ptype] || raise(UnsupportedNode, "user_ringbuf param type #{ptype.inspect} not supported")
-        # void return — verifier requires bpf_user_ringbuf_drain callbacks
+        # void return -- verifier requires bpf_user_ringbuf_drain callbacks
         # to return literal 0/1, so we emit our own `return 0;` after the
         # body and don't want MethodEmitter to insert `return <last_expr>;`.
         # (demo worked because its last stmt was `spnl_emit(value)`
@@ -4222,7 +4221,7 @@ PCFN
 
       return_type_ruby = method_return_type(ctx, mi)
       # spinel widens the return to nullable (`int?`) whenever a value can
-      # be nil — most commonly when the body is `if … end` without an `else`
+      # be nil -- most commonly when the body is `if … end` without an `else`
       # (the implicit nil branch), which is the canonical attach-handler shape
       # (`if cond; spnl_emit(x); end`). Nullability is irrelevant to lowering
       # (nil -> 0 / __s64). Strip the `?` first so the base type drives both the
@@ -4251,17 +4250,17 @@ PCFN
         when :cgroup_connect4, :cgroup_bind4 then "struct bpf_sock_addr *ctx"
         when :iter_task              then "struct bpf_iter__task *ctx"
         # raw_tp uses arg extraction (ctx->args[i]) like kprobe/fentry,
-        # so it is NOT in ctx_prefix — the inner takes the extracted values.
+        # so it is NOT in ctx_prefix -- the inner takes the extracted values.
         when :socket_filter, :flow_dissector then "struct __sk_buff *ctx"
         when :sk_lookup              then "struct bpf_sk_lookup *ctx"
         end
       # stack_id() / user_stack_id() call bpf_get_stackid(ctx, ...) inside
       # the inner function, but kprobe/uprobe/USDT/tracepoint/fentry/fexit
       # normally extract typed args from ctx in the wrapper and pass values to
-      # the inner — ctx itself isn't forwarded. When the unit uses stack_id,
+      # the inner -- ctx itself isn't forwarded. When the unit uses stack_id,
       # forward ctx to the inner so the helper can call bpf_get_stackid.
       # perf_event programs receive `struct bpf_perf_event_data *` and
-      # the typical body uses stack_id() — forward ctx unconditionally for
+      # the typical body uses stack_id() -- forward ctx unconditionally for
       # this kind so the perf-sample callbacks can capture stacks.
       if !ctx_prefix && (ctx_kind == :perf_event ||
          (ctx.uses_stack_trace &&
@@ -4276,7 +4275,7 @@ PCFN
       # per param) caps at 5. When it exceeds 5, pack every extracted arg into a
       # stack struct and pass its pointer (1 reg); the inner expands them back to
       # param-named locals in a prologue (body codegen unchanged). Fires only
-      # when nreg > 5 — ≤5 handlers keep the scalar form byte-identical (H2).
+      # when nreg > 5 -- ≤5 handlers keep the scalar form byte-identical (H2).
       caps_attach = mi.scope == :top_level ? detect_attach(mi.method_name) : nil
       nreg = (ctx_prefix ? 1 : 0) + params.length
       use_caps = !caps_attach.nil? && !params.empty? && nreg > 5
@@ -4377,7 +4376,7 @@ PCFN
           :xdp, :xdp_tail, :tc_ingress, :tc_egress, :sk_reuseport,
           :sk_msg, :sk_skb_verdict, :sk_skb_parser,
           # LSM returns the access decision (0 allow / -errno deny) and
-          # fmod_ret returns the (modified) function result — both propagated.
+          # fmod_ret returns the (modified) function result -- both propagated.
           :lsm, :fmod_ret,
           # cgroup connect4/bind4 return 1 (allow) / 0 (deny).
           :cgroup_connect4, :cgroup_bind4,
@@ -4473,7 +4472,7 @@ PCFN
         "    #{c_type} #{name};"
       end
       <<~STRUCT
-        /* ctx for #{mi.qualified_name} — userspace fills before bpf_prog_test_run */
+        /* ctx for #{mi.qualified_name} -- userspace fills before bpf_prog_test_run */
         struct #{func_name}_ctx {
         #{fields.join("\n")}
         };
@@ -4512,7 +4511,7 @@ PCFN
         end
 
         # methods from a `module Foo; include BPF::Bar; end` block
-        # aren't in spinel's IR at all — walk the AST DefNode directly.
+        # aren't in spinel's IR at all -- walk the AST DefNode directly.
         # All params default to int (the only type spinel-ebpf currently
         # passes through anyway); future work could infer from body refs.
         # also handle BlockNode (from `on :kind do |arg| ... end`).
@@ -4568,7 +4567,7 @@ PCFN
 
     # scan all top-level :ebpf methods' bodies for instance-variable
     # references; return the set of ivar names found (e.g. {"@open_count"}).
-    # Only top-level ivars are eligible — class methods' ivars belong to the
+    # Only top-level ivars are eligible -- class methods' ivars belong to the
     # class instance and are handled by emit_ivar_maps.
     def collect_toplevel_ivars_used(ast, ebpf_methods)
       ivars = Set.new
@@ -4619,7 +4618,7 @@ PCFN
     ARENA_SLOTS = 512 # one 4 KiB page / sizeof(__u64)
     def emit_arena_map(ctx)
       <<~ARENA
-        /* bpf_arena — sparse, mmap-able shared memory backing arena_set/get. */
+        /* bpf_arena -- sparse, mmap-able shared memory backing arena_set/get. */
         #ifndef __arena
         #define __arena __attribute__((address_space(1)))
         #endif
@@ -4914,7 +4913,7 @@ PCFN
             __be32 tip = iph->saddr; iph->saddr = iph->daddr; iph->daddr = tip;
             __be16 tpt = tcp->source; tcp->source = tcp->dest; tcp->dest = tpt;
             /* normalise to a 20-byte TCP header (no options) so the checksum length
-             * is CONSTANT — a variable bpf_csum_diff length is rejected by the
+             * is CONSTANT -- a variable bpf_csum_diff length is rejected by the
              * verifier (it bounds-checks the max, but only the min is validated;
              * found end to end). */
             tcp->doff = 5;
@@ -4944,7 +4943,7 @@ PCFN
 
     # Roadmap #4b': INTEGRATED SYN -> SYN-ACK+cookie, mirroring the TCP-slice bundle
     # exactly: grow the SYN to a 60-byte TCP header FIRST (bpf_tcp_raw_gen_syncookie_
-    # ipv4 needs the room — a short SYN makes it return < 0, as measured in
+    # ipv4 needs the room -- a short SYN makes it return < 0, as measured in
     # @ck=-1), re-acquire ctx, generate the cookie, build a doff=6 SYN-ACK with the
     # MSS option from the cookie, recompute checksums, shrink to eth+20+24. One
     # builtin = one entry-subprog sequence (the bundle's structure).
@@ -4952,8 +4951,8 @@ PCFN
       <<~SAC
         /* Build the SYN-ACK (swap, seq=cookie, ack=client_seq+1, MSS option, csums)
          * into the grown packet. Kept as a separate __always_inline helper taking
-         * the re-bounded pointers — like the TCP-slice bundle's build_synack/recompute_
-         * csums — so the heavy build/csum register pressure does NOT push the
+         * the re-bounded pointers -- like the TCP-slice bundle's build_synack/recompute_
+         * csums -- so the heavy build/csum register pressure does NOT push the
          * compiler to materialise `ctx+4` for the post-grow data_end re-read
          * (verifier "modified ctx ptr"). */
         static __always_inline int spnl_synack_build(struct ethhdr *eth, struct iphdr *iph,
@@ -5015,8 +5014,8 @@ PCFN
              * LDX `*(u32*)(ctx+4)` instead of materialising `r2 = ctx+4; *r2` (which
              * the verifier rejects after adjust_tail as a "modified ctx ptr"). The
              * cheap C-level workarounds (constant shrink / __always_inline build
-             * split / data_end-first reorder) did NOT help; this barrier — the
-             * standard idiom for post-adjust_tail re-validation — is what makes the
+             * split / data_end-first reorder) did NOT help; this barrier -- the
+             * standard idiom for post-adjust_tail re-validation -- is what makes the
              * grow path load, with the existing __noinline structure untouched. */
             asm volatile("" ::: "memory");
             data     = (void *)(long)ctx->data;
@@ -5064,7 +5063,7 @@ PCFN
             if (iph->ihl != 5) return -1;
             struct tcphdr *tcp = (struct tcphdr *)((char *)iph + 20);
             if ((void *)(tcp + 1) > data_end) return -1;
-            /* need 24 bytes of TCP (20 header + 4 MSS option) — SYN packets have it */
+            /* need 24 bytes of TCP (20 header + 4 MSS option) -- SYN packets have it */
             __u8 *o = (__u8 *)tcp + 20;
             if ((void *)(o + 4) > data_end) return -1;
 
@@ -5116,7 +5115,7 @@ PCFN
 
     # Roadmap #5b: one data-response builder per distinct response payload. Resizes
     # the packet (bpf_xdp_adjust_tail) to eth+20+20+resp_len, RE-ACQUIRES the packet
-    # pointers (adjust_tail invalidates them — the verifier crux), swaps endpoints,
+    # pointers (adjust_tail invalidates them -- the verifier crux), swaps endpoints,
     # sets seq/ack + FIN|PSH|ACK, memcpys the (compile-time) response, and recomputes
     # IP + TCP checksums (over the payload). Returns 0/-1; caller returns XDP_TX.
     def emit_tcp_reply_data(ctx)
@@ -5267,7 +5266,7 @@ PCFN
       # bitwise & | ^ added to support flag tests like
       # `(pkt_tcp_flags & TCP_FLAG_RST) != 0` in TC egress filters.
       # << and >> added. Note that >> on __s64 emits BPF_ARSH (arithmetic
-      # right shift) which preserves sign — fine for positive values like
+      # right shift) which preserves sign -- fine for positive values like
       # latency deltas and counters. For true unsigned shift, caller would
       # need to cast first, but there's no DSL surface for that yet.
       BINARY_OPS = %w[+ - * / % == != < > <= >= & | ^ << >>].freeze
@@ -5354,8 +5353,8 @@ PCFN
 
       # map a spinel local type to its C declaration type. Falls
       # back to __s64 for unknown/missing types (Step 1 maps every scalar to
-      # __s64 anyway; the fallback keeps unmapped types — e.g. a `string` local
-      # in an int-signature method — behaving exactly as before).
+      # __s64 anyway; the fallback keeps unmapped types -- e.g. a `string` local
+      # in an int-signature method -- behaving exactly as before).
       def local_c_type(spinel_type)
         LOCAL_TYPE_TO_C[spinel_type] || "__s64"
       end
@@ -5374,8 +5373,8 @@ PCFN
         end
       end
 
-      # public (intentionally — sub-emitters from times_call drive these directly):
-      # lower_body, lower_stmt — these used to be private but the loop callback
+      # public (intentionally -- sub-emitters from times_call drive these directly):
+      # lower_body, lower_stmt -- these used to be private but the loop callback
       # sub-emitter calls lower_body across instances.
 
       # Returns the C expression string for the LAST statement's value
@@ -5521,7 +5520,7 @@ PCFN
           # flat name in KNOWN_CONSTANT_PATHS, then resolves to the same
           # integer value as the flat constant.
           # macro-valued paths (SCX::DSQ::GLOBAL etc.) emit the C
-          # macro name verbatim — needed for u64 constants that exceed
+          # macro name verbatim -- needed for u64 constants that exceed
           # __s64 range like (1ULL << 63) | 1.
           path = collect_constant_path(nid)
           raise UnsupportedNode, "ConstantPathNode chain root must be a ConstantReadNode" unless path
@@ -5556,7 +5555,7 @@ PCFN
         when "OrNode", "AndNode"
           # short-circuit boolean operators. spinel-ebpf only deals in
           # int/bool values inside :ebpf methods, so direct C `||` / `&&` is
-          # safe — verifier accepts the short-circuit pattern.
+          # safe -- verifier accepts the short-circuit pattern.
           # Built recursively as a C-AST.
           lower_expr(nid).to_c
         when "IfNode"
@@ -5568,7 +5567,7 @@ PCFN
         when "StatementsNode"
           lower_body(nid)
         when "ParenthesesNode"
-          # explicit parens — needed for bitwise precedence in
+          # explicit parens -- needed for bitwise precedence in
           # `(flags & TCP_FLAG_RST) != 0`. Body is a single expression or a
           # StatementsNode; wrap the result in C parens to preserve grouping.
           # Built as a CParen.
@@ -5701,7 +5700,7 @@ PCFN
         name = node.attrs.fetch("name", "")
 
         # receiver-aware desugar. `sk.snd_cwnd` / `sk.snd_cwnd = v`
-        # arrive as CallNode with a non-nil receiver — try the dot-form
+        # arrive as CallNode with a non-nil receiver -- try the dot-form
         # dispatcher first. Returns nil if the receiver/name combo is not
         # a known tcp_sock dot accessor, in which case we fall through to
         # the existing flat-builtin dispatch table below.
@@ -5713,7 +5712,7 @@ PCFN
                         else
                           []
                         end
-          # `t.field` where `t` was bound via kptr(ptr, "struct") — read
+          # `t.field` where `t` was bound via kptr(ptr, "struct") -- read
           # an arbitrary kernel struct field via BPF_CORE_READ. Checked first
           # since it keys off the per-method kptr-local registry.
           if (kf = try_kptr_dot_call(name, recv_id_for_dot, args_for_dot))
@@ -5722,7 +5721,7 @@ PCFN
           if (dot = try_tcp_sock_dot_call(name, recv_id_for_dot, args_for_dot))
             return dot
           end
-          # pkt.l4.proto / pkt.ip4.src / pkt.byte_at(off) — chain
+          # pkt.l4.proto / pkt.ip4.src / pkt.byte_at(off) -- chain
           # accessor over the existing pkt_* flat builtins.
           if (chain = try_pkt_chain_dispatch(name, recv_id_for_dot, args_for_dot, node))
             return chain
@@ -5879,7 +5878,7 @@ PCFN
 
       # lower `bound.times { |i| <body> }` to a generated callback +
       # `bpf_loop(bound, cb, NULL, 0)`. MVP supports blocks that reference
-      # only the block param + ivars + builtin (spnl_emit) + arithmetic —
+      # only the block param + ivars + builtin (spnl_emit) + arithmetic --
       # no outer-local capture.
       def times_call(nid, node)
         recv = node.refs.fetch("receiver", -1)
@@ -5970,7 +5969,7 @@ PCFN
 
       # open-coded iterator for `N.times { |i| ... }` where N is an
       # integer literal. Emits `bpf_iter_num_*` directly in the caller's
-      # function — no callback, no captures struct, no BPF-to-BPF call.
+      # function -- no callback, no captures struct, no BPF-to-BPF call.
       # Counters / ivars / outer locals are visible naturally because the
       # body is lowered in the same scope.
       def times_call_open_coded(recv_node, block_param_name, body_id)
@@ -5986,7 +5985,7 @@ PCFN
         @lines << "    while ((#{ptr_var} = bpf_iter_num_next(&#{iter_var}))) {"
         @lines << "        __s64 #{block_param_name} = (__s64)*#{ptr_var};"
         # Capture parent state, lower body inline with the loop variable
-        # exposed as a regular param. Captures: nothing special — the
+        # exposed as a regular param. Captures: nothing special -- the
         # inline body sees the parent's locals directly through @lines.
         saved_params = @param_names.dup
         @param_names.add(block_param_name)
@@ -6008,7 +6007,7 @@ PCFN
       # params) that the block reads or writes. A name is considered a
       # capture iff it appears in the outer's already-declared locals or
       # params, regardless of whether the block also assigns to it (Ruby
-      # has no block-only shadow — `x = ...` inside a block writes the
+      # has no block-only shadow -- `x = ...` inside a block writes the
       # outer `x` if one exists).
       def collect_captures(body_id, block_param_name)
         outer_accessible = (@declared_locals | @param_names).to_set
@@ -6075,7 +6074,7 @@ PCFN
         "#{target_func}(#{arg_exprs.join(", ")})"
       end
 
-      # spnl_emit_pair(a, b) lowering — two int values per event.
+      # spnl_emit_pair(a, b) lowering -- two int values per event.
       def spnl_emit_pair_call(nid, node)
         args_id = node.refs.fetch("arguments", -1)
         args_node = args_id >= 0 ? @ctx.ast.node(args_id) : nil
@@ -6101,7 +6100,7 @@ PCFN
         no_value
       end
 
-      # emit_connect(skaddr, daddr, dport, saddr, sport, family) — pack one TCP
+      # emit_connect(skaddr, daddr, dport, saddr, sport, family) -- pack one TCP
       # socket-state event (process + remote + srtt) into one ringbuf record. Single
       # tracepoint fire, so there is no way for separate string records to desync.
       # srtt_us comes via CO-RE from
@@ -6150,7 +6149,7 @@ PCFN
         no_value
       end
 
-      # sock_owner_set(sk) — record the current (process-context) owner of a
+      # sock_owner_set(sk) -- record the current (process-context) owner of a
       # socket, keyed by sock ptr, in a per-unit HASH. Called from a connect probe
       # (kprobe/tcp_v4_connect); emit_connect recovers it by the same key when the
       # ESTABLISHED transition arrives in softirq context (current task = swapper/0).
@@ -6172,7 +6171,7 @@ PCFN
         no_value
       end
 
-      # req_start(sk) — in a send probe (kprobe/tcp_sendmsg, process ctx). Records the
+      # req_start(sk) -- in a send probe (kprobe/tcp_sendmsg, process ctx). Records the
       # send ktime + pid/comm keyed by sock ptr, only for the FIRST send of a request (does
       # not overwrite mid-request bursts). emit_l7 (in the recv probe) computes the round-trip.
       def req_start_call(node)
@@ -6200,7 +6199,7 @@ PCFN
         no_value
       end
 
-      # emit_l7(sk) — in a recv probe (kprobe/tcp_cleanup_rbuf, fires AFTER data is copied
+      # emit_l7(sk) -- in a recv probe (kprobe/tcp_cleanup_rbuf, fires AFTER data is copied
       # to the app = "response visible"). Looks up req_start[sk]; if present, packs one record
       # {process, peer, start_ktime, duration_ns} and deletes it (next send = new request).
       # duration = time-to-first-response-byte = L7 round trip, as measured.
@@ -6242,7 +6241,7 @@ PCFN
         no_value
       end
 
-      # http_req_start(sk, msg) — capture HTTP request (method/path) at tcp_sendmsg.
+      # http_req_start(sk, msg) -- capture HTTP request (method/path) at tcp_sendmsg.
       # Reads the first 64 bytes of the send buffer; if it is an HTTP request (real method,
       # not an "HTTP" response), stores {start, req[64]} keyed by sock. Only the CLIENT request
       # is captured (server response-sends start with "HTTP"); non-HTTP is ignored.
@@ -6269,7 +6268,7 @@ PCFN
         no_value
       end
 
-      # http_resp_stash(sk, msg) — stash the recv buffer at tcp_recvmsg entry (response
+      # http_resp_stash(sk, msg) -- stash the recv buffer at tcp_recvmsg entry (response
       # bytes are only in the buffer after the copy, read in the kretprobe; fexit is not permitted here).
       def http_resp_stash_call(node)
         args = call_args(node)
@@ -6287,7 +6286,7 @@ PCFN
         no_value
       end
 
-      # http_emit(ret) — at kretprobe/tcp_recvmsg, read the stashed response buffer,
+      # http_emit(ret) -- at kretprobe/tcp_recvmsg, read the stashed response buffer,
       # correlate with the pending request by sock, emit ONE combined record (method/path +
       # status + duration). ret (int) uses i32-style read for the >0 guard.
       def http_emit_call(node)
@@ -6335,10 +6334,10 @@ PCFN
         no_value
       end
 
-      # redis_req_start(sk, msg, size) — capture Redis (RESP) request at tcp_sendmsg. Mirrors
+      # redis_req_start(sk, msg, size) -- capture Redis (RESP) request at tcp_sendmsg. Mirrors
       # http_req_start but the filter is a RESP command sniff (spnl_is_redis_cmd: "*<digit>") and the
       # read is bounded to the actual send length (`size` = PARM3). Redis messages are SHORT so a
-      # fixed 64B read -EFAULTs past the send buffer (HTTP never hit this — requests are long).
+      # fixed 64B read -EFAULTs past the send buffer (HTTP never hit this -- requests are long).
       def redis_req_start_call(node)
         args = call_args(node)
         raise UnsupportedNode, "redis_req_start expects (sk, msg, size), got #{args.length}" unless args.length == 3
@@ -6364,7 +6363,7 @@ PCFN
         no_value
       end
 
-      # redis_resp_stash(sk, msg) — stash the recv buffer at tcp_recvmsg entry (identical to
+      # redis_resp_stash(sk, msg) -- stash the recv buffer at tcp_recvmsg entry (identical to
       # http_resp_stash; reply bytes are only in the buffer after the copy, read in the kretprobe).
       def redis_resp_stash_call(node)
         args = call_args(node)
@@ -6382,7 +6381,7 @@ PCFN
         no_value
       end
 
-      # redis_emit(ret) — at kretprobe/tcp_recvmsg, read the stashed reply, correlate with
+      # redis_emit(ret) -- at kretprobe/tcp_recvmsg, read the stashed reply, correlate with
       # the pending request by sock, emit ONE combined record. Mirrors http_emit but the reply-type
       # guard accepts any RESP reply prefix (+ - : $ *) instead of "HTTP". command/-ERR parsed in userspace.
       def redis_emit_call(node)
@@ -6431,7 +6430,7 @@ PCFN
         no_value
       end
 
-      # ssl_req_start(ssl, buf) — capture TLS-plaintext HTTP request at SSL_write uprobe.
+      # ssl_req_start(ssl, buf) -- capture TLS-plaintext HTTP request at SSL_write uprobe.
       # buf (PARM2) is the plaintext before encryption. Reuses the HTTP channel's pending map and
       # spnl_is_http_req filter, keyed by SSL* (not sock). Same parser, only hook/key differ.
       def ssl_req_start_call(node)
@@ -6457,7 +6456,7 @@ PCFN
         no_value
       end
 
-      # ssl_resp_stash(ssl, buf) — stash the SSL_read buffer at uprobe entry (decrypted
+      # ssl_resp_stash(ssl, buf) -- stash the SSL_read buffer at uprobe entry (decrypted
       # plaintext lands in buf only after SSL_read returns; read in the uretprobe).
       def ssl_resp_stash_call(node)
         args = call_args(node)
@@ -6475,7 +6474,7 @@ PCFN
         no_value
       end
 
-      # ssl_emit(ret) — at uretprobe/SSL_read, read the stashed (now-decrypted) buffer,
+      # ssl_emit(ret) -- at uretprobe/SSL_read, read the stashed (now-decrypted) buffer,
       # correlate with the pending request by SSL*, emit into the HTTP channel's events ringbuf. daddr/dport/
       # family = 0 (no sock) -> userspace sets url.scheme=https and omits peer.
       def ssl_emit_call(node)
@@ -6521,7 +6520,7 @@ PCFN
         no_value
       end
 
-      # go_tls_write(conn, ptr, len) — Go crypto/tls.(*Conn).Write plaintext -> request span.
+      # go_tls_write(conn, ptr, len) -- Go crypto/tls.(*Conn).Write plaintext -> request span.
       # ptr/len are the Go slice arg (arm64 PT_REGS_PARM reads them). Reads min(len, 64) plaintext,
       # and if HTTP emits ONE request-only http_event (no sock -> daddr=0 -> url.scheme=https; status/
       # duration=0 until (*Conn).Read is added). conn is kept for future response correlation (unused now).
@@ -6560,7 +6559,7 @@ PCFN
         no_value
       end
 
-      # offcpu_recv_stash(sk, msg) — stash the SERVER recv buffer (request in) by tid.
+      # offcpu_recv_stash(sk, msg) -- stash the SERVER recv buffer (request in) by tid.
       def offcpu_recv_stash_call(node)
         args = call_args(node)
         raise UnsupportedNode, "offcpu_recv_stash expects (sk, msg), got #{args.length}" unless args.length == 2
@@ -6576,7 +6575,7 @@ PCFN
         no_value
       end
 
-      # offcpu_begin(ret) — open a per-tid off-CPU window if the server got an HTTP request.
+      # offcpu_begin(ret) -- open a per-tid off-CPU window if the server got an HTTP request.
       def offcpu_begin_call(node)
         args = call_args(node)
         raise UnsupportedNode, "offcpu_begin expects (ret), got #{args.length}" unless args.length == 1
@@ -6602,7 +6601,7 @@ PCFN
         no_value
       end
 
-      # offcpu_account(prev_pid, prev_state, next_pid) — sched_switch: accumulate voluntary
+      # offcpu_account(prev_pid, prev_state, next_pid) -- sched_switch: accumulate voluntary
       # off-CPU per active window + capture the wait's kernel stack. `ctx` is forwarded.
       def offcpu_account_call(node)
         args = call_args(node)
@@ -6628,7 +6627,7 @@ PCFN
         no_value
       end
 
-      # offcpu_emit(sk, msg) — close the window at response send, emit the breakdown.
+      # offcpu_emit(sk, msg) -- close the window at response send, emit the breakdown.
       def offcpu_emit_call(node)
         args = call_args(node)
         raise UnsupportedNode, "offcpu_emit expects (sk, msg), got #{args.length}" unless args.length == 2
@@ -6666,7 +6665,7 @@ PCFN
         no_value
       end
 
-      # emit_dns(msg) — resolver-independent DNS query capture from udp_sendmsg.
+      # emit_dns(msg) -- resolver-independent DNS query capture from udp_sendmsg.
       # Copies the raw DNS payload (hdr + QNAME) into one record; the length-prefixed
       # QNAME is converted to dotted host in userspace (in-kernel label walk explodes
       # verifier state). Catches Go native resolver (unlike libc getaddrinfo uprobe).
@@ -6696,7 +6695,7 @@ PCFN
         no_value
       end
 
-      # dns_req_start(sk, msg) — in kprobe/udp_sendmsg (filter :53 in the probe). Reads the
+      # dns_req_start(sk, msg) -- in kprobe/udp_sendmsg (filter :53 in the probe). Reads the
       # DNS transaction ID (payload bytes 0..1, big-endian) and records the send ktime keyed by
       # (sock<<16 | txid) so A+AAAA on one socket stay distinct. dns_emit correlates.
       def dns_req_start_call(node)
@@ -6716,7 +6715,7 @@ PCFN
         no_value
       end
 
-      # dns_resp_stash(sk, msg) — in kprobe/udp_recvmsg entry. The response bytes are only in
+      # dns_resp_stash(sk, msg) -- in kprobe/udp_recvmsg entry. The response bytes are only in
       # the user buffer after the copy, so stash {sk, buf} keyed by tid and read it in the kretprobe.
       def dns_resp_stash_call(node)
         args = call_args(node)
@@ -6733,7 +6732,7 @@ PCFN
         no_value
       end
 
-      # dns_emit(ret) — in kretprobe/udp_recvmsg. Reads the stashed recv buffer (response now
+      # dns_emit(ret) -- in kretprobe/udp_recvmsg. Reads the stashed recv buffer (response now
       # copied), takes the response txid, correlates with the pending query by (sock<<16 | txid), and
       # emits one dns_event with duration_ns = RTT. Reuses the DNS events ringbuf.
       def dns_emit_call(node)
@@ -6778,7 +6777,7 @@ PCFN
       end
 
       # spnl_emit3(a, b, c) / spnl_emit4(a, b, c, d) lowering. Fixed-arity
-      # cousins of spnl_emit_pair — each writes N int values to a per-unit
+      # cousins of spnl_emit_pair -- each writes N int values to a per-unit
       # ringbuf named `<unit>_emit<N>_events`. Host parse uses the same
       # the 16-byte event header and reads N consecutive __s64 fields.
       def spnl_emit_n_call(nid, node, n)
@@ -6847,7 +6846,7 @@ PCFN
 
       # kfield(ptr, "struct", "field", ...) -> BPF_CORE_READ. Reads an
       # arbitrary kernel struct field (CO-RE relocated, BTF-driven) from any
-      # pointer — works in both trusted (fentry/lsm/struct_ops) and untrusted
+      # pointer -- works in both trusted (fentry/lsm/struct_ops) and untrusted
       # (kprobe PT_REGS arg) contexts, where a direct deref would be rejected.
       # Chains follow BPF_CORE_READ semantics: kfield(skb,"sk_buff","sk","sk_state").
       def kfield_call(_nid, node)
@@ -6923,13 +6922,13 @@ PCFN
         "((__s64)BPF_CORE_READ((struct #{struct_name} *)(unsigned long)(#{lower_stmt(recv_id)}), #{name}))"
       end
 
-      # fib_lookup(dst_ip) — look up the IPv4 route for `dst_ip`
+      # fib_lookup(dst_ip) -- look up the IPv4 route for `dst_ip`
       # (host byte order, matching pkt_ip4_dst) in the kernel forwarding table.
       #
       # This is the first *consumer* that genuinely needs a typed local: it emits
       # a `struct bpf_fib_lookup` STACK local, fills family + destination, and
       # hands &local to the bpf_fib_lookup helper. The verifier tracks that local
-      # as PTR_TO_STACK across the helper call — exactly the typed-local capability
+      # as PTR_TO_STACK across the helper call -- exactly the typed-local capability
       # Step 2 set out to unlock (the prior kfield/kptr pattern only ever round-
       # tripped a pointer *value* through an __s64 slot; it never passed a typed
       # local to a helper). Returns the egress ifindex on a successful lookup
@@ -6963,7 +6962,7 @@ PCFN
         FIB
       end
 
-      # fib_lookup6(dst_hi, dst_lo) — IPv6 route lookup. dst_hi/dst_lo are
+      # fib_lookup6(dst_hi, dst_lo) -- IPv6 route lookup. dst_hi/dst_lo are
       # the high/low 64 bits of the destination address in host byte order (like
       # the pkt.ip6.* accessors); the builtin packs them into the network-
       # order ipv6_dst[4] field. Returns the egress ifindex on success, else -1.
@@ -6996,7 +6995,7 @@ PCFN
         FIB6
       end
 
-      # sk_lookup_tcp(saddr, daddr, sport, dport) — find an established or
+      # sk_lookup_tcp(saddr, daddr, sport, dport) -- find an established or
       # listening TCP socket for the 4-tuple (host byte order args) in the current
       # netns. Returns the socket's TCP state (e.g. TCP_LISTEN=10) or -1 if no
       # socket matches. The returned bpf_sock reference is released on every path
@@ -7010,7 +7009,7 @@ PCFN
         args = call_args(node)
         raise UnsupportedNode, "sk_lookup_tcp expects 4 args (saddr, daddr, sport, dport), got #{args.length}" unless args.length == 4
         sa = lower_stmt(args[0]); da = lower_stmt(args[1]); sp = lower_stmt(args[2]); dp = lower_stmt(args[3])
-        @ctx.uses_csum = true # bpf_htonl/htons → needs bpf_endian.h
+        @ctx.uses_csum = true # bpf_htonl/htons  ->  needs bpf_endian.h
         n  = (@tmp_n += 1)
         t  = "_spnl_sktup_#{n}"; sk = "_spnl_sk_#{n}"; r = "_spnl_skr_#{n}"
         <<~SK.chomp
@@ -7028,7 +7027,7 @@ PCFN
         SK
       end
 
-      # sk_assign_tcp(saddr, daddr, sport, dport) — look up the TCP socket
+      # sk_assign_tcp(saddr, daddr, sport, dport) -- look up the TCP socket
       # for the 4-tuple and STEER the current skb to it via bpf_sk_assign (then
       # release the reference). Completes the socket-lookup story: a packet
       # can be delivered to a chosen socket (transparent proxy / socket steering).
@@ -7059,7 +7058,7 @@ PCFN
         AK
       end
 
-      # redirect(ifindex) — forward the packet out interface `ifindex` via
+      # redirect(ifindex) -- forward the packet out interface `ifindex` via
       # bpf_redirect (egress). Returns TC_ACT_REDIRECT / XDP_REDIRECT, which the
       # method must return. Combined with fib_lookup this builds a real L3
       # router: look up the egress ifindex for the dst, then redirect to it.
@@ -7076,7 +7075,7 @@ PCFN
         "(__s64)bpf_redirect((__u32)(#{oif}), 0)"
       end
 
-      # skb-rewrite builtins (TC only — they mutate the live skb, which
+      # skb-rewrite builtins (TC only -- they mutate the live skb, which
       # XDP has no concept of). These are the second family of typed-local-to-
       # helper builtins after fib_lookup: bpf_skb_{load,store}_bytes both
       # take a pointer to a stack buffer, so each emits a typed `__u8` stack
@@ -7119,7 +7118,7 @@ PCFN
         "({ __u8 #{b} = (__u8)(#{val}); (__s64)bpf_skb_store_bytes(ctx, (#{off}), &#{b}, 1, 0); })"
       end
 
-      # l3_csum_replace(off, from, to) / l4_csum_replace(off, from, to) —
+      # l3_csum_replace(off, from, to) / l4_csum_replace(off, from, to) --
       # incrementally fix the L3 (IP) or L4 (TCP/UDP) checksum at `off` after a
       # 16-bit field changed from `from` to `to`. `from`/`to` are the old/new
       # 16-bit field values in *host* order; the builtin htons-es them to the
@@ -7134,11 +7133,11 @@ PCFN
         off  = lower_stmt(args[0])
         from = lower_stmt(args[1])
         to   = lower_stmt(args[2])
-        @ctx.uses_csum = true # bpf_htons → needs bpf_endian.h
+        @ctx.uses_csum = true # bpf_htons  ->  needs bpf_endian.h
         "(__s64)#{fn}(ctx, (#{off}), bpf_htons((__u16)(#{from})), bpf_htons((__u16)(#{to})), 2)"
       end
 
-      # NAT family — 32-bit (IPv4 address) packet read/write + checksum
+      # NAT family -- 32-bit (IPv4 address) packet read/write + checksum
       # repair across both the L3 (IP) header and the L4 (TCP/UDP) pseudo-header.
       # All values are HOST byte order at the DSL surface (intuitive for the Ruby
       # author); the builtins htonl them to the network-order representation the
@@ -7172,7 +7171,7 @@ PCFN
       end
 
       # l3_csum_replace_ip(off, from, to) / l4_csum_replace_ip(off, from, to)
-      # — incremental checksum repair after a 32-bit IPv4 address changed from
+      # -- incremental checksum repair after a 32-bit IPv4 address changed from
       # `from` to `to` (host order). The L4 variant sets BPF_F_PSEUDO_HDR (0x10)
       # because the address lives in the TCP/UDP pseudo-header, and size=4.
       def csum_replace_ip_call(_nid, node, layer:)
@@ -7185,16 +7184,16 @@ PCFN
         from = lower_stmt(args[1])
         to   = lower_stmt(args[2])
         @ctx.uses_csum = true
-        # L3: size 4. L4: BPF_F_PSEUDO_HDR (1<<4) | size 4 — the IPv4 address is
+        # L3: size 4. L4: BPF_F_PSEUDO_HDR (1<<4) | size 4 -- the IPv4 address is
         # part of the L4 pseudo-header, so the helper must fold the change in.
         flags = layer == 3 ? "4" : "((1 << 4) | 4)"
         "(__s64)#{fn}(ctx, (#{off}), bpf_htonl((__u32)(#{from})), bpf_htonl((__u32)(#{to})), #{flags})"
       end
 
-      # skb_load_u16(off) / skb_store_u16(off, val) — 16-bit (e.g. a TCP/UDP
+      # skb_load_u16(off) / skb_store_u16(off, val) -- 16-bit (e.g. a TCP/UDP
       # port) packet read/write. Host byte order at the DSL surface (ntohs on
       # load, htons on store). Pairs with l4_csum_replace (size 2, no
-      # pseudo-header) for port rewrites — a port lives in the L4 header, not the
+      # pseudo-header) for port rewrites -- a port lives in the L4 header, not the
       # pseudo-header, so only the L4 checksum needs fixing. TC only.
       def skb_load_u16_call(_nid, node)
         require_tc_context!("skb_load_u16")
@@ -7219,7 +7218,7 @@ PCFN
         "({ __u16 #{b} = bpf_htons((__u16)(#{val})); (__s64)bpf_skb_store_bytes(ctx, (#{off}), &#{b}, 2, 0); })"
       end
 
-      # l4_offset() — byte offset where the L4 (TCP/UDP) header starts,
+      # l4_offset() -- byte offset where the L4 (TCP/UDP) header starts,
       # accounting for IPv4 options. = 14 (Ethernet) + IHL*4. Reads the
       # version/IHL byte at offset 14 and uses the low nibble. Lets NAT/LB code be
       # robust to IP options instead of assuming a fixed 34 (IHL=5). TC only.
@@ -7232,10 +7231,10 @@ PCFN
         "({ __u8 #{b} = 0; bpf_skb_load_bytes(ctx, 14, &#{b}, 1); (__s64)(14 + (#{b} & 0x0f) * 4); })"
       end
 
-      # arena_set(idx, val) / arena_get(idx) — read/write a u64 slot in the
+      # arena_set(idx, val) / arena_get(idx) -- read/write a u64 slot in the
       # bpf_arena-backed array (sparse, mmap-able shared memory; see emit_arena_map).
-      # The access is a plain dereference through an __arena pointer — no map
-      # helper — and the index is masked to the in-page slot count so the verifier
+      # The access is a plain dereference through an __arena pointer -- no map
+      # helper -- and the index is masked to the in-page slot count so the verifier
       # is happy. Works in any program type (the arena global is not ctx-bound).
       def arena_set_call(_nid, node)
         args = call_args(node)
@@ -7256,11 +7255,11 @@ PCFN
         "((__s64)#{data}[(__u64)(#{idx}) & #{ARENA_SLOTS - 1}])"
       end
 
-      # arena_hash_set(key, val) / arena_hash_get(key) — an open-addressing
+      # arena_hash_set(key, val) / arena_hash_get(key) -- an open-addressing
       # hash table living IN the arena. A real data structure (not just a flat
       # array) backed by arena memory: the 512-slot arena array is treated as
       # #{ARENA_HASH_BUCKETS} (key, value) pairs, indexed by a multiplicative hash
-      # of the key with 8-way linear probing (fully unrolled — no runtime loop).
+      # of the key with 8-way linear probing (fully unrolled -- no runtime loop).
       # key 0 is reserved as the empty marker. Same value is mmap-able by
       # userspace, so this is a kernel/user shared hash map. set returns 1 if the
       # entry was stored (0 if all 8 probe slots were taken); get returns the
@@ -7317,7 +7316,7 @@ PCFN
         HG
       end
 
-      # arena_hash_del(key) — delete a key from the arena hash table by
+      # arena_hash_del(key) -- delete a key from the arena hash table by
       # marking its slot as a tombstone (~0ULL). get/set skip tombstones (they
       # are neither 0 nor a real key), so probe chains stay intact; the slot is
       # not reclaimed (documented limitation). Returns 1 if a key was removed,
@@ -7345,7 +7344,7 @@ PCFN
         HD
       end
 
-      # arena_list_push(value) / arena_list_sum() — a singly-linked list
+      # arena_list_push(value) / arena_list_sum() -- a singly-linked list
       # living IN the arena, demonstrating pointer-like references (here: indices)
       # in arena memory without a runtime allocator. Layout over the 512-slot
       # arena array: slot 0 = head node index (0 = nil), slot 1 = bump pointer
@@ -7438,7 +7437,7 @@ PCFN
         no_value
       end
 
-      # leak_record(ptr, size, stack_id) — record an outstanding
+      # leak_record(ptr, size, stack_id) -- record an outstanding
       # allocation keyed by its pointer (bcc memleak). Pair with leak_forget on
       # free; surviving entries at report time are leaks.
       def leak_record_call(nid, node)
@@ -7454,7 +7453,7 @@ PCFN
         no_value
       end
 
-      # leak_forget(ptr) — drop a tracked allocation on free.
+      # leak_forget(ptr) -- drop a tracked allocation on free.
       def leak_forget_call(nid, node)
         args_id = node.refs.fetch("arguments", -1)
         args_node = args_id >= 0 ? @ctx.ast.node(args_id) : nil
@@ -7533,12 +7532,12 @@ PCFN
 
       def tgid_call(node)
         expect_no_args(node, "tgid")
-        # upper 32 bits of bpf_get_current_pid_tgid() — what userspace calls "pid"
+        # upper 32 bits of bpf_get_current_pid_tgid() -- what userspace calls "pid"
         pid_tgid_high.to_c
       end
 
       def pid_call(node)
-        # Alias for tgid() — bcc convention is `bpf_get_current_pid_tgid() >> 32`
+        # Alias for tgid() -- bcc convention is `bpf_get_current_pid_tgid() >> 32`
         # is the userspace PID. We expose both names; users pick by taste.
         expect_no_args(node, "pid")
         pid_tgid_high.to_c
@@ -7546,7 +7545,7 @@ PCFN
 
       def tid_call(node)
         expect_no_args(node, "tid")
-        # lower 32 bits — kernel-side thread id
+        # lower 32 bits -- kernel-side thread id
         CAst.s64(CAst.cast("__u32", CAst.call("bpf_get_current_pid_tgid"))).to_c
       end
 
@@ -7555,7 +7554,7 @@ PCFN
         CAst.s64(CAst.paren(CAst.binop(">>", CAst.call("bpf_get_current_pid_tgid"), CAst.lit("32"))))
       end
 
-      # latency_start / latency_end — bcc's BEGIN()/END() pattern. The
+      # latency_start / latency_end -- bcc's BEGIN()/END() pattern. The
       # generated helpers (emit_latency_map_and_helper) handle the per-tid
       # HASH map; here we just emit the side-effecting call.
       def latency_start_call(node)
@@ -7599,7 +7598,7 @@ PCFN
         CAst.call("spnl_task_incr", CAst.raw(lower_stmt(args[0]))).to_c
       end
 
-      # task_swap(v) — single-get read-modify-write on per-task storage:
+      # task_swap(v) -- single-get read-modify-write on per-task storage:
       # store v, return the previous value. The atomic RMW the deadlock detector
       # needs (record the previously-held lock + remember the new one) without
       # tripping the two-get quirk (two storage gets in one execution alias
@@ -7611,7 +7610,7 @@ PCFN
         CAst.call("spnl_task_swap", CAst.raw(lower_stmt(args[0]))).to_c
       end
 
-      # lock_edge(a, b) — record a lock-acquisition-order edge a->b (thread
+      # lock_edge(a, b) -- record a lock-acquisition-order edge a->b (thread
       # held a, then acquired b) into the bpf_lock_edges HASH (keyed by the pair).
       # Userspace detects cycles (a->b and b->a) = potential deadlock.
       def lock_edge_call(_nid, node)
@@ -7624,7 +7623,7 @@ PCFN
         no_value
       end
 
-      # lat_start(key) — stamp entry time keyed by an arbitrary id.
+      # lat_start(key) -- stamp entry time keyed by an arbitrary id.
       def lat_start_key_call(_nid, node)
         args = call_args(node)
         raise UnsupportedNode, "lat_start expects 1 arg (key), got #{args.length}" unless args.length == 1
@@ -7632,7 +7631,7 @@ PCFN
         CAst.call("spnl_lat_start_key", CAst.raw(lower_stmt(args[0]))).to_c
       end
 
-      # lat_end(key) — return now - entry (ns) for `key` and clear it.
+      # lat_end(key) -- return now - entry (ns) for `key` and clear it.
       def lat_end_key_call(_nid, node)
         args = call_args(node)
         raise UnsupportedNode, "lat_end expects 1 arg (key), got #{args.length}" unless args.length == 1
@@ -7640,7 +7639,7 @@ PCFN
         CAst.call("spnl_lat_end_key", CAst.raw(lower_stmt(args[0]))).to_c
       end
 
-      # depth_inc(key) / depth_dec(key) — per-(tid,method) recursion depth
+      # depth_inc(key) / depth_dec(key) -- per-(tid,method) recursion depth
       # for --instrument depth-collapse. Returns the depth after the operation.
       def depth_inc_call(_nid, node)
         args = call_args(node)
@@ -7700,7 +7699,7 @@ PCFN
         CAst.call("spnl_lifo_pop").to_c
       end
 
-      # divu(a, b) — unsigned 64bit division. BPF verifier rejects
+      # divu(a, b) -- unsigned 64bit division. BPF verifier rejects
       # signed div on __s64 operands; the spinel-ebpf default for `/` is
       # signed. This builtin gives users a clean way to opt into unsigned
       # division when the operand range guarantees positivity.
@@ -7720,7 +7719,7 @@ PCFN
         ).to_c
       end
 
-      # i32(x) — read a 32-bit kernel arg correctly. kprobe args arrive as __s64
+      # i32(x) -- read a 32-bit kernel arg correctly. kprobe args arrive as __s64
       # (full register); a 32-bit `int` arg (e.g. tcp_cleanup_rbuf's `copied`) has UNDEFINED
       # upper 32 bits on arm64, so `arg > 0` is unreliable. i32(x) truncates to 32 bits and
       # sign-extends: ((__s64)(__s32)(x)). Do NOT use on pointer/64-bit args.
@@ -7732,11 +7731,11 @@ PCFN
         CAst.s64(CAst.cast("__s32", CAst.paren(lower_expr(args[0])))).to_c
       end
 
-      # comm_hash() — return the first 8 bytes of the current task's
+      # comm_hash() -- return the first 8 bytes of the current task's
       # `comm` (process name, TASK_COMM_LEN=16) as a __s64. Useful for
       # grouping by process name without emitting strings. Short names
       # (<=8 chars) are unique; longer names alias by their prefix.
-      # path_eq(file, "/usr/bin/curl") — compare a `struct file *`'s full path
+      # path_eq(file, "/usr/bin/curl") -- compare a `struct file *`'s full path
       # against a compile-time literal. An expression (so it can drive `if`), unlike
       # emit_path which is a statement.
       #
@@ -7746,7 +7745,7 @@ PCFN
       # recompile per policy; spinel-ebpf burns the literal into the program.
       #
       # Buffer sizing (measured): bpf_d_path memmoves the result to buf[0] and
-      # returns strlen+1. Sizing to just the literal is the *correct* semantics — a
+      # returns strlen+1. Sizing to just the literal is the *correct* semantics -- a
       # real path longer than the literal makes bpf_d_path fail (-ENAMETOOLONG) =>
       # no match, which is what we want.
       PATH_EQ_MAX = 256  # the BPF stack is 512 bytes in total; this cap was measured
@@ -7777,7 +7776,7 @@ PCFN
         emit_path_eq("&((struct file *)(unsigned long)(#{fexpr}))->f_path", lit)
       end
 
-      # parent_path_eq("/usr/bin/curl") — the CALLING process's PARENT exe path
+      # parent_path_eq("/usr/bin/curl") -- the CALLING process's PARENT exe path
       # vs a literal. Tetragon's matchParentBinaries equivalent. The hop chain
       # t->real_parent->mm->exe_file->f_path uses DIRECT DEREF (not BPF_CORE_READ):
       # bpf_d_path needs a trusted pointer, and trusted-ness propagates through direct
@@ -7824,7 +7823,7 @@ PCFN
         "(#{mat})"
       end
 
-      # ppid — parent tgid. Scalar, so BPF_CORE_READ (probe_read), not direct
+      # ppid -- parent tgid. Scalar, so BPF_CORE_READ (probe_read), not direct
       # dereference, for the reason above. Returns the pid in the init namespace.
       def ppid_call(node)
         expect_no_args(node, "ppid")
@@ -7834,7 +7833,7 @@ PCFN
 
       def comm_hash_call(node)
         expect_no_args(node, "comm_hash")
-        # Inline rather than a static helper — comm[16] on stack is only
+        # Inline rather than a static helper -- comm[16] on stack is only
         # 16 bytes, fits trivially within the 512B BPF stack limit. The
         # statement-expression is emitted as a side-effecting block then
         # an expression hands the value back.
@@ -7844,7 +7843,7 @@ PCFN
         "((__s64)(*((__u64 *)#{tmp})))"
       end
 
-      # cpu_id() — the current CPU index (bpf_get_smp_processor_id). Used
+      # cpu_id() -- the current CPU index (bpf_get_smp_processor_id). Used
       # to key per-CPU state (e.g. hardirqs/softirqs latency, where one handler
       # runs per CPU at a time so the CPU id is a collision-free key).
       def cpu_id_call(node)
@@ -7853,7 +7852,7 @@ PCFN
         CAst.s64(CAst.call("bpf_get_smp_processor_id")).to_c
       end
 
-      # cgroup_id() — the current cgroup id (kernfs id = cgroup-dir inode).
+      # cgroup_id() -- the current cgroup id (kernfs id = cgroup-dir inode).
       # For k8s pod correlation: in process-context hooks it is the id of the
       # task's cgroup under .../kubepods/.../pod<UID>/<container-id>, which
       # userspace resolves to the pod (see runtime spnl_otlp_*_span_push k8s.*).
@@ -7862,21 +7861,21 @@ PCFN
         CAst.s64(CAst.call("bpf_get_current_cgroup_id")).to_c
       end
 
-      # stack_id() / user_stack_id() — capture a stack trace, return
+      # stack_id() / user_stack_id() -- capture a stack trace, return
       # its id (non-negative). Host code looks up the id in bpf_stacks
       # to retrieve the PCs. Negative return means the verifier rejected
-      # the capture (typically stack too deep) — callers should guard.
+      # the capture (typically stack too deep) -- callers should guard.
       # `user_stack_id` uses BPF_F_USER_STACK (1 << 8) for the flags arg.
       def stack_id_call(node, user:)
         expect_no_args(node, user ? "user_stack_id" : "stack_id")
         @ctx.uses_stack_trace = true
         flags = user ? "(1ULL << 8)" : "0"
-        # bpf_get_stackid requires the original program ctx — XDP, kprobe,
+        # bpf_get_stackid requires the original program ctx -- XDP, kprobe,
         # etc. all pass the same `ctx` argument we already have in scope.
         "((__s64)bpf_get_stackid(ctx, &#{STACK_TRACE_MAP_NAME}, #{flags}))"
       end
 
-      # off_cpu_start(pid) / off_cpu_observe(pid) — bcc offcputime.py
+      # off_cpu_start(pid) / off_cpu_observe(pid) -- bcc offcputime.py
       # pattern. start() captures (ktime, current kernel stack id) under
       # `pid` in bpf_off_cpu; observe() picks it back up when the task
       # comes back on-CPU, computes the delta ns, bins (stack_id, delta)
@@ -7899,7 +7898,7 @@ PCFN
 
       # scx_bpf_* kfunc family. Each Ruby builtin maps to a kernel
       # kfunc declared as `__weak __ksym` in emit_sched_ext_preamble. The
-      # first arg of scx_dispatch is `struct task_struct *p` — Ruby passes
+      # first arg of scx_dispatch is `struct task_struct *p` -- Ruby passes
       # the bare `p` (a __s64 from inner sig) and we cast it back to the
       # kernel pointer type here.
       # Kernel-side names changed in recent sched_ext API:
@@ -7977,14 +7976,14 @@ PCFN
           c ? "#{c}(#{e})" : e
         end
         # All qdisc kfuncs are side-effecting / void-ish; the only one we
-        # might want a return for is init_prologue (returns int) — emit as
+        # might want a return for is init_prologue (returns int) -- emit as
         # statement uniformly and let Ruby get "0" back.
         # The kfunc call is built as a CExprStmt.
         @lines << CAst.expr_stmt(CAst.call(info[:kfunc], *exprs.map { |e| CAst.raw(e) })).to_c
         no_value
       end
 
-      # queue_push(skb, to_free) — try to push skb onto the per-unit
+      # queue_push(skb, to_free) -- try to push skb onto the per-unit
       # BPF list. Returns NET_XMIT_SUCCESS (0) or NET_XMIT_DROP (1) on
       # allocation/lock/list failure (with skb already cleaned up).
       # We emit the entire enqueue dance as a `do { ... } while (0)` block
@@ -8003,12 +8002,12 @@ PCFN
         # Verifier note: after bpf_list_push_back_impl, the verifier always
         # releases the wrapper reference (ref_obj_id) regardless of return
         # value. So we MUST NOT call bpf_obj_drop(_qpn) on the push failure
-        # path — that triggers "R1 must be referenced or trusted". Since
+        # path -- that triggers "R1 must be referenced or trusted". Since
         # push_back only fails when the node is already in a list (it isn't
         # in our usage), this is effectively unreachable; treat it as
         # NET_XMIT_SUCCESS so the verifier accepts the prog. The skb is
         # already lodged in _qpn->skb via kptr_xchg, so it won't leak in
-        # practice — even if we somehow reached this path the kernel
+        # practice -- even if we somehow reached this path the kernel
         # would GC the wrapper.
         @lines << "__s64 #{ret_var} = 1;  /* NET_XMIT_DROP unless we make it through */"
         @lines << "do {"
@@ -8031,7 +8030,7 @@ PCFN
         ret_var
       end
 
-      # queue_pop — pop one skb from the per-unit BPF list. Returns
+      # queue_pop -- pop one skb from the per-unit BPF list. Returns
       # the skb pointer cast to __s64 (or 0 if the queue was empty).
       def queue_pop_call(nid, node)
         expect_no_args(node, "queue_pop")
@@ -8068,10 +8067,10 @@ PCFN
         "spnl_off_cpu_observe((__u32)(#{pid_expr}))"
       end
 
-      # emit_comm() — write the current task's comm (16 bytes) to
+      # emit_comm() -- write the current task's comm (16 bytes) to
       # the per-unit string ringbuf, <unit>_str_events. Userspace
       # drains via spnl_runtime_ringbuf_drain like any other str event.
-      # emit_path(file) — the full path of a `struct file *` attach param,
+      # emit_path(file) -- the full path of a `struct file *` attach param,
       # via bpf_d_path, onto the per-unit string-event ringbuf.
       #
       # bpf_d_path is kernel-gated and the gate is NOT a plain name list: measurement
@@ -8080,7 +8079,7 @@ PCFN
       # So only the hooks actually measured to load are permitted, and only those
       # whose gated argument is a `struct file *`; there is no silent fallback.
       # The measured d_path gate allowlist lives in the
-      # capability registry (single source of truth). Byte-identical value —
+      # capability registry (single source of truth). Byte-identical value --
       # so the rejection message and the affordance data cannot disagree.
       # (lsm/file_open + fmod_ret/security_file_open + fmod_ret/security_file_permission)
       DPATH_OK_SECS = SpinelEbpf::Capabilities::DPATH_OK_SECS
@@ -8181,7 +8180,7 @@ PCFN
         "((__s64)ctx->hash)"
       end
 
-      # worker_select(idx) → bpf_sk_select_reuseport(ctx, &bpf_worker_socks,
+      # worker_select(idx)  ->  bpf_sk_select_reuseport(ctx, &bpf_worker_socks,
       # &idx, 0). Side-effecting (pushes to @lines like spnl_emit_call) because
       # the return value is consumed via the surrounding SK_PASS path.
       def worker_select_call(nid, node)
@@ -8251,7 +8250,7 @@ PCFN
       # `sk.snd_cwnd = v` / `sk.snd_cwnd += v` inside a tcp_cc__<member>
       # method, prism gives us a CallNode whose receiver expression evaluates
       # to the kernel `struct sock *` and whose method name matches a known
-      # tcp_sock_* field. We desugar to the same C as the flat builtin —
+      # tcp_sock_* field. We desugar to the same C as the flat builtin --
       # no semantic difference, only surface syntax.
       #
       # Returns the lowered C expression on success, or nil to signal
@@ -8326,8 +8325,8 @@ PCFN
         no_value
       end
 
-      # sock_ops_op  → ctx->op (BPF_SOCK_OPS_* code)
-      # sock_ops_state → ctx->args[1] (new state in STATE_CB)
+      # sock_ops_op   ->  ctx->op (BPF_SOCK_OPS_* code)
+      # sock_ops_state  ->  ctx->args[1] (new state in STATE_CB)
       def sock_ops_field_call(name)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
         unless attach && attach[:kind] == :sock_ops
@@ -8351,7 +8350,7 @@ PCFN
         "((__s64)(unsigned long)ctx->task)"
       end
 
-      # sock_addr_ip4 / sock_addr_port — read the target address of a
+      # sock_addr_ip4 / sock_addr_port -- read the target address of a
       # cgroup/connect4 (or bind4) hook in HOST byte order. ctx is
       # `struct bpf_sock_addr *`. user_ip4 / user_port are network order, so
       # byteswap with __builtin_bswap (no bpf_endian.h needed).
@@ -8366,12 +8365,12 @@ PCFN
         end
       end
 
-      # cpumap_redirect(cpu) — redirect the current XDP frame to
+      # cpumap_redirect(cpu) -- redirect the current XDP frame to
       # `spnl_cpumap[cpu]` for processing on a different CPU. The frame
       # is enqueued on that CPU's NAPI ring; the original XDP returns
       # the value of bpf_redirect_map (XDP_REDIRECT on success, XDP_PASS
       # if the map slot is empty or invalid). Caller writes:
-      #   `return cpumap_redirect(2)`  → packet handed to CPU 2
+      #   `return cpumap_redirect(2)`   ->  packet handed to CPU 2
       def cpumap_redirect_call(_nid, node)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
         unless attach && (attach[:kind] == :xdp || attach[:kind] == :xdp_tail)
@@ -8385,7 +8384,7 @@ PCFN
         "(__s64)bpf_redirect_map(&#{CPUMAP_MAP_NAME}, (__u32)(#{cpu_expr}), 0)"
       end
 
-      # xsk_redirect(qid) — redirect the XDP frame to the AF_XDP socket in
+      # xsk_redirect(qid) -- redirect the XDP frame to the AF_XDP socket in
       # XSKMAP slot `qid` (XDP_PASS fallback if the slot is empty).
       def xsk_redirect_call(_nid, node)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
@@ -8398,7 +8397,7 @@ PCFN
         "(__s64)bpf_redirect_map(&#{XSKMAP_MAP_NAME}, (__u32)(#{lower_stmt(args[0])}), XDP_PASS)"
       end
 
-      # dev_redirect(idx) — redirect the XDP frame out the net device in
+      # dev_redirect(idx) -- redirect the XDP frame out the net device in
       # DEVMAP slot `idx`.
       def dev_redirect_call(_nid, node)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
@@ -8411,7 +8410,7 @@ PCFN
         "(__s64)bpf_redirect_map(&#{DEVMAP_MAP_NAME}, (__u32)(#{lower_stmt(args[0])}), 0)"
       end
 
-      # tail_call_to(slot) — tail-call into the spnl_prog_array.
+      # tail_call_to(slot) -- tail-call into the spnl_prog_array.
       # Accepts either an integer literal (compile-time slot) or any other
       # int-typed expression. If `bpf_tail_call` succeeds the current
       # program never returns (control transfers to the target); on
@@ -8431,10 +8430,10 @@ PCFN
         no_value
       end
 
-      # user_ringbuf_drain — drain pending records from the per-unit
+      # user_ringbuf_drain -- drain pending records from the per-unit
       # USER_RINGBUF, invoking the static callback emitted from
       # `def user_ringbuf__<name>(value)`. Must be called from inside a
-      # BPF program (XDP / TC / kprobe / etc.) — it's a no-op if no
+      # BPF program (XDP / TC / kprobe / etc.) -- it's a no-op if no
       # records are pending.
       #
       # spnl_emit-style: emit as a side-effect statement (so it survives
@@ -8452,7 +8451,7 @@ PCFN
         no_value
       end
 
-      # pkt_dynptr_byte_at(offset) — dynptr-backed XDP byte read.
+      # pkt_dynptr_byte_at(offset) -- dynptr-backed XDP byte read.
       # Verifier-safe random access (no manual bounds-check at call site).
       # Returns the byte value (0-255) or -1 on out-of-bounds.
       def pkt_dynptr_byte_at_call(_nid, node)
@@ -8472,7 +8471,7 @@ PCFN
       # pkt_* builtin in expression position. Records (name, attach kind)
       # so the module-level emit pass appends a context-specific helper definition.
       # Returns either `spnl_pkt_<name>(ctx)` (XDP) or `spnl_tc_pkt_<name>(ctx)` (TC)
-      # — the function bodies differ only in the ctx struct type they dereference.
+      # -- the function bodies differ only in the ctx struct type they dereference.
       def pkt_builtin_call(name)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
         kind = attach && attach[:kind]
@@ -8510,7 +8509,7 @@ PCFN
         [name, field]
       end
 
-      # flow_get(:name, :field) — read a u64 field for the current packet's flow.
+      # flow_get(:name, :field) -- read a u64 field for the current packet's flow.
       # Emits key + guarded lookup, returns the field value (0 if no entry).
       def flow_get_call(_nid, node)
         name, field = flow_dispatch_common(node, need_field: true)
@@ -8526,7 +8525,7 @@ PCFN
         "(#{pv} ? (__s64)#{pv}->#{field} : 0)"
       end
 
-      # flow_set(:name, :field, value) — insert-or-update: set field for the
+      # flow_set(:name, :field, value) -- insert-or-update: set field for the
       # current packet's flow. Verifier-safe lookup-or-insert (no loops, guarded
       # derefs). Returns no_value (side-effecting statement).
       def flow_set_call(_nid, node)
@@ -8550,7 +8549,7 @@ PCFN
         no_value
       end
 
-      # Roadmap #3: tcp_syncookie_gen / tcp_syncookie_check — parse the current
+      # Roadmap #3: tcp_syncookie_gen / tcp_syncookie_check -- parse the current
       # packet and call the raw SYN-cookie kfunc. xdp-only (the kfuncs operate on
       # XDP packet pointers). Returns the cookie / validity (negative on error).
       def syncookie_call(name)
@@ -8562,7 +8561,7 @@ PCFN
         which == :gen ? "spnl_tcp_syncookie_gen(ctx)" : "spnl_tcp_syncookie_check(ctx)"
       end
 
-      # Roadmap #4: tcp_reply_header(seq, ack, flags) — turn the current packet
+      # Roadmap #4: tcp_reply_header(seq, ack, flags) -- turn the current packet
       # into a header-only TCP reply (swap endpoints, set seq/ack/flags, recompute
       # checksums). Returns 0 on success / -1 on error; caller returns XDP_TX.
       def tcp_reply_header_call(node)
@@ -8576,7 +8575,7 @@ PCFN
         "((__s64)spnl_tcp_reply_header(ctx, (__u32)(#{seq}), (__u32)(#{ack}), (__u8)(#{flags})))"
       end
 
-      # Roadmap #4b: tcp_reply_synack(cookie) — SYN-ACK with the MSS option.
+      # Roadmap #4b: tcp_reply_synack(cookie) -- SYN-ACK with the MSS option.
       # cookie comes from tcp_syncookie_gen; the helper extracts the MSS, computes
       # ack = client_seq + 1, and builds a doff=6 SYN-ACK. Returns 0/-1.
       def tcp_reply_synack_call(node)
@@ -8588,7 +8587,7 @@ PCFN
         "((__s64)spnl_tcp_reply_synack(ctx, (__s64)(#{cookie})))"
       end
 
-      # Roadmap #4b': tcp_synack_cookie() — integrated SYN -> SYN-ACK+cookie (the
+      # Roadmap #4b': tcp_synack_cookie() -- integrated SYN -> SYN-ACK+cookie (the
       # bundle sequence: grow-to-60, gen_syncookie, build SYN-ACK with MSS,
       # shrink). No args (reads the SYN from ctx). Returns 0/-1; caller XDP_TX.
       def tcp_synack_cookie_call(node)
@@ -8598,7 +8597,7 @@ PCFN
         "((__s64)spnl_tcp_synack_cookie(ctx))"
       end
 
-      # Roadmap #5b: tcp_reply_data(seq, ack, "<payload>") — turn the packet into a
+      # Roadmap #5b: tcp_reply_data(seq, ack, "<payload>") -- turn the packet into a
       # data response: resize, swap, set seq/ack + FIN|PSH|ACK, write the payload,
       # recompute checksums. Returns 0/-1; caller returns XDP_TX. xdp-only.
       def tcp_reply_data_call(node)
@@ -8625,7 +8624,7 @@ PCFN
         CodegenBpf.url_decode(n.attrs.fetch("content", ""))
       end
 
-      # Roadmap #5a: payload_starts("GET /hello ") — does the current packet's TCP
+      # Roadmap #5a: payload_starts("GET /hello ") -- does the current packet's TCP
       # payload start with the (compile-time) prefix? Returns 1 / 0. xdp-only.
       def payload_starts_call(node)
         raise UnsupportedNode, "payload_starts is only available inside xdp__ methods" unless flow_kind == :xdp
@@ -8644,7 +8643,7 @@ PCFN
         "spnl_payload_match#{id}(ctx)"
       end
 
-      # flow_del(:name) — delete the current packet's flow entry.
+      # flow_del(:name) -- delete the current packet's flow entry.
       def flow_del_call(_nid, node)
         name, = flow_dispatch_common(node, need_field: false)
         u = @ctx.unit_name
@@ -8728,7 +8727,7 @@ PCFN
           return nil if cur_id < 0
           cur = @ctx.ast.node(cur_id)
           return nil unless cur && cur.type == "CallNode"
-          # Intermediate / root must take no arguments and no block — chain
+          # Intermediate / root must take no arguments and no block -- chain
           # accessors are pure field reads.
           return nil if cur.refs.fetch("arguments", -1) >= 0
           return nil if cur.refs.fetch("block",    -1) >= 0
@@ -8766,7 +8765,7 @@ PCFN
         no_value
       end
 
-      # emit_argv(argv) — read a NUL-terminated array of user string
+      # emit_argv(argv) -- read a NUL-terminated array of user string
       # pointers (e.g. execve's argv) and emit each element as a str event.
       # Reuses the str ringbuf. The trip count is a compile-time bound so the
       # verifier can fully unroll; the early `break` on a NULL pointer stops at
@@ -8909,7 +8908,7 @@ PCFN
       end
 
       # Pick the right HASH-map name for an ivar depending on scope:
-      # class method → ivar_map_name(class), top-level method → top_ivar_map_name(unit).
+      # class method  ->  ivar_map_name(class), top-level method  ->  top_ivar_map_name(unit).
       def ivar_map_for(ivar)
         case @mi.scope
         when :class

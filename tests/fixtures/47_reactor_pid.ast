@@ -40,6 +40,7 @@ A 13 elements 14
 A 10 arguments 11,12,13
 R 9 arguments 10
 N 17 BlockNode
+S 17 locals prompt
 N 18 BlockParametersNode
 N 19 ParametersNode
 N 20 RequiredParameterNode
@@ -94,6 +95,7 @@ A 33 elements 34
 A 28 arguments 29,30,31,32,33
 R 27 arguments 28
 N 37 BlockNode
+S 37 locals obj,tinfo,dest
 N 38 BlockParametersNode
 N 39 ParametersNode
 N 40 RequiredParameterNode

@@ -1,0 +1,99 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/113_scalar_args.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @established
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @fingerprint
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name tracepoint__sock__inet_sock_set_state
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name skaddr
+N 9 RequiredParameterNode
+S 9 name oldstate
+N 10 RequiredParameterNode
+S 10 name newstate
+N 11 RequiredParameterNode
+S 11 name sport
+N 12 RequiredParameterNode
+S 12 name dport
+A 7 requireds 8,9,10,11,12
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 13 StatementsNode
+N 14 IfNode
+N 15 CallNode
+S 15 name ==
+N 16 LocalVariableReadNode
+S 16 name newstate
+R 15 receiver 16
+N 17 ArgumentsNode
+N 18 IntegerNode
+I 18 value 1
+A 17 arguments 18
+R 15 arguments 17
+R 15 block -1
+S 15 call_operator .
+R 14 predicate 15
+N 19 StatementsNode
+N 20 InstanceVariableOperatorWriteNode
+S 20 name @established
+S 20 binary_operator +
+N 21 IntegerNode
+I 21 value 1
+R 20 value 21
+N 22 InstanceVariableWriteNode
+S 22 name @fingerprint
+N 23 CallNode
+S 23 name +
+N 24 CallNode
+S 24 name +
+N 25 CallNode
+S 25 name +
+N 26 LocalVariableReadNode
+S 26 name skaddr
+R 25 receiver 26
+N 27 ArgumentsNode
+N 28 LocalVariableReadNode
+S 28 name oldstate
+A 27 arguments 28
+R 25 arguments 27
+R 25 block -1
+S 25 call_operator .
+R 24 receiver 25
+N 29 ArgumentsNode
+N 30 LocalVariableReadNode
+S 30 name sport
+A 29 arguments 30
+R 24 arguments 29
+R 24 block -1
+S 24 call_operator .
+R 23 receiver 24
+N 31 ArgumentsNode
+N 32 LocalVariableReadNode
+S 32 name dport
+A 31 arguments 32
+R 23 arguments 31
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+A 19 body 20,22
+R 14 statements 19
+R 14 subsequent -1
+N 33 IntegerNode
+I 33 value 0
+A 13 body 14,33
+R 6 body 13
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

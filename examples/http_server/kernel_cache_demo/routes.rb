@@ -1,4 +1,4 @@
-# Phase 2: multi-route auto kernel-cache. Declare several routes; spinel-ebpf
+# Multi-route auto kernel-cache. Declare several routes; spinel-ebpf
 # synthesizes ONE pure-XDP TCP slice that dispatches each request path to its
 # cache slot and serves it from the kernel. No hand-written eBPF.
 #

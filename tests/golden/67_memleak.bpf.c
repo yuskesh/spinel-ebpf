@@ -67,8 +67,22 @@ struct tracepoint__kmem__kfree_ctx {
 };
 
 /* impl: tracepoint__kmem__kmalloc : int  params: call_site: int, ptr: int, bytes_req: int, bytes_alloc: int, gfp_flags: int, node: int */
-static __noinline __s64 tracepoint__kmem__kmalloc_inner(void *ctx, __s64 call_site, __s64 ptr, __s64 bytes_req, __s64 bytes_alloc, __s64 gfp_flags, __s64 node)
+struct tracepoint__kmem__kmalloc_args {
+    __s64 p0;
+    __s64 p1;
+    __s64 p2;
+    __s64 p3;
+    __s64 p4;
+    __s64 p5;
+};
+static __noinline __s64 tracepoint__kmem__kmalloc_inner(void *ctx, struct tracepoint__kmem__kmalloc_args *__a)
 {
+    __s64 call_site = __a->p0;
+    __s64 ptr = __a->p1;
+    __s64 bytes_req = __a->p2;
+    __s64 bytes_alloc = __a->p3;
+    __s64 gfp_flags = __a->p4;
+    __s64 node = __a->p5;
     spnl_leak_record(ptr, bytes_alloc, ((__s64)bpf_get_stackid(ctx, &bpf_stacks, 0)));
     return 0;
 }
@@ -78,7 +92,14 @@ SEC("tracepoint/kmem/kmalloc")
 int tracepoint__kmem__kmalloc(void *ctx)
 {
     (void)ctx;
-    (void)tracepoint__kmem__kmalloc_inner(ctx, (__s64)((struct trace_event_raw_kmalloc *)ctx)->call_site, (__s64)((struct trace_event_raw_kmalloc *)ctx)->ptr, (__s64)((struct trace_event_raw_kmalloc *)ctx)->bytes_req, (__s64)((struct trace_event_raw_kmalloc *)ctx)->bytes_alloc, (__s64)((struct trace_event_raw_kmalloc *)ctx)->gfp_flags, (__s64)((struct trace_event_raw_kmalloc *)ctx)->node);
+    struct tracepoint__kmem__kmalloc_args __a = {};
+    __a.p0 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->call_site;
+    __a.p1 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->ptr;
+    __a.p2 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->bytes_req;
+    __a.p3 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->bytes_alloc;
+    __a.p4 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->gfp_flags;
+    __a.p5 = (__s64)((struct trace_event_raw_kmalloc *)ctx)->node;
+    (void)tracepoint__kmem__kmalloc_inner(ctx, &__a);
     return 0;
 }
 

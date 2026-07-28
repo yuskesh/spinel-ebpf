@@ -2,7 +2,7 @@
  * and L4 header sizes). 0 if not IPv4/IPv6 TCP/UDP or truncated.
  * Useful for distinguishing "empty ACK" packets (kernel-generated
  * spurious control packets) from data carriers.
- * For IPv6, ip6h->payload_len already excludes
+ * IPv6 branch added. ip6h->payload_len already excludes
  * the IPv6 header (unlike IPv4 tot_len), so we just subtract the
  * L4 header size. Extension headers are out of scope. */
 static __noinline __s64 @SIG@

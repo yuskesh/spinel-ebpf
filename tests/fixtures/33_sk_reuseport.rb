@@ -6,8 +6,8 @@
 #
 # Attach is application-specific: setsockopt(listen_fd, SOL_SOCKET,
 #   SO_ATTACH_REUSEPORT_EBPF, &prog_fd, sizeof(prog_fd))
-# after creating the listen socket. That wiring happens in the multi-worker
-# spinel HTTP server. This fixture only validates that the codegen pattern
+# after creating the listen socket. That wiring lives in the multi-worker
+# spinel HTTP server example. This fixture only validates that the codegen pattern
 # produces a verifier-loadable program — libbpf's auto-attach harmlessly
 # skips SK_REUSEPORT programs.
 

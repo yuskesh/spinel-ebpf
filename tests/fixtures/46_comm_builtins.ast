@@ -29,6 +29,7 @@ R 11 receiver -1
 R 11 arguments -1
 R 11 block -1
 S 11 call_operator .
+I 11 vcall 1
 N 12 IntegerNode
 I 12 value 1000
 A 10 arguments 11,12
@@ -45,6 +46,7 @@ R 13 receiver -1
 R 13 arguments -1
 R 13 block -1
 S 13 call_operator .
+I 13 vcall 1
 A 6 body 7,13
 R 2 body 6
 R 2 receiver -1
@@ -69,6 +71,7 @@ R 20 receiver -1
 R 20 arguments -1
 R 20 block -1
 S 20 call_operator .
+I 20 vcall 1
 A 19 arguments 20
 R 18 arguments 19
 R 18 block -1
