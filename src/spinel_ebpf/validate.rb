@@ -1,42 +1,46 @@
 # frozen_string_literal: true
 #
-# E317 (ADR-015 原則2「loud failure」+ 投資優先(b)): compile 時の loud で
-# actionable な拒否。AI が誤った Ruby を書いたとき、**何が・なぜ・どこ・どう直すか**
-# を返して自己修正を助ける (E316 affordance = 読む、本モジュール = 直す)。
+# Loud, actionable rejection at compile time. When the author -- often a machine --
+# writes Ruby that cannot work, this says what is wrong, why, where, and how to fix
+# it, so the next attempt can be better. The affordance data is what you read
+# before writing; this is what corrects you afterwards.
 #
-# partition と codegen の隙間に落ちる穴を、**codegen を呼ぶ前**に Ruby で
-# 塞ぐ (C 版・Ruby oracle どちらの codegen でも同じ loud エラーが CLI から出る):
+# It closes the gaps that fall between partitioning and code generation, in Ruby,
+# *before* the generator runs, so the same loud error comes out of the CLI whichever
+# generator is in use:
 #
-#   1. attach ハンドラが :native に落ちる = silent no-op
-#      (`def kprobe__x` が float/regex/io で eBPF 不適格 → 誰も発火させない。
-#       exit 0 のまま黙って消える最悪ケース)。attach prefix を持つメソッドが
-#       ebpf-impossible で :native なら **hard error** + 具体的理由。
+#   1. An attach handler that falls back to native, which is a silent no-op. A
+#      `def kprobe__x` containing a float, a regex or file I/O is not eligible for
+#      eBPF, so nothing ever fires it -- and the program still exits 0, the worst
+#      possible outcome. A method with an attach prefix that is ineligible is a hard
+#      error, with the reason spelled out.
 #
-#   2. attach 名の typo (E320 / E319 GAP-2、最重大) — `def kprobe_do_sys_openat2`
-#      (アンダースコア 1 個、正しくは `kprobe__`)。既知の attach-kind (kprobe/…) の
-#      後に単一 `_` が続くと、どの ATTACH_PATTERNS にもマッチせず **孤児 SEC("syscall")
-#      program に silent フォールバック**する (partition/codegen/clang/verifier 全緑
-#      なのにカーネルに attach されず一生発火しない)。`__` にすれば valid attach に
-#      なるものを typo とみなし **did-you-mean** で loud に落とす。
+#   2. A typo in an attach name -- the worst of the bunch. Write
+#      `def kprobe_do_sys_openat2` with one underscore instead of two and it matches
+#      no attach pattern at all, so it silently becomes an orphan syscall program:
+#      partitioning, code generation, clang and the verifier are all happy, and the
+#      handler is attached to nothing and never fires. A name that would be a valid
+#      attach with a doubled underscore is treated as a typo and rejected with a
+#      suggestion.
 #
-#   3. 0 引数 builtin の余分な引数 (E320 / E319 GAP-1) — `latency_start(1)`。C 版
-#      codegen は sibling の `lat_start`/`lat_end` (arity 1) は arity を検査するのに
-#      `latency_start`/`latency_end` (arity 0) は引数を silent に捨てる非対称がある。
-#      余分な引数を **loud** に落として整合させる (`expects no arguments`)。
+#   3. Arguments passed to a builtin that takes none, such as `latency_start(1)`.
+#      The generator checks arity for the one-argument siblings but silently drops
+#      extra arguments to the zero-argument ones. This removes that asymmetry.
 #
-#   4. 未知 builtin (typo) — `hist_observ(x)`。codegen は "CallNode not yet ported"
-#      や "not lowerable" と cryptic に落ちる。ここで **did-you-mean** (Levenshtein、
-#      依存なし) を出す。
+#   4. An unknown builtin, usually a typo: `hist_observ(x)`. The generator would
+#      fail with something cryptic about a node it cannot lower; this offers a
+#      suggestion instead, using an edit distance computed here with no dependency.
 #
-#   5. 不完全な必須組 — `http_req_start` だけ書いて `http_emit` を書かない等。
-#      現状は **silent に壊れた program** (span が出ないが exit 0)。
-#      Capabilities::REQUIRED_SETS を参照して **loud** に落とす。
+#   5. An incomplete set of calls -- writing `http_req_start` without `http_emit`,
+#      say. That yields a program that is quietly broken: no span comes out, and it
+#      still exits 0. The required sets in the capability data catch it.
 #
-# +heap: `[1,2,3].map { }` 等の enumerable ブロックは eBPF 不可。partition は
-#   これを捕まえないので (map は DYNAMIC_ARRAY_OPS 外)、ここで名指しして落とす。
+# It also rejects enumerable blocks such as `[1,2,3].map { }`, which cannot run in
+# eBPF and which partitioning does not catch.
 #
-# 非目標: **成功する probe の生成コードは 1 byte も変えない** (golden 不変)。
-# エラー経路だけを賢くする。過剰に厳しくしない (2 軸ハーネス: 良い probe は通す)。
+# What it deliberately does not do: change one byte of the code generated for a
+# probe that compiles. Only the error paths get smarter. Nor is it eager to reject:
+# a good probe must still pass.
 
 require "set"
 require_relative "capabilities"
@@ -44,18 +48,19 @@ require_relative "codegen_bpf"
 
 module SpinelEbpf
   module Validate
-    # 拒否は ADR-003 に従い即エラー。CLI は rescue して `error: <message>` で abort。
+    # A rejection is an immediate error; the CLI rescues it and aborts with
+    # `error: <message>`.
     class Error < StandardError; end
 
     module_function
 
-    # 全 builtin の権威集合 (codegen の BUILTIN_NAMES + dynptr)。
+    # The authoritative set of builtins: the generator's own list, plus dynptr.
     BUILTINS = (CodegenBpf::BUILTIN_NAMES + CodegenBpf::DYNPTR_BUILTINS).uniq.to_set.freeze
 
-    # eBPF サブセットで唯一許される受信あり反復は `n.times { }`。それ以外の
-    # enumerable ブロック呼出は heap 反復 = eBPF 不可。ブロック付きに限定して
-    # 判定するので、kfield の dot-field read (`t.min`、ブロック無し) や
-    # dot-accessor (`sk.snd_cwnd`) を誤検出しない。
+    # The only iteration with a receiver the subset allows is `n.times { }`. Any
+    # other enumerable block iterates the heap, which eBPF cannot do. Only calls
+    # *with a block* are considered, so a dot-field read like `t.min` or an
+    # accessor like `sk.snd_cwnd` is not mistaken for one.
     ENUMERABLE_BLOCK_METHODS = %w[
       map collect select filter reject filter_map
       reduce inject each each_with_object each_with_index each_pair
@@ -63,51 +68,55 @@ module SpinelEbpf
       sort_by min_by max_by sum count chunk_while zip
     ].to_set.freeze
 
-    # 受信なし control 形 (万一 :ebpf に残っても typo 扱いしない安全網)。
+    # Receiverless control forms, kept here so they are never mistaken for typos.
     CONTROL_NAMES = %w[times loop lambda proc].to_set.freeze
 
-    # E320 (GAP-2): 既知の attach-kind word。affordance と検出を同じデータ源に
-    # するため、Capabilities::ATTACH_KINDS の method_prefix から先頭識別子 (最初の
-    # `__` より前) を機械的に抜く。例: "kprobe__<func>" -> "kprobe"、"xdp__<name>"
+    # The known attach-kind words. They are derived mechanically from the method
+    # prefixes in the capability data -- the identifier before the first `__` -- so
+    # that the affordances an author reads and the detection here cannot disagree.
+    # For example "kprobe__<func>" yields "kprobe", and "xdp__<name>"
     # -> "xdp"、"xdp_tail__<name>" -> "xdp_tail"、"sk_skb__verdict__<name>" ->
-    # "sk_skb"。timer だけ method_prefix が "on :timer, …" 形 (作者が手で def しない
-    # 合成名) なので先頭が識別子でなく自然に除外される。長い word を先に試すため
-    # 長さ降順 (xdp_tail を xdp より優先 = 良い suggestion)。
+    # "sk_skb". The timer is the one prefix written as "on :timer, ...", a
+    # synthesised name no author types, and it drops out naturally because it does
+    # not start with an identifier. Longest first, so "xdp_tail" is preferred over
+    # "xdp" and the suggestion is the better one.
     ATTACH_WORDS = Capabilities::ATTACH_KINDS
                    .filter_map { |a| a[:method_prefix][/\A([a-z0-9_]+?)__/, 1] }
                    .uniq
                    .sort_by { |w| -w.length }
                    .freeze
 
-    # E320 (GAP-1): 引数を取らない (arity 0) builtin のうち、sibling (lat_start/
-    # lat_end) が arity を検査するのに C codegen が silent に引数を捨てる非対称を
-    # 持つもの。余分な引数を loud に落とす。tid キーは builtin 内部で取るので 0 引数。
+    # The zero-argument builtins whose one-argument siblings do check arity, while
+    # the generator silently discards arguments to these. Rejecting the extra
+    # argument here removes the asymmetry. They take none because they derive the
+    # thread id internally.
     ZERO_ARG_STRICT = %w[latency_start latency_end].to_set.freeze
 
-    # 全チェックを走らせる (loud 検査 = 最初の違反で raise)。
+    # Run every check, raising on the first violation.
     #   ast    -- ParseSpinelAst
-    #   result -- Partition::Result (tag 決定済)
+    #   result -- a Partition::Result, with tags already assigned
     def validate!(ast, result)
       return if result.nil? || ast.nil?
       check_attach_handlers_are_ebpf!(result)              # (1)
-      check_attach_name_typos!(result)                     # (2) E320 GAP-2
-      used, unknown = scan_ebpf_calls(ast, result)         # 1 回の walk で両方
+      check_attach_name_typos!(result)                     # (2)
+      used, unknown = scan_ebpf_calls(ast, result)         # both, in one walk
       check_heap_iteration!(ast, result)                   # +heap
-      check_zero_arg_builtins!(ast, result)                # (3) E320 GAP-1
+      check_zero_arg_builtins!(ast, result)                # (3)
       check_unknown_builtins!(unknown)                     # (4)
       check_required_sets!(used)                           # (5)
       nil
     end
 
-    # (1) attach ハンドラが ebpf-impossible で :native に落ちていたら loud に落とす。
-    # attach は eBPF でしか動かない (native 実行パスが無い) ので、黙って native 化
-    # すると **一切発火しない**。partition table には理由が出るが exit 0 なので AI は
-    # 成功と誤読する ⇒ hard error にする。
+    # (1) Reject an attach handler that fell back to native because it cannot run
+    # in eBPF. An attach point has no native execution path, so falling back means
+    # it never fires at all. The partition table does say why, but the process still
+    # exits 0, and an author -- especially a machine -- reads that as success.
     def check_attach_handlers_are_ebpf!(result)
       result.methods.each do |mi|
         next unless mi.tag == :native
         next unless mi.scope == :top_level
-        # ebpf-impossible が原因のときだけ (force_native / __spnl_ / <main> は対象外)。
+        # Only when ineligibility is the cause; a forced-native method, an internal
+        # one, or main are all excluded.
         next unless mi.flags && mi.flags.ebpf_impossible?
         attach = CodegenBpf.detect_attach(mi.method_name)
         next unless attach
@@ -120,26 +129,27 @@ module SpinelEbpf
       end
     end
 
-    # (2) E320 GAP-2 (最重大、loud-failure 違反の是正): attach 名の 1 文字 typo
-    # (`kprobe_x` = 単一 `_`、正しくは `kprobe__x`) を compile 時に loud に落とす。
+    # (2) The most consequential check: a one-character typo in an attach name,
+    # `kprobe_x` with a single underscore where `kprobe__x` was meant.
     #
-    # 単一 `_` はどの ATTACH_PATTERNS にもマッチせず、top-level :ebpf メソッドは
-    # 孤児 SEC("syscall") program に化ける — partition/codegen/clang/verifier は全緑
-    # なのに **カーネルの何にも attach されず一生発火しない** (E319 で実測)。verifier
-    # は「安全か」しか見ないのでこの穴は check でも捕まらなかった。ここで名前規則
-    # から高確度に検出する。
+    # A single underscore matches no attach pattern, so the method becomes an orphan
+    # syscall program: partitioning, code generation, clang and the verifier are all
+    # green, and the handler is attached to nothing and never fires. The verifier
+    # only asks whether a program is safe, so it cannot catch this. The name rule
+    # can, and with high confidence.
     #
-    # 締めすぎ回避 (2 軸ハーネス): detect_attach が既に valid とみなす名前 (= 正しい
-    # `__` 形、DSL 合成名) は対象外。かつ「word + 単一 `_` + rest を `__` に直すと
-    # valid attach になる」場合だけ flag する (attach_name_typo_suggestion が
-    # detect_attach で検証)。corpus 403 メソッド名で false-reject 0 を実測。
+    # It is careful not to over-reject: a name the attach detector already accepts
+    # is left alone, and a name is only flagged when doubling that one underscore
+    # would produce a valid attach -- which the suggestion helper verifies through
+    # the detector itself. Measured against a corpus of 403 method names, it rejects
+    # none of them wrongly.
     def check_attach_name_typos!(result)
       result.methods.each do |mi|
         next unless mi.tag == :ebpf
         next unless mi.scope == :top_level
         name = mi.method_name
         next if name.nil? || name.empty?
-        next if CodegenBpf.detect_attach(name)     # 既に valid attach 形 — 正当
+        next if CodegenBpf.detect_attach(name)     # already a valid attach name
         hit = attach_name_typo_suggestion(name)
         next unless hit
         word, suggestion = hit
@@ -153,10 +163,11 @@ module SpinelEbpf
       end
     end
 
-    # name が「attach word + 単一 `_` + rest」で、`__` に直すと valid attach になる
-    # なら [word, suggestion] を返す (無ければ nil)。単一 fix (1 個の `_` → `__`) で
-    # valid になる高確度 typo だけを対象にする (rest が `_` 始まりなら既に `__` =
-    # valid 形なので除外)。長い word 優先で最良の suggestion を出す。
+    # If name is an attach word followed by a single underscore and a remainder, and
+    # doubling that underscore would make it a valid attach, return [word,
+    # suggestion]; otherwise nil. Only typos that one such fix resolves are
+    # considered -- a remainder already starting with an underscore is the valid form
+    # -- and longer words are tried first so the suggestion is the best one.
     def attach_name_typo_suggestion(name)
       ATTACH_WORDS.each do |w|
         prefix = "#{w}_"
@@ -169,13 +180,14 @@ module SpinelEbpf
       nil
     end
 
-    # (3) E320 GAP-1: 0 引数 builtin (latency_start/latency_end) に余分な引数が
-    # 渡っていたら loud に落とす。sibling の lat_start/lat_end (arity 1) との非対称
-    # (C codegen が黙って引数を捨てる) を是正。成功 probe は 0 引数なので不変。
+    # (3) Reject arguments passed to a builtin that takes none. The one-argument
+    # siblings do check their arity while the generator silently discards arguments
+    # to these, and this removes that asymmetry. A probe that was already correct
+    # passes none, so nothing changes for it.
     def check_zero_arg_builtins!(ast, result)
       each_ebpf_body(result) do |mi, body_id|
         walk_calls(body_id, ast) do |nid|
-          next unless ast.receiver_of(nid) < 0   # 受信なし builtin 呼出のみ
+          next unless ast.receiver_of(nid) < 0   # receiverless builtin calls only
           name = ast.name_of(nid)
           next unless ZERO_ARG_STRICT.include?(name)
           n = call_arg_count(ast, nid)
@@ -188,7 +200,7 @@ module SpinelEbpf
       end
     end
 
-    # CallNode の実引数個数 (ArgumentsNode が無ければ 0)。
+    # How many arguments a call node actually has; 0 when it has no arguments node.
     def call_arg_count(ast, nid)
       aid = ast.arguments_of(nid)
       return 0 if aid < 0
@@ -197,13 +209,14 @@ module SpinelEbpf
       an.arrays.fetch("arguments", []).length
     end
 
-    # +heap: :ebpf メソッド本体に enumerable ブロック呼出があれば loud に落とす。
+    # Reject an enumerable block call in the body of an eBPF method: it iterates the
+    # heap, which eBPF cannot do.
     def check_heap_iteration!(ast, result)
       each_ebpf_body(result) do |mi, body_id|
         walk_calls(body_id, ast) do |nid|
           name = ast.name_of(nid)
           next unless ENUMERABLE_BLOCK_METHODS.include?(name)
-          next if ast.ref(nid, "block", default: -1) < 0   # ブロック付きのみ
+          next if ast.ref(nid, "block", default: -1) < 0   # calls with a block only
           raise Error,
                 "`.#{name} { ... }` in `#{mi.method_name}` is heap/enumerable iteration, which is " \
                 "eBPF-illegal (no heap, no dynamic allocation in BPF). The only bounded loop in the " \
@@ -212,13 +225,14 @@ module SpinelEbpf
       end
     end
 
-    # (4) 未知 builtin (typo) を did-you-mean 付きで落とす。
+    # (4) Reject an unknown builtin, offering the nearest name as a suggestion.
     def check_unknown_builtins!(unknown)
       return if unknown.empty?
       u = unknown.first
       name, method = u[:name], u[:method]
       best, dist = nearest_builtin(name)
-      # 近い builtin があれば did-you-mean。閾値は名前長に応じて緩める。
+      # Suggest the closest builtin when there is one; the threshold loosens with
+      # the length of the name.
       threshold = [2, (name.length / 3.0).ceil].max
       if best && dist <= threshold
         sig = Capabilities.signature_for(best)
@@ -232,7 +246,7 @@ module SpinelEbpf
             "eBPF construct. Run `spinel-ebpf capabilities` (#{BUILTINS.size} builtins) or define it."
     end
 
-    # (5) 不完全な必須組を loud に落とす (Capabilities::REQUIRED_SETS を参照)。
+    # (5) Reject an incomplete set of required calls.
     def check_required_sets!(used)
       gaps = Capabilities.missing_companions(used.keys)
       return if gaps.empty?
@@ -249,45 +263,47 @@ module SpinelEbpf
       end
     end
 
-    # ---------- 内部ヘルパー ----------
+    # ---------- internal helpers ----------
 
-    # 全 :ebpf メソッドを 1 回 walk し、(a) 使用中 builtin -> [method,...]、
-    # (b) 未知の受信なし呼出 [{name:, method:}] を集める。
+    # Walk every eBPF method once, collecting (a) the builtins in use, mapped to the
+    # methods using them, and (b) the unknown receiverless calls.
     #
-    # chain accessor の base (`pkt.l4.proto` の `pkt`) は「受信なし CallNode だが
-    # 別 CallNode の receiver」= codegen の accessor が処理する正当形。builtin/typo
-    # は leaf 呼出 (誰の receiver でもない) なので、**receiver 位置の call は unknown
-    # 判定から除外** (E317 の 2 軸ハーネス: 正当な chain accessor を弾かない)。
+    # The base of a chain accessor -- the `pkt` in `pkt.l4.proto` -- is a
+    # receiverless call that is itself the receiver of another call, and the
+    # generator's accessor handling deals with it. A builtin or a typo is always a
+    # leaf call, receiver of nothing, so calls in receiver position are excluded
+    # from the unknown check rather than rejecting a legitimate chain.
     def scan_ebpf_calls(ast, result)
       known = method_name_set(result)
       used = Hash.new { |h, k| h[k] = [] }
       candidates = []          # [{ nid:, name:, method: }] receiver-less unknowns
-      receiver_ids = Set.new   # 他 CallNode の receiver になっている node id
+      receiver_ids = Set.new   # node ids that are the receiver of another call
       each_ebpf_body(result) do |mi, body_id|
         walk_calls(body_id, ast) do |nid|
           rid = ast.receiver_of(nid)
           receiver_ids << rid if rid >= 0
-          next unless rid < 0                      # builtin / bpf-to-bpf は受信なし
+          next unless rid < 0                      # builtins and BPF-to-BPF calls have no receiver
           name = ast.name_of(nid)
           next if name.nil? || name.empty?
           if BUILTINS.include?(name)
             used[name] << mi.method_name
           elsif known.include?(name) || CONTROL_NAMES.include?(name) || BINARY_OP_NAMES.include?(name)
-            # 定義済メソッド (bpf-to-bpf) / control / 二項演算 — 既知、無視
+            # A defined method, a control form, or a binary operator: known, ignore
           else
             candidates << { nid: nid, name: name, method: mi.method_name }
           end
         end
       end
-      # chain accessor の base (receiver 位置) は除外。
+      # Exclude the base of a chain accessor, which sits in receiver position.
       unknown = candidates.reject { |c| receiver_ids.include?(c[:nid]) }
       [used, unknown]
     end
 
     BINARY_OP_NAMES = CodegenBpf::MethodEmitter::BINARY_OPS.to_set.freeze
 
-    # result 内の全メソッド名 (bare + dsl 元名) の集合。bpf-to-bpf 呼出の解決に使う。
-    # 広めに取る (permissive) — 誤検出で正当な呼出を弾くより did-you-mean を逃す方が安全。
+    # Every method name in the result, both bare and original DSL spellings, used to
+    # resolve BPF-to-BPF calls. It is deliberately permissive: missing a suggestion
+    # is safer than rejecting a legitimate call.
     def method_name_set(result)
       s = Set.new
       result.methods.each do |m|
@@ -305,8 +321,8 @@ module SpinelEbpf
       end
     end
 
-    # body_id 以下の CallNode を yield (nested def/class/module には入らない;
-    # partition の walk と同じガード)。
+    # Yield the call nodes under body_id, without descending into a nested def,
+    # class or module -- the same guard partitioning uses.
     def walk_calls(body_id, ast, &blk)
       visited = {}
       stack = [body_id]
@@ -319,17 +335,18 @@ module SpinelEbpf
         next unless node
         case node.type
         when "DefNode", "ClassNode", "ModuleNode"
-          next   # 別メソッドとして解析される — 二重カウント回避
+          next   # analysed as its own method; do not count it twice
         when "CallNode"
           blk.call(nid)
         end
-        # refs は Integer 値のみ辿る (IntegerNode#value=0 を node 0 と誤認しない)。
+        # Follow only integer refs, so that an IntegerNode whose value is 0 is not
+        # mistaken for node 0.
         node.refs.each_value { |c| stack << c if c.is_a?(Integer) && c >= 0 }
         node.arrays.each_value { |arr| arr.each { |c| stack << c if c.is_a?(Integer) && c >= 0 } }
       end
     end
 
-    # 依存なしの Levenshtein 距離。
+    # Edit distance, computed here so this module needs no dependency.
     def levenshtein(a, b)
       return b.length if a.empty?
       return a.length if b.empty?
@@ -345,7 +362,8 @@ module SpinelEbpf
       prev[b.length]
     end
 
-    # name に最も近い builtin と距離を返す [best, dist] (BUILTINS 空なら [nil, ∞])。
+    # Return the closest builtin to name and its distance, as [best, dist]; when
+    # there are no builtins, [nil, infinity].
     def nearest_builtin(name)
       best = nil
       best_d = Float::INFINITY
