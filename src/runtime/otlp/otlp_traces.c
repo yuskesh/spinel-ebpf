@@ -1,7 +1,7 @@
 /*
- * otlp_traces.c — メソッド呼び出しツリー -> OTLP traces
- * 詳細は otlp_traces.h を参照。assemble (events->spans) と build (spans->OTLP) はどちらも
- * libbpf 非依存で host 単体検証できる。
+ * otlp_traces.c -- turn a method call tree into OTLP traces. See otlp_traces.h.
+ * Both halves -- assembling events into spans, and encoding spans as OTLP -- are
+ * free of libbpf, and so unit-testable on any host.
  */
 #include "otlp_traces.h"
 #include "otlp_pbutil.h"  /* otlp_enc_string / otlp_enc_bytes / otlp_put_kv_* / otlp_enc_one_sub / otlp_resource_t */
@@ -11,7 +11,7 @@
 #include <pb_encode.h>
 #include "opentelemetry/proto/collector/trace/v1/trace_service.pb.h"
 
-/* ---- id 生成 (splitmix64) ---- */
+/* ---- id generation, via splitmix64 ---- */
 
 static uint64_t splitmix64(uint64_t *s) {
     uint64_t z = (*s += 0x9E3779B97F4A7C15ULL);
@@ -23,7 +23,7 @@ static void put_u64_be(uint8_t *p, uint64_t v) {
     for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (56 - 8 * i));
 }
 
-/* ---- E312: trace 組み立てプリミティブ (共通 trace_id + 親子リンク) ---- */
+/* ---- the primitives for building a trace: a shared trace id, and parent links ---- */
 
 void otlp_span_new_root(otlp_generic_span_t *s, uint64_t *seed) {
     put_u64_be(s->trace_id,     splitmix64(seed));
@@ -67,27 +67,27 @@ int otlp_span_root_from_traceparent(otlp_generic_span_t *s, const char *tracepar
         traceparent[2] == '-' && traceparent[35] == '-' && traceparent[52] == '-') {
         uint8_t tid[16], pid[8];
         if (parse_hex(traceparent + 3, tid, 16) && parse_hex(traceparent + 36, pid, 8)) {
-            memcpy(s->trace_id, tid, 16);           /* 受信 trace_id を根に */
-            memcpy(s->parent_span_id, pid, 8);      /* 受信 span-id = 我々の親 */
+            memcpy(s->trace_id, tid, 16);           /* adopt the incoming trace id */
+            memcpy(s->parent_span_id, pid, 8);      /* the incoming span is our parent */
             s->has_parent = true;
-            put_u64_be(s->span_id, splitmix64(seed));   /* 我々の span は新規 */
+            put_u64_be(s->span_id, splitmix64(seed));   /* our own span id is always new */
             return 1;
         }
     }
-    otlp_span_new_root(s, seed);   /* 無効/無し -> 生成 */
+    otlp_span_new_root(s, seed);   /* absent or malformed: start a new trace */
     return 0;
 }
 
 int otlp_child_in_window(uint32_t child_tgid, uint64_t child_ktime,
                          uint32_t parent_tgid, uint64_t parent_start_ktime,
                          uint64_t parent_dur_ns) {
-    if (parent_start_ktime == 0) return 0;          /* window 不明 (旧 record) は相関しない */
-    if (child_tgid != parent_tgid) return 0;        /* 同一プロセス (tgid) が必須 */
+    if (parent_start_ktime == 0) return 0;          /* unknown window: never correlate */
+    if (child_tgid != parent_tgid) return 0;        /* must be the same process */
     return child_ktime >= parent_start_ktime &&
            child_ktime <= parent_start_ktime + parent_dur_ns;
 }
 
-/* ---- assemble: events -> spans (per-tid スタック) ---- */
+/* ---- assemble events into spans, using a per-thread stack ---- */
 
 typedef struct {
     uint8_t  span_id[8];
@@ -108,14 +108,14 @@ typedef struct {
 int otlp_traces_assemble(const otlp_span_event_t *ev, size_t nev,
                          int64_t off_ns, uint64_t seed,
                          otlp_span_t *out, size_t max_out) {
-    static tidslot_t slots[OTLP_TRACE_MAX_TIDS]; /* static: 大きめなので stack を避ける */
+    static tidslot_t slots[OTLP_TRACE_MAX_TIDS]; /* static because it is too large for the stack */
     int nslots = 0;
     uint64_t rng = seed;
     size_t nout = 0;
 
     for (size_t i = 0; i < nev; i++) {
         const otlp_span_event_t *e = &ev[i];
-        /* tid -> slot (見つからなければ作る) */
+        /* Find this thread's slot, creating one if needed. */
         tidslot_t *s = NULL;
         for (int k = 0; k < nslots; k++) if (slots[k].tid == e->tid) { s = &slots[k]; break; }
         if (!s) {
@@ -127,7 +127,7 @@ int otlp_traces_assemble(const otlp_span_event_t *ev, size_t nev,
 
         if (e->kind == 0) { /* enter */
             if (s->depth >= OTLP_TRACE_MAX_DEPTH) continue;
-            if (s->depth == 0) { /* 最外 -> 新しい trace */
+            if (s->depth == 0) { /* outermost call: a new trace */
                 put_u64_be(s->trace_id,     splitmix64(&rng));
                 put_u64_be(s->trace_id + 8, splitmix64(&rng));
             }
@@ -140,7 +140,7 @@ int otlp_traces_assemble(const otlp_span_event_t *ev, size_t nev,
             p->idx = e->idx;
             s->depth++;
         } else { /* exit */
-            if (s->depth <= 0) continue; /* 未対応 enter */
+            if (s->depth <= 0) continue; /* an exit with no matching enter */
             pending_t *p = &s->stack[--s->depth];
             if (nout >= max_out) continue;
             otlp_span_t *o = &out[nout++];
@@ -157,7 +157,7 @@ int otlp_traces_assemble(const otlp_span_event_t *ev, size_t nev,
     return (int)nout;
 }
 
-/* ---- OTLP encode (scalar/属性/envelope は otlp_pbutil.h) ---- */
+/* ---- OTLP encoding; the scalar, attribute and envelope helpers live in otlp_pbutil.h ---- */
 
 typedef struct {
     const otlp_span_t *spans; size_t n;
@@ -169,7 +169,7 @@ static const otlp_method_meta_t *find_meta(const trace_ctx_t *c, int32_t idx) {
     return NULL;
 }
 
-/* arg = const otlp_method_meta_t* (NULL 可) */
+/* arg is a const otlp_method_meta_t*, and may be NULL. */
 static bool enc_span_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_method_meta_t *m = (const otlp_method_meta_t *)(*arg);
     if (!m) return true;
@@ -179,7 +179,7 @@ static bool enc_span_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
     return true;
 }
 
-/* ScopeSpans.spans: span 群 (arg = trace_ctx_t*) */
+/* ScopeSpans.spans: the spans; arg is a trace_ctx_t*. */
 static bool enc_spans(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const trace_ctx_t *c = (const trace_ctx_t *)(*arg);
     for (size_t i = 0; i < c->n; i++) {
@@ -253,7 +253,7 @@ long otlp_traces_build(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
-/* ---- HTTP server span (kind=SERVER + http.* 属性) ---- */
+/* ---- the HTTP server span: kind SERVER, with http.* attributes ---- */
 
 static bool enc_http_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_http_span_t *s = (const otlp_http_span_t *)(*arg);
@@ -263,7 +263,7 @@ static bool enc_http_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
         !otlp_put_kv_str(st, fld, "url.path", s->url_path)) return false;
     if (s->status_code > 0 &&
         !otlp_put_kv_int(st, fld, "http.response.status_code", s->status_code)) return false;
-    /* OBI/semconv v1.41.0 互換の追加属性 */
+    /* The additional semconv attributes. */
     if (s->server_address && s->server_address[0] &&
         !otlp_put_kv_str(st, fld, "server.address", s->server_address)) return false;
     if (s->server_port > 0 &&
@@ -274,7 +274,8 @@ static bool enc_http_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
         !otlp_put_kv_str(st, fld, "url.scheme", s->url_scheme)) return false;
     if (s->route && s->route[0] &&
         !otlp_put_kv_str(st, fld, "http.route", s->route)) return false;
-    /* L2–L8 横断相関の追加属性 (L8 tenant + L3/L4 4-tuple keyed メトリクス) */
+    /* Cross-layer attributes: the application-level tenant, and the
+     * connection-keyed TCP counters. */
     if (s->tenant && s->tenant[0] &&
         !otlp_put_kv_str(st, fld, "tenant", s->tenant)) return false;
     if (s->tcp_established >= 0 &&
@@ -300,7 +301,8 @@ static bool enc_http_span(pb_ostream_t *st, const pb_field_iter_t *fld, void *co
     sp.end_time_unix_nano = s->end_unix_ns;
     sp.attributes.funcs.encode = enc_http_attrs;
     sp.attributes.arg = (void *)s;
-    /* HTTP server 規約 (OBI/semconv) — status >= 500 で ERROR、それ以外は UNSET (省略) */
+    /* The semconv rule for server spans: 500 or above is an error, and anything
+     * else leaves the status UNSET, which means omitting the field. */
     if (s->status_code >= 500) {
         sp.has_status = true;
         sp.status.code = opentelemetry_proto_trace_v1_Status_StatusCode_STATUS_CODE_ERROR;
@@ -352,7 +354,7 @@ long otlp_traces_http_build(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
-/* ---- E292: 汎用 span (任意 KV 属性) — 監査 span 用 ---- */
+/* ---- the generic span: arbitrary key/value attributes, as used for audit spans ---- */
 
 typedef struct { const otlp_kv_t *attrs; int n; } gattrs_ctx_t;
 
@@ -360,13 +362,13 @@ static bool enc_generic_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void
     const gattrs_ctx_t *c = (const gattrs_ctx_t *)(*arg);
     for (int i = 0; i < c->n; i++) {
         const otlp_kv_t *kv = &c->attrs[i];
-        if (!kv->key[0] || !kv->val[0]) continue;   /* 空 key/val は省略 */
+        if (!kv->key[0] || !kv->val[0]) continue;   /* skip empty keys and values */
         if (!otlp_put_kv_str(st, fld, kv->key, kv->val)) return false;
     }
     return true;
 }
 
-/* 1 span を Span submessage に符号化する共通ルーチン (単一/複数 build で共有)。 */
+/* Encode one span as a Span submessage; shared by the single- and multi-span builds. */
 static bool enc_generic_span_one(pb_ostream_t *st, const pb_field_iter_t *fld,
                                  const otlp_generic_span_t *s) {
     opentelemetry_proto_trace_v1_Span sp = opentelemetry_proto_trace_v1_Span_init_zero;
@@ -381,13 +383,14 @@ static bool enc_generic_span_one(pb_ostream_t *st, const pb_field_iter_t *fld,
     sp.kind = s->kind ? s->kind : opentelemetry_proto_trace_v1_Span_SpanKind_SPAN_KIND_INTERNAL;
     sp.start_time_unix_nano = s->start_unix_ns;
     sp.end_time_unix_nano = s->end_unix_ns;
-    /* gctx は本 submessage 符号化中だけ生きていればよい (pb_encode_submessage は同期呼出) →
-     * ローカルで安全。複数 span を跨いだ静的共有は不要 (E308 batch)。 */
+    /* gctx only has to outlive this submessage encoding, and pb_encode_submessage
+     * is a synchronous call, so a local is safe. Batching several spans does not
+     * require sharing it statically. */
     gattrs_ctx_t gctx;
     gctx.attrs = s->attrs; gctx.n = s->nattrs;
     sp.attributes.funcs.encode = enc_generic_attrs;
     sp.attributes.arg = &gctx;
-    if (s->is_error) {          /* deny 等: APM で ERROR 色分け */
+    if (s->is_error) {          /* a denial, say: surfaces as an error in an APM view */
         sp.has_status = true;
         sp.status.code = opentelemetry_proto_trace_v1_Status_StatusCode_STATUS_CODE_ERROR;
     }
@@ -395,7 +398,7 @@ static bool enc_generic_span_one(pb_ostream_t *st, const pb_field_iter_t *fld,
     return pb_encode_submessage(st, opentelemetry_proto_trace_v1_Span_fields, &sp);
 }
 
-/* ScopeSpans.spans: 汎用 span 群 (arg = gspans_ctx_t*、E308 batch) */
+/* ScopeSpans.spans: a batch of generic spans; arg is a gspans_ctx_t*. */
 typedef struct { const otlp_generic_span_t *spans; size_t n; } gspans_ctx_t;
 
 static bool enc_generic_spans(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
@@ -450,7 +453,8 @@ long otlp_traces_generic_build_multi(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
-/* 単一 span は nspans==1 の multi と byte 一致 (既存呼出元 otlp_httpspan.c 等はそのまま)。 */
+/* The single-span form is byte-identical to the multi-span one with nspans == 1,
+ * so existing callers such as otlp_httpspan.c need no change. */
 long otlp_traces_generic_build(uint8_t *buf, size_t cap,
                                const char *service_name, const char *service_version,
                                const char *scope_name, const otlp_generic_span_t *span) {

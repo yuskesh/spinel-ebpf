@@ -1,12 +1,13 @@
 /*
- * otlp_http.c — OTLP/HTTP+protobuf 転送の最小 HTTP/1.1 クライアント
+ * otlp_http.c -- the minimal HTTP/1.1 client behind OTLP/HTTP+protobuf
  *
- * POSIX socket だけで http://host:port<path> に protobuf body を POST する。
- * 応答はステータス行だけ見る (OTLP の partial-success 本文は v1 では無視可)。
+ * POSTs a protobuf body to http://host:port<path> using nothing but POSIX sockets.
+ * Only the status line of the response is inspected; OTLP's partial-success body
+ * can be ignored at v1.
  */
 #include "otlp_http.h"
 #ifdef OTLP_WITH_TLS
-#include "otlp_tls.h"   /* ADR-013 T1: https:// 直送の TLS 層 (gated、非 TLS ビルドは未参照) */
+#include "otlp_tls.h"   /* the TLS layer for https://; unreferenced in a non-TLS build */
 #endif
 
 #include <errno.h>
@@ -24,7 +25,7 @@ static void set_err(char *err, size_t errlen, const char *msg) {
     if (err && errlen) { snprintf(err, errlen, "%s", msg); }
 }
 
-/* fd に len バイトを全部書く。成功で 0。 */
+/* Write all len bytes to fd. Returns 0 on success. */
 static int write_all(int fd, const void *buf, size_t len) {
     const char *p = (const char *)buf;
     size_t off = 0;
@@ -39,8 +40,8 @@ static int write_all(int fd, const void *buf, size_t len) {
     return 0;
 }
 
-/* TLS handle (tls_h) があれば TLS、無ければ raw fd で I/O。
- * tls_h は opaque (void*) — 非 TLS ビルドでは常に NULL で otlp_tls 型に触れない。 */
+/* Do I/O over TLS when tls_h is present, and over the raw fd otherwise. tls_h is
+ * an opaque void*, so a non-TLS build keeps it NULL and never names a TLS type. */
 static int io_write(void *tls_h, int fd, const void *buf, size_t len) {
 #ifdef OTLP_WITH_TLS
     if (tls_h) return otlp_tls_write((otlp_tls_t *)tls_h, buf, len);
@@ -63,7 +64,7 @@ static void io_close(void *tls_h, int fd) {
     close(fd);
 }
 
-/* [start,end) を spaces トリムして dst にコピー */
+/* Copy [start,end) into dst, trimming surrounding spaces. */
 static void copy_trim(char *dst, size_t cap, const char *s, const char *e) {
     while (s < e && (*s == ' ' || *s == '\t')) s++;
     while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
@@ -100,7 +101,8 @@ int otlp_gzip_if_enabled(const uint8_t *in, size_t inlen,
     if (!c || strcmp(c, "gzip") != 0 || !in || !out || !outlen) return 0;
     z_stream zs;
     memset(&zs, 0, sizeof zs);
-    /* windowBits 15+16 = gzip ヘッダ付き (HTTP Content-Encoding / gRPC grpc-encoding 用) */
+    /* windowBits of 15+16 asks for a gzip header, which is what both HTTP
+     * Content-Encoding and gRPC grpc-encoding expect. */
     if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
         return 0;
     zs.next_in = (Bytef *)in;
@@ -109,7 +111,7 @@ int otlp_gzip_if_enabled(const uint8_t *in, size_t inlen,
     zs.avail_out = (uInt)outcap;
     int rc = deflate(&zs, Z_FINISH);
     deflateEnd(&zs);
-    if (rc != Z_STREAM_END) return 0; /* 収まらない/失敗 -> 非圧縮で送る */
+    if (rc != Z_STREAM_END) return 0; /* did not fit, or failed: send uncompressed */
     *outlen = outcap - zs.avail_out;
     return 1;
 }
@@ -120,13 +122,13 @@ int otlp_http_parse_endpoint(const char *endpoint,
     if (!endpoint || !host || !port || hostlen == 0 || portlen == 0) return -1;
 
     const char *p = endpoint;
-    const char *defport = "4318";              /* OTLP/HTTP 既定 (plain http) */
+    const char *defport = "4318";              /* the OTLP/HTTP default, over plain http */
     if (strncmp(p, "http://", 7) == 0) p += 7;
-    else if (strncmp(p, "https://", 8) == 0) { p += 8; defport = "443"; }  /* E290: 標準 URL 既定 (SaaS ingest は 443) */
+    else if (strncmp(p, "https://", 8) == 0) { p += 8; defport = "443"; }  /* the URL default, which hosted ingest endpoints use */
     else if (strncmp(p, "grpcs://", 8) == 0) { p += 8; defport = "4317"; } /* OTLP/gRPC+TLS */
-    else if (strncmp(p, "grpc://", 7) == 0) { p += 7; defport = "4317"; } /* OTLP/gRPC 既定 */
+    else if (strncmp(p, "grpc://", 7) == 0) { p += 7; defport = "4317"; } /* the OTLP/gRPC default */
 
-    /* host[:port] (path 以降は捨てる) */
+    /* host[:port]; anything from the path onwards is discarded here */
     size_t n = strcspn(p, ":/");
     if (n == 0 || n >= hostlen) return -1;
     memcpy(host, p, n);
@@ -145,9 +147,10 @@ int otlp_http_parse_endpoint(const char *endpoint,
     return 0;
 }
 
-/* endpoint URL の path 部分を取り出す (例 "https://h/v2/trace/otlp" -> "/v2/trace/otlp")。
- * path が無ければ空文字。OTel の per-signal endpoint (OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT) を
- * verbatim で使う (signal パスを付け足さない) ために必要。0 で成功。 */
+/* Extract the path from an endpoint URL, so "https://h/v2/trace/otlp" yields
+ * "/v2/trace/otlp"; an endpoint without one yields the empty string. This is what
+ * allows a per-signal endpoint (OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT) to be used
+ * verbatim, without appending a signal path of our own. Returns 0 on success. */
 int otlp_http_endpoint_path(const char *endpoint, char *path, size_t pathlen) {
     if (!endpoint || !path || pathlen == 0) return -1;
     const char *p = endpoint;
@@ -155,7 +158,7 @@ int otlp_http_endpoint_path(const char *endpoint, char *path, size_t pathlen) {
     else if (strncmp(p, "https://", 8) == 0) p += 8;
     else if (strncmp(p, "grpcs://", 8) == 0) p += 8;
     else if (strncmp(p, "grpc://", 7) == 0) p += 7;
-    const char *slash = strchr(p, '/');   /* host[:port] の後の最初の '/' 以降が path */
+    const char *slash = strchr(p, '/');   /* the path starts at the first '/' after host[:port] */
     if (!slash) { path[0] = '\0'; return 0; }
     size_t n = strlen(slash);
     if (n + 1 > pathlen) return -1;
@@ -163,7 +166,7 @@ int otlp_http_endpoint_path(const char *endpoint, char *path, size_t pathlen) {
     return 0;
 }
 
-/* host:port に connect した fd を返す。失敗で -1。 */
+/* Return an fd connected to host:port, or -1 on failure. */
 static int connect_once(const char *host, const char *port, char *err, size_t errlen) {
     struct addrinfo hints, *res = NULL, *ai;
     memset(&hints, 0, sizeof hints);
@@ -204,19 +207,20 @@ int otlp_http_post(const char *host, const char *port, const char *path,
     for (int attempt = 0; attempt < max_retries; attempt++) {
         fd = connect_once(host, port, err, errlen);
         if (fd >= 0) break;
-        /* 指数バックオフ: 100ms, 200ms, 400ms, ... (receiver 起動待ち / 一過性) */
+        /* Exponential backoff -- 100ms, 200ms, 400ms, ... -- to ride out a
+         * receiver that is still starting up, or a transient failure. */
         long ms = 100L << attempt;
         if (ms > 2000) ms = 2000;
         struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
         nanosleep(&ts, NULL);
     }
-    if (fd < 0) return -1; /* err は connect_once が設定済 */
+    if (fd < 0) return -1; /* connect_once has already filled in err */
 
-    /* https:// の場合は connected fd に TLS を被せる (gated) */
+    /* For https://, wrap the connected fd in TLS. */
     void *tls_h = NULL;
     if (tls) {
 #ifdef OTLP_WITH_TLS
-        tls_h = otlp_tls_connect(fd, host, NULL /* HTTP/1.1: ALPN 無し */, err, errlen);
+        tls_h = otlp_tls_connect(fd, host, NULL /* HTTP/1.1 offers no ALPN */, err, errlen);
         if (!tls_h) { close(fd); return -1; }
 #else
         set_err(err, errlen, "TLS (https://) not compiled in — rebuild with mbedTLS (OTLP_WITH_TLS)");
@@ -224,7 +228,7 @@ int otlp_http_post(const char *host, const char *port, const char *path,
 #endif
     }
 
-    /* gzip 有効時は body を圧縮 (Content-Encoding: gzip) */
+    /* When gzip is enabled, compress the body and say so in Content-Encoding. */
     static uint8_t gzbuf[1 << 18];
     const uint8_t *sendb = body;
     size_t sendn = body_len;
@@ -232,7 +236,7 @@ int otlp_http_post(const char *host, const char *port, const char *path,
     int gzipped = otlp_gzip_if_enabled(body, body_len, gzbuf, sizeof gzbuf, &gzlen);
     if (gzipped) { sendb = gzbuf; sendn = gzlen; }
 
-    /* リクエストヘッダ (標準 + 任意 Content-Encoding) */
+    /* Request headers: the standard set, plus Content-Encoding when compressed. */
     char header[2048];
     int hn = snprintf(header, sizeof header,
         "POST %s HTTP/1.1\r\n"
@@ -249,7 +253,8 @@ int otlp_http_post(const char *host, const char *port, const char *path,
         io_close(tls_h, fd);
         return -1;
     }
-    /* OTEL_EXPORTER_OTLP_HEADERS の認証ヘッダ等を追加 (直送時の token 等) */
+    /* Append the headers from OTEL_EXPORTER_OTLP_HEADERS -- the authentication
+     * token, when sending straight to a backend. */
     otlp_kv_t hdrs[16];
     int nh = otlp_env_headers(hdrs, 16);
     for (int i = 0; i < nh; i++) {
@@ -260,7 +265,7 @@ int otlp_http_post(const char *host, const char *port, const char *path,
         }
         hn += a;
     }
-    /* 終端の空行 */
+    /* The blank line that ends the headers. */
     if ((size_t)hn + 2 >= sizeof header) { set_err(err, errlen, "header too long"); io_close(tls_h, fd); return -1; }
     header[hn++] = '\r'; header[hn++] = '\n';
 
@@ -271,7 +276,7 @@ int otlp_http_post(const char *host, const char *port, const char *path,
         return -1;
     }
 
-    /* 応答: ステータス行だけ読めれば十分 */
+    /* The response: reading the status line is enough. */
     char resp[1024];
     size_t got = 0;
     while (got < sizeof resp - 1) {
@@ -284,12 +289,12 @@ int otlp_http_post(const char *host, const char *port, const char *path,
         }
         if (n == 0) break; /* server closed */
         got += (size_t)n;
-        if (memchr(resp, '\n', got)) break; /* ステータス行が揃った */
+        if (memchr(resp, '\n', got)) break; /* the status line is complete */
     }
     io_close(tls_h, fd);
     resp[got] = '\0';
 
-    /* "HTTP/1.1 200 ..." をパース */
+    /* Parse "HTTP/1.1 200 ...". */
     int code = 0;
     if (sscanf(resp, "HTTP/%*d.%*d %d", &code) != 1) {
         set_err(err, errlen, "malformed HTTP response");

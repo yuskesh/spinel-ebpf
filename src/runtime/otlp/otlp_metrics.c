@@ -1,6 +1,6 @@
 /*
- * otlp_metrics.c — per-method RED -> OTLP metrics エンコーダ
- * 詳細は otlp_metrics.h を参照。共通 nanopb ヘルパは otlp_pbutil.h。
+ * otlp_metrics.c -- encode per-method RED measurements as OTLP metrics.
+ * See otlp_metrics.h; the shared nanopb helpers are in otlp_pbutil.h.
  */
 #include "otlp_metrics.h"
 #include "otlp_pbutil.h"  /* otlp_enc_string / otlp_put_kv_* / otlp_enc_one_sub / otlp_resource_t */
@@ -14,7 +14,7 @@
 #include <pb_encode.h>
 #include "opentelemetry/proto/collector/metrics/v1/metrics_service.pb.h"
 
-/* code.* 属性 (arg = const otlp_method_metric_t*) */
+/* The code.* attributes; arg is a const otlp_method_metric_t*. */
 static bool enc_code_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_method_metric_t *m = (const otlp_method_metric_t *)(*arg);
     if (!otlp_put_kv_str(st, fld, "code.function", m->method)) return false;
@@ -23,9 +23,10 @@ static bool enc_code_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
     return true;
 }
 
-/* ---- ヒストグラム ---- */
+/* ---- histograms ---- */
 
-/* spinel slot s (floor(log2)) の代表値 ~ 1.5 * 2^s (slot0 は ~1) */
+/* Representative value for slot s, which holds floor(log2(v)): about 1.5 * 2^s,
+ * and about 1 for slot 0. */
 static double slot_midpoint(int s) {
     if (s <= 0) return 1.0;
     return 1.5 * (double)((uint64_t)1 << s);
@@ -37,7 +38,7 @@ typedef struct {
     int len;
 } buckets_ctx_t;
 
-/* repeated UINT64 bucket_counts (unpacked; protoc/nanopb とも受理) */
+/* repeated UINT64 bucket_counts, unpacked -- accepted by both protoc and nanopb. */
 static bool enc_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const buckets_ctx_t *b = (const buckets_ctx_t *)(*arg);
     for (int i = 0; i < b->len; i++) {
@@ -47,7 +48,7 @@ static bool enc_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void
     return true;
 }
 
-/* ---- data points (methods 配列を loop) ---- */
+/* ---- data points, looping over the methods array ---- */
 
 typedef struct {
     const otlp_method_metric_t *methods;
@@ -56,7 +57,7 @@ typedef struct {
     uint64_t start;
 } dp_ctx_t;
 
-/* spnl_method_calls_total の NumberDataPoint 群 */
+/* The NumberDataPoints of spnl_method_calls_total. */
 static bool enc_calls_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const dp_ctx_t *c = (const dp_ctx_t *)(*arg);
     for (size_t i = 0; i < c->n; i++) {
@@ -77,7 +78,7 @@ static bool enc_calls_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *co
     return true;
 }
 
-/* spnl_method_latency_ns の ExponentialHistogramDataPoint 群 */
+/* The ExponentialHistogramDataPoints of spnl_method_latency_ns. */
 static bool enc_lat_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const dp_ctx_t *c = (const dp_ctx_t *)(*arg);
     for (size_t i = 0; i < c->n; i++) {
@@ -113,7 +114,7 @@ static bool enc_lat_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *cons
             bctx.offset = first;
             bctx.len = last - first + 1;
             dp.has_positive = true;
-            dp.positive.offset = first;  /* slot s -> 正 bucket index s */
+            dp.positive.offset = first;  /* slot s maps to positive bucket s */
             dp.positive.bucket_counts.funcs.encode = enc_bucket_counts;
             dp.positive.bucket_counts.arg = &bctx;
         }
@@ -207,7 +208,7 @@ long otlp_metrics_build(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
-/* ---- 汎用 keyed メトリクス (任意ラベル、--instrument 非依存) ---- */
+/* ---- generic keyed metrics: arbitrary labels, nothing to do with --instrument ---- */
 
 static bool enc_series_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_series_t *s = (const otlp_series_t *)(*arg);
@@ -354,22 +355,23 @@ long otlp_metrics_series_build(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
-/* ---- explicit-bounds Histogram (semconv http.server.request.duration、E272) ---- */
+/* ---- explicit-bounds Histogram, as used by http.server.request.duration ---- */
 
-/* repeated double explicit_bounds (unpacked; protoc/nanopb とも受理) */
+/* repeated double explicit_bounds, unpacked -- accepted by both protoc and nanopb. */
 typedef struct { const double *b; int n; } bounds_ctx_t;
 static bool enc_explicit_bounds(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const bounds_ctx_t *b = (const bounds_ctx_t *)(*arg);
     for (int i = 0; i < b->n; i++) {
         double d = b->b[i];
         if (!pb_encode_tag_for_field(st, fld)) return false;
-        if (!pb_encode_fixed64(st, &d)) return false;  /* double は 64-bit fixed */
+        if (!pb_encode_fixed64(st, &d)) return false;  /* a double is 64-bit fixed */
     }
     return true;
 }
 
-/* HistogramDataPoint.bucket_counts は repeated *fixed64* (ExponentialHistogram の repeated uint64
- * とは別 wire type)。tag は fld から 64-bit として出るので値も pb_encode_fixed64 で 8 byte 出す。 */
+/* HistogramDataPoint.bucket_counts is repeated *fixed64*, a different wire type
+ * from the repeated uint64 of ExponentialHistogram. The tag is emitted as 64-bit
+ * from the field descriptor, so the values go out as 8 bytes each too. */
 static bool enc_hist_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const buckets_ctx_t *b = (const buckets_ctx_t *)(*arg);
     for (int i = 0; i < b->len; i++) {
@@ -380,7 +382,7 @@ static bool enc_hist_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld,
     return true;
 }
 
-/* series 任意ラベル (arg = const otlp_hseries_t*) */
+/* A series' arbitrary labels; arg is a const otlp_hseries_t*. */
 static bool enc_hseries_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_hseries_t *s = (const otlp_hseries_t *)(*arg);
     for (int i = 0; i < s->nlabels; i++)
@@ -394,7 +396,7 @@ typedef struct {
     uint64_t t; uint64_t start;
 } hdp_ctx_t;
 
-/* HistogramDataPoint 群 */
+/* The HistogramDataPoints. */
 static bool enc_hist_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const hdp_ctx_t *c = (const hdp_ctx_t *)(*arg);
     for (size_t i = 0; i < c->n; i++) {
@@ -494,11 +496,12 @@ int otlp_metrics_export(const char *endpoint,
                         uint64_t time_unix_nano, uint64_t start_time_unix_nano,
                         const otlp_method_metric_t *methods, size_t nmethods,
                         int *http_status, char *err, size_t errlen) {
-    static uint8_t buf[1 << 18]; /* 256KB; メソッド多数 (最大 ~1024) でも十分 */
+    static uint8_t buf[1 << 18]; /* 256 KB, ample even for the ~1024-method ceiling */
     long n;
     const char *ct;
     const uint8_t *body;
-    /* http/json 指定かつ非 gRPC のとき JSON、それ以外は protobuf (gRPC は常に protobuf) */
+    /* JSON when http/json was asked for and the endpoint is not gRPC; protobuf
+     * otherwise, since gRPC always carries protobuf. */
     if (otlp_want_json() && !otlp_endpoint_is_grpc(endpoint)) {
         static char jbuf[1 << 19];
         n = otlp_json_metrics_build(jbuf, sizeof jbuf, service_name, service_version, scope_name,

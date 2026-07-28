@@ -1,4 +1,4 @@
-/* otlp_enrich.c — 層 2 enricher レジストリ (ADR-014、E313 / E315)。詳細は otlp_enrich.h。 */
+/* otlp_enrich.c -- the registry of attribute enrichers. See otlp_enrich.h. */
 #include "otlp_enrich.h"
 #include "otlp_k8s.h"
 #include "otlp_peer.h"
@@ -6,16 +6,18 @@
 #include <stdio.h>       /* snprintf */
 #include <stdlib.h>      /* getenv */
 #include <string.h>
-#include <sys/stat.h>    /* stat / S_ISDIR (kubepods 階層の検出) */
+#include <sys/stat.h>    /* stat / S_ISDIR, to detect a kubepods hierarchy */
 
-/* ---- enricher #1: k8s pod attribution (cgroup_id -> k8s.*、E304) ----
- * cgid を k8s.pod.name / k8s.namespace.name / k8s.pod.uid / k8s.container.name
- * (+ E310: k8s.deployment.name / k8s.service.name) に解決 (otlp_k8s、E302/E304)。
- * kubepods 階層が無いホストでは hard no-op (return 0) = 属性は E304 前と byte 同一。
- * 入力は env (生成 agent 経路には argv が無い):
- *   SPNL_K8S_CGROUP_ROOT  cgroup2 mount (既定 "/sys/fs/cgroup")
- *   SPNL_K8S_UIDMAP       kubectl 由来 "uid ns/name" ファイル (任意)
- * 全 signal に適用 (どの record も process ctx で cgid を持ち得る)。 */
+/* ---- enricher 1: Kubernetes pod attribution, cgroup id -> k8s.* ----
+ * Resolves a cgroup id to k8s.pod.name, k8s.namespace.name, k8s.pod.uid and
+ * k8s.container.name, plus k8s.deployment.name and k8s.service.name when the uid
+ * map supplies them. On a host with no kubepods hierarchy it returns 0 and adds
+ * nothing, leaving the attributes exactly as they were.
+ * Its inputs come from the environment, because the generated agent has no argv:
+ *   SPNL_K8S_CGROUP_ROOT  the cgroup2 mount; defaults to "/sys/fs/cgroup"
+ *   SPNL_K8S_UIDMAP       an optional "uid ns/name" file produced from kubectl
+ * It applies to every signal: any record taken in a process context can carry a
+ * cgroup id. */
 static int k8s_enrich(const otlp_enrich_ctx_t *ctx, otlp_kv_t *out, int cap) {
     static int  enabled = -1;   /* -1 unknown, 0 off, 1 on (lazy one-shot) */
     static char root[256];
@@ -37,36 +39,41 @@ static int k8s_enrich(const otlp_enrich_ctx_t *ctx, otlp_kv_t *out, int cap) {
     return spnl_k8s_enrich_attrs(ctx->cgid, root, have_uidmap ? uidmap : NULL, out, cap);
 }
 
-/* ---- enricher #3: CRI container 名解決 (cgroup_id -> 実 container 名、E315) ----
- * otlp_k8s は k8s.container.name に container-id (hex) を載せる。ここは cgid を CRIMAP で
- * 実 container 名 (coredns 等) に引き、**同じ key を last-writer-wins で上書き**して実名にする。
- * SPNL_K8S_CRIMAP 未設定 / cgid がマップに無ければ hard no-op (k8s の id が残る = E304/E310 byte 同一)。
- * 全 signal に適用 (process ctx の cgid を持つ経路すべて。**k8s の後に登録**して後勝ち上書きを成立させる)。 */
+/* ---- enricher 3: CRI container names, cgroup id -> the real name ----
+ * The Kubernetes enricher fills k8s.container.name with a container id in hex.
+ * This one looks the cgroup id up in the CRI map and overwrites that same key --
+ * last-writer-wins -- with the real name, coredns and the like. With
+ * SPNL_K8S_CRIMAP unset, or a cgroup id absent from the map, it adds nothing and
+ * the id stays. It applies to every signal, and is registered *after* the
+ * Kubernetes enricher so that the overwrite actually happens. */
 static int cri_enrich(const otlp_enrich_ctx_t *ctx, otlp_kv_t *out, int cap) {
     if (ctx->cgid == 0 || cap <= 0) return 0;
     return spnl_cri_enrich_attrs(ctx->cgid, out, cap);
 }
 
-/* ---- enricher #2: peer resolution (network.peer.address -> peer identity、E310) ----
- * conn span の宛先 IP を pod / service / external に分類 (otlp_peer)。
- * SPNL_K8S_IPMAP 未設定なら hard no-op (span byte 不変)。lazy_init は otlp_peer 側。
- * conn signal のみに適用 (宛先アドレスを持つ経路、registry の signal_mask で宣言)。 */
+/* ---- enricher 2: peer resolution, network.peer.address -> an identity ----
+ * Classifies a connection span's destination as a pod, a Service, or external.
+ * With SPNL_K8S_IPMAP unset it adds nothing and the span is unchanged; the lazy
+ * initialisation lives in otlp_peer. It applies only to the connection signal,
+ * the one that has a destination address, as declared by its signal mask. */
 static int peer_enrich(const otlp_enrich_ctx_t *ctx, otlp_kv_t *out, int cap) {
     if (!ctx->peer_addr || !ctx->peer_addr[0] || cap <= 0) return 0;
     return spnl_peer_enrich_attrs(ctx->peer_addr, out, cap);
 }
 
-/* レジストリ。**並び順 = enricher 適用順** (k8s -> cri -> peer)。cri は k8s の後に置き、
- * funnel の last-writer-wins で k8s.container.name (id) を実名に後勝ち上書きする。
- * per-signal 適用可否は signal_mask で宣言。 */
+/* The registry. Array order is application order: k8s, then cri, then peer. The
+ * CRI entry sits after the Kubernetes one so that last-writer-wins replaces the
+ * container id in k8s.container.name with the real name. Which signals each one
+ * applies to is declared by its signal mask. */
 static const otlp_enricher_t g_enrichers[] = {
-    { "k8s",  OTLP_SIG_ALL,                   k8s_enrich  },   /* E304: 全経路 (container=id) */
-    { "cri",  OTLP_SIG_ALL,                   cri_enrich  },   /* E315: 全経路 (container 名を実名に上書き) */
-    { "peer", OTLP_SIG_BIT(OTLP_SIGNAL_CONN), peer_enrich },   /* E310: conn のみ */
+    { "k8s",  OTLP_SIG_ALL,                   k8s_enrich  },   /* every signal; container name is the id */
+    { "cri",  OTLP_SIG_ALL,                   cri_enrich  },   /* every signal; rewrites that to the real name */
+    { "peer", OTLP_SIG_BIT(OTLP_SIGNAL_CONN), peer_enrich },   /* connections only */
 };
 #define OTLP_ENRICH_N ((int)(sizeof g_enrichers / sizeof g_enrichers[0]))
 
-/* out[0..n) から key を線形探索 (無ければ -1)。属性数は高々数個なので線形で十分。 */
+/* Linear search for key in out[0..n), or -1. There are only ever a handful of
+ * attributes, so a scan is plenty. */
 static int find_key(const otlp_kv_t *out, int n, const char *key) {
     for (int i = 0; i < n; i++) if (!strcmp(out[i].key, key)) return i;
     return -1;
@@ -78,19 +85,21 @@ int otlp_enrich_run(const otlp_enrich_ctx_t *ctx, otlp_kv_t *out, int cap) {
     for (int i = 0; i < OTLP_ENRICH_N; i++) {
         if (n >= cap) break;
         const otlp_enricher_t *e = &g_enrichers[i];
-        if (!(e->signal_mask & OTLP_SIG_BIT(ctx->signal))) continue;   /* 適用外 signal はスキップ */
-        /* 各 enricher の出力を一旦 scratch に取り、**last-writer-wins** で out にマージ。
-         * 同一 key が既にあれば後勝ちで置換 (index 不変 = 順序保持)、無ければ末尾 append。
-         * key が衝突しない限り append と byte-identical (E304/E310 の後方互換の肝)。 */
+        if (!(e->signal_mask & OTLP_SIG_BIT(ctx->signal))) continue;   /* not for this signal */
+        /* Collect each enricher's output into scratch, then merge it into out
+         * last-writer-wins: an existing key is replaced in place, keeping its index
+         * and so the attribute order, and a new key is appended. As long as keys do
+         * not collide the result is byte-identical to a plain append, which is what
+         * keeps older probes producing exactly the spans they always did. */
         otlp_kv_t scratch[16];
         int room = cap - n; if (room > 16) room = 16;
         int m = e->enrich(ctx, scratch, room);
         for (int j = 0; j < m; j++) {
             int at = find_key(out, n, scratch[j].key);
             if (at >= 0) {
-                out[at] = scratch[j];               /* 後勝ち上書き (順序不変) */
+                out[at] = scratch[j];               /* replace in place, order preserved */
             } else if (n < cap) {
-                out[n++] = scratch[j];              /* 新規 key は末尾 append */
+                out[n++] = scratch[j];              /* a new key goes on the end */
             }
         }
     }
