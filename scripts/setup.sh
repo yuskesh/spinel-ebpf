@@ -15,16 +15,30 @@
 #   build/csrc/*.o          compiler objects the in-process eBPF codegen links
 #   build/libprism.a        the prism parser library
 #
+# Optionally also fetches and builds mbedTLS into deps/mbedtls, which is only
+# needed to send telemetry over TLS (an https:// or grpcs:// OTLP endpoint). It
+# is off by default: a probe that posts to a plain http:// collector never links
+# mbedTLS, so most users do not need the ~50 MB checkout.
+#
+#   SPNL_WITH_TLS=1 scripts/setup.sh
+#
 # Tunables (environment variables):
-#   SPINEL_REPO  git URL of the fork     (default https://github.com/yuskesh/spinel.git)
-#   SPINEL_REF   branch / tag / commit   (default: a tag on c-emit-ir = upstream + Patch 1)
-#   SPINEL_DIR   checkout location       (default <repo>/deps/spinel)
+#   SPINEL_REPO   git URL of the fork     (default https://github.com/yuskesh/spinel.git)
+#   SPINEL_REF    branch / tag / commit   (default: a tag on c-emit-ir = upstream + Patch 1)
+#   SPINEL_DIR    checkout location       (default <repo>/deps/spinel)
+#   SPNL_WITH_TLS set to 1 to also fetch + build mbedTLS (default: off)
+#   MBEDTLS_REPO  git URL                 (default https://github.com/Mbed-TLS/mbedtls.git)
+#   MBEDTLS_REF   tag / branch / commit   (default v3.6.6, an LTS release)
+#   MBEDTLS_DIR   checkout location       (default <repo>/deps/mbedtls)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SPINEL_REPO="${SPINEL_REPO:-https://github.com/yuskesh/spinel.git}"
-SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.06.23}"
+SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.07.21}"
 SPINEL_DIR="${SPINEL_DIR:-$HERE/deps/spinel}"
+MBEDTLS_REPO="${MBEDTLS_REPO:-https://github.com/Mbed-TLS/mbedtls.git}"
+MBEDTLS_REF="${MBEDTLS_REF:-v3.6.6}"
+MBEDTLS_DIR="${MBEDTLS_DIR:-$HERE/deps/mbedtls}"
 
 echo ">>> spinel: $SPINEL_REPO @ $SPINEL_REF"
 echo ">>> into:   $SPINEL_DIR"
@@ -70,4 +84,28 @@ objs=$(ls "$SPINEL_DIR"/build/csrc/*.o 2>/dev/null | grep -v '/main\.o$' | wc -l
 [ "${objs:-0}" -gt 0 ] || { echo "!!! missing: build/csrc/*.o"; exit 1; }
 
 echo ">>> OK: bin/spinel + $objs codegen objects + libprism.a"
-echo ">>> spinel-ebpf is ready. Try: bin/spinel-ebpf compile <file>.rb --build"
+
+# 4. Optional: mbedTLS, for OTLP over TLS (https:// / grpcs:// endpoints).
+#    Skipped unless asked for. bin/spinel-ebpf links it only when the generated C
+#    contains such an endpoint, so a plain-http setup never needs this step.
+if [ "${SPNL_WITH_TLS:-0}" = "1" ]; then
+  echo ">>> mbedTLS: $MBEDTLS_REPO @ $MBEDTLS_REF"
+  echo ">>> into:    $MBEDTLS_DIR"
+  if [ ! -d "$MBEDTLS_DIR/.git" ]; then
+    mkdir -p "$(dirname "$MBEDTLS_DIR")"
+    # Shallow, single-tag clone: mbedTLS carries a lot of history we never read.
+    # --recurse-submodules picks up the `framework` submodule the build needs.
+    git clone --depth 1 --branch "$MBEDTLS_REF" \
+      --recurse-submodules --shallow-submodules "$MBEDTLS_REPO" "$MBEDTLS_DIR"
+  else
+    git -C "$MBEDTLS_DIR" remote set-url origin "$MBEDTLS_REPO"
+    git -C "$MBEDTLS_DIR" fetch --depth 1 --tags origin "$MBEDTLS_REF"
+    git -C "$MBEDTLS_DIR" checkout -q FETCH_HEAD
+    git -C "$MBEDTLS_DIR" submodule update --init --recursive --depth 1
+  fi
+  "$HERE/scripts/build-mbedtls.sh"
+  echo ">>> spinel-ebpf is ready, with TLS. Try: bin/spinel-ebpf compile <file>.rb --build"
+else
+  echo ">>> spinel-ebpf is ready. Try: bin/spinel-ebpf compile <file>.rb --build"
+  echo ">>> (TLS is off. For an https:// or grpcs:// OTLP endpoint, re-run with SPNL_WITH_TLS=1.)"
+fi
