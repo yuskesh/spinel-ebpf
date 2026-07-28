@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-# BtfSchema: derive kernel struct field schemas from BTF instead of
-# hand-written tables. Reads the same BTF the build already dumps for
+# BtfSchema: derive kernel struct field schemas from BTF
+# instead of hand-written tables. Reads the same BTF the build already dumps for
 # vmlinux.h (`bpftool btf dump file /sys/kernel/btf/vmlinux format c`) and scans
 # the requested struct's field declarations.
 #
@@ -51,7 +51,9 @@ module SpinelEbpf
     # Map a struct's field to a spnl-ebpf tracepoint field type:
     #   "int"  scalar integer / enum / pointer (read the value / pointer)
     #   "ipv4" a 4-byte unsigned char array (read as a u32, network order)
-    #   nil    field absent, or a type we can't auto-read (struct/long array/...)
+    #   "ipv6" a 16-byte unsigned char array (an IPv6 address; the DSL reads
+    #          it via the <base>6_hi/<base>6_lo split convention)
+    #   nil    field absent, or a type we can't auto-read (struct/string array/...)
     # Returns nil when BTF is unavailable so the caller falls back to its table.
     def field_type(struct_name, field)
       return nil unless available?
@@ -67,8 +69,8 @@ module SpinelEbpf
       @struct_cache[struct_name] = parse_struct(struct_name)
     end
 
-    # Ordered parameter names of a kernel function, from its BTF FUNC /
-    # FUNC_PROTO. Returns e.g. ["sk", "msg", "size"] for tcp_sendmsg,
+    # ordered parameter names of a kernel function, from its
+    # BTF FUNC / FUNC_PROTO. Returns e.g. ["sk", "msg", "size"] for tcp_sendmsg,
     # or nil if BTF is unavailable / the function isn't in BTF. Cached.
     def func_params(func_name)
       return nil unless available?
@@ -76,8 +78,8 @@ module SpinelEbpf
       @func_cache[func_name] = parse_func_params(func_name)
     end
 
-    # Resolve an enumerator value from BTF (named or anonymous ENUM / ENUM64),
-    # e.g. enum_value("XDP_PASS") => 2, enum_value("TCP_CLOSE")
+    # resolve an enumerator value from BTF (named or anonymous
+    # ENUM / ENUM64), e.g. enum_value("XDP_PASS") => 2, enum_value("TCP_CLOSE")
     # => 7. Returns nil when BTF is unavailable or the name isn't an enumerator
     # (macros like TCP_FLAG_* / ETH_P_* aren't in BTF and stay table-driven).
     def enum_value(name)
@@ -182,8 +184,12 @@ module SpinelEbpf
       return [name, "int"] unless ptr.empty?
 
       if arr
-        # __u8[4] / unsigned char[4] -> an IPv4 address read as a u32
+        # __u8[4] / unsigned char[4] -> an IPv4 address read as a u32.
         return [name, "ipv4"] if byte_type?(type) && arr == 4
+        # __u8[16] -> an IPv6 address. Restricted to *unsigned* byte types
+        # so a char[16] string field (e.g. sched_switch prev_comm) is NOT mistaken
+        # for an address. The DSL reads it via the <base>6_hi/<base>6_lo split.
+        return [name, "ipv6"] if unsigned_byte_type?(type) && arr == 16
         # other arrays aren't a single readable scalar
         return nil
       end
@@ -196,6 +202,12 @@ module SpinelEbpf
       %w[__u8 u8 unsigned\ char char __s8 s8 u_char].include?(type)
     end
 
+    # Strictly unsigned single-byte types (excludes signed `char`, which the kernel
+    # uses for string/comm fields — those must not read as an address).
+    def unsigned_byte_type?(type)
+      %w[__u8 u8 unsigned\ char u_char].include?(type)
+    end
+
     def scalar_int?(type)
       return true if type =~ /\A(__[us](8|16|32|64)|u(8|16|32|64)|s(8|16|32|64))\z/
       %w[
@@ -203,6 +215,8 @@ module SpinelEbpf
         long\ long unsigned\ long\ long char unsigned\ char signed\ char
         bool _Bool size_t ssize_t pid_t uid_t gid_t loff_t sector_t dev_t
         umode_t u_int u_long __kernel_pid_t
+        long\ int long\ unsigned\ int short\ int short\ unsigned\ int
+        long\ long\ int long\ long\ unsigned\ int
       ].include?(type)
     end
   end

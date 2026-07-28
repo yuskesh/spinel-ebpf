@@ -1,13 +1,13 @@
 # frozen_string_literal: true
 #
-# Auto kernel-cache (response-granularity partition).
+# Automatic kernel cache: partitioning at the granularity of a response.
 #
 # Parses top-level `kernel_cache "/path", "body"` declarations from the spinel
 # AST. Each declaration asks the compiler to serve that path's response from the
 # kernel (XDP_TX), so requests that hit it never reach userspace — no accept /
-# read_line / sp_str_dup_external on the data plane (avoiding the measured
-# FFI-marshalling cost). This module only extracts the (path, body) contract;
-# the codegen generalizes the XDP match/reply machinery to it.
+# read_line / sp_str_dup_external on the data plane (the FFI-marshalling cost
+# as measured). This module only extracts the (path, body) contract; the code
+# generator then reuses the XDP match/reply machinery to serve it.
 #
 # AST shape (from `spinel --dump-ast`):
 #   ProgramNode -> StatementsNode body[] -> CallNode(name="kernel_cache", receiver=-1)

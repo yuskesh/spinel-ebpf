@@ -1,36 +1,35 @@
 # frozen_string_literal: true
 
-# C-AST — Phase 0 (minimal foundation for structured codegen).
+# A C abstract syntax tree -- the minimum structure a code generator needs.
 #
-# The current codegen_bpf.rb works by expanding Ruby AST into C string
-# templates, so expression values flow as strings (no types attached, defensive
-# parens written by hand, blurry boundary between expressions and statements).
-# This is a staged migration toward a "typed C-AST + explicit type/ownership IR".
+# The generator started out expanding Ruby AST nodes into C string templates, so
+# the value of an expression travelled as text: no type rode along with it,
+# defensive parentheses were written by hand, and the line between an expression
+# and a statement was blurry. This file is the first step away from that.
 #
-# This file provides Phase 0 = a thin C-AST of **expressions (CExpr) only**,
-# plus the single printer `CPrinter` (precedence -> automatic parens).
-# Statements (CStmt) and declarations (CDecl) come in later phases.
+# What is here is a thin tree of expressions (CExpr) and statements (CStmt), plus
+# the single printer `CPrinter`, which adds parentheses from operator precedence.
 #
-# Design principles:
-# - **byte-identical safety net**: Phase 0 reproduces the existing output
-#   byte-for-byte. The "defensive outer parens" the current code carries are
-#   modelled *explicitly* with `CParen` to reproduce them (a later deliberate
-#   phase drops redundant parens based on precedence).
-# - **automatic-paren capability proven separately**: `CPrinter` implements
-#   minimal precedence-based parenthesization and is unit-tested in
-#   c_ast_test.rb. Phase 0 integration uses `CParen` to stay byte-identical.
-# - **escape hatch `CRaw`**: embeds a C string returned by not-yet-migrated
-#   lowering directly into the tree.
-# - **node-id attachment**: each node can carry its originating Ruby node-id in
-#   `nid` (the basis for naming a verifier reject / boundary ABI violation as
-#   `foo.rb:42`; unused in Phase 0).
+# The design follows a few rules:
+# - **Reproduce the existing output byte for byte.** The defensive outer
+#   parentheses the old code emits are modelled explicitly with `CParen` so the
+#   output does not shift while the tree is being introduced. Dropping the
+#   redundant ones is a deliberate later change, not a side effect of this one.
+# - **Automatic parenthesisation is proven separately.** `CPrinter` implements
+#   minimal parenthesisation from precedence and is unit-tested for it; the
+#   integration path uses `CParen` so the bytes stay identical.
+# - **`CRaw` is the escape hatch.** Lowering code that has not moved to the tree
+#   yet returns a C string, and `CRaw` carries it through untouched.
+# - **Nodes carry a source id.** Each node can hold the Ruby node id it came from
+#   in `nid`, which is what will eventually let a verifier rejection or a boundary
+#   violation name `foo.rb:42`. Nothing reads it yet.
 
 module SpinelEbpf
   module CodegenBpf
     module CAst
-      # Operator precedence (higher binds tighter). CPrinter uses it for minimal
-      # parenthesization. Primary expressions (CLit/CId/CCall/CParen/CField/CRaw)
-      # need no parens at PRIMARY_PREC.
+      # Operator precedence; a larger number binds tighter. CPrinter uses this to
+      # add the fewest parentheses it can. Primary expressions (CLit, CId, CCall,
+      # CParen, CField, CRaw) sit at PRIMARY_PREC and never need any.
       BINOP_PREC = {
         "||" => 20, "&&" => 25, "|" => 30, "^" => 35, "&" => 40,
         "==" => 45, "!=" => 45,
@@ -45,27 +44,27 @@ module SpinelEbpf
       POSTFIX_PREC = 90
       PRIMARY_PREC = 100
 
-      # Base class for expressions. `nid` is the originating Ruby node-id
-      # (nil for synthesized expressions).
+      # The base of every expression. `nid` is the Ruby node id it came from, and
+      # is nil for an expression the generator synthesised itself.
       class CExpr
         attr_reader :nid
         def initialize(nid: nil)
           @nid = nid
         end
 
-        # Stringify to C with the default printer (the integration point;
-        # downstream receives strings).
+        # Render to C with the default printer. This is the seam: everything
+        # downstream still receives a string.
         def to_c
           CPrinter.new.expr(self)
         end
 
-        # Precedence the parent uses to decide whether parens are needed.
+        # The precedence a parent consults to decide whether to parenthesise this.
         def prec
           PRIMARY_PREC
         end
       end
 
-      # Integer literal / token emitted verbatim (e.g. "32" / "TCP_FLAG_RST").
+      # An integer literal, or any token emitted verbatim ("32", "TCP_FLAG_RST").
       class CLit < CExpr
         attr_reader :text
         def initialize(text, nid: nil)
@@ -74,7 +73,7 @@ module SpinelEbpf
         end
       end
 
-      # Identifier (local variable / map name / etc.).
+      # An identifier: a local variable, a map name, and so on.
       class CId < CExpr
         attr_reader :name
         def initialize(name, nid: nil)
@@ -83,9 +82,9 @@ module SpinelEbpf
         end
       end
 
-      # Escape hatch: embed an already-stringified C fragment as a primary
-      # expression. Used in Phase 0 to put not-yet-migrated lowering return
-      # values into the tree.
+      # The escape hatch: embed an already-rendered C fragment as a primary
+      # expression. It is how lowering code that has not moved to the tree yet gets
+      # its result into one.
       class CRaw < CExpr
         attr_reader :text
         def initialize(text, nid: nil)
@@ -94,7 +93,7 @@ module SpinelEbpf
         end
       end
 
-      # Function call callee(args...). Postfix = high precedence.
+      # A call, callee(args...). Postfix, so it binds tightly.
       class CCall < CExpr
         attr_reader :callee, :args
         def initialize(callee, args = [], nid: nil)
@@ -108,7 +107,7 @@ module SpinelEbpf
         end
       end
 
-      # C cast (type)operand. Prefix = cast precedence.
+      # A cast, (type)operand.
       class CCast < CExpr
         attr_reader :type, :operand
         def initialize(type, operand, nid: nil)
@@ -122,7 +121,7 @@ module SpinelEbpf
         end
       end
 
-      # Unary prefix <op>operand (e.g. "!" / "-" / "~").
+      # A prefix unary operator: "!", "-", "~".
       class CUnary < CExpr
         attr_reader :op, :operand
         def initialize(op, operand, nid: nil)
@@ -136,7 +135,7 @@ module SpinelEbpf
         end
       end
 
-      # Binary lhs <op> rhs (left-associative in C).
+      # A binary operator, lhs <op> rhs. These associate to the left in C.
       class CBinop < CExpr
         attr_reader :op, :lhs, :rhs
         def initialize(op, lhs, rhs, nid: nil)
@@ -153,7 +152,7 @@ module SpinelEbpf
         end
       end
 
-      # Member access recv.field / recv->field. Postfix = high precedence.
+      # Member access, recv.field or recv->field. Postfix, so it binds tightly.
       class CField < CExpr
         attr_reader :recv, :field, :arrow
         def initialize(recv, field, arrow: false, nid: nil)
@@ -168,9 +167,9 @@ module SpinelEbpf
         end
       end
 
-      # Explicit grouping parens. Always prints "(inner)". Used in Phase 0 to
-      # reproduce the current code's defensive parens byte-identically (a later
-      # phase removes the redundant ones).
+      # Explicit grouping: always prints "(inner)". This is what reproduces the old
+      # code's defensive parentheses exactly; removing the redundant ones is a
+      # separate, deliberate change.
       class CParen < CExpr
         attr_reader :inner
         def initialize(inner, nid: nil)
@@ -179,9 +178,9 @@ module SpinelEbpf
         end
       end
 
-      # ---- statements (CStmt) — Phase 2. One statement = one line (indentation
-      # is handled by the caller / the CBlock of a later phase). CPrinter#stmt
-      # returns a single line including the trailing `;`.
+      # ---- statements. One statement is one line; indentation belongs to the
+      # caller, or to CBlock. CPrinter#stmt returns that line including its
+      # trailing semicolon.
       class CStmt
         attr_reader :nid
         def initialize(nid: nil)
@@ -193,8 +192,8 @@ module SpinelEbpf
         end
       end
 
-      # An already-stringified single line (including a trailing `;`/`{`/`}`/etc.).
-      # Escape hatch for not-yet-migrated lowering.
+      # An already-rendered line, including whatever it ends with -- a semicolon, a
+      # brace. The statement-level escape hatch.
       class CRawStmt < CStmt
         attr_reader :text
         def initialize(text, nid: nil)
@@ -203,7 +202,7 @@ module SpinelEbpf
         end
       end
 
-      # Expression statement `<expr>;`. e.g. a side-effecting builtin call.
+      # An expression statement, `<expr>;` -- a call to a builtin for its effect.
       class CExprStmt < CStmt
         attr_reader :expr
         def initialize(expr, nid: nil)
@@ -212,7 +211,7 @@ module SpinelEbpf
         end
       end
 
-      # Declaration `<type> <name>;` or `<type> <name> = <init>;`.
+      # A declaration, `<type> <name>;` or `<type> <name> = <init>;`.
       class CDecl < CStmt
         attr_reader :type, :name, :init
         def initialize(type, name, init = nil, nid: nil)
@@ -223,7 +222,7 @@ module SpinelEbpf
         end
       end
 
-      # `return <expr>;` or `return;`.
+      # `return <expr>;`, or bare `return;`.
       class CReturn < CStmt
         attr_reader :expr
         def initialize(expr = nil, nid: nil)
@@ -232,10 +231,10 @@ module SpinelEbpf
         end
       end
 
-      # A sequence of statements (block body). `CPrinter#block_lines(block, depth)`
-      # expands it into multiple lines with depth-appropriate indentation. A
-      # vessel for replacing after-the-fact string indentation (`"    " + line`)
-      # with *structural* indentation.
+      # A sequence of statements: the body of a block. `CPrinter#block_lines(block,
+      # depth)` expands it to lines indented for that depth, which removes the need
+      # to bolt indentation on afterwards (`"    " + line`) and
+      # replaces it with indentation that comes from the structure itself.
       class CBlock < CStmt
         attr_reader :stmts
         def initialize(stmts = [], nid: nil)
@@ -244,8 +243,9 @@ module SpinelEbpf
         end
       end
 
-      # `if (cond) { then } [else { else }]`. then/else are CBlock. CPrinter
-      # indents structurally based on depth (no after-the-fact indentation).
+      # `if (cond) { then } [else { else }]`, where each arm is a CBlock. CPrinter
+      # indents them from the nesting depth, so nothing has to be indented after
+      # the fact.
       class CIf < CStmt
         attr_reader :cond, :then_block, :else_block
         def initialize(cond, then_block, else_block = nil, nid: nil)
@@ -256,8 +256,8 @@ module SpinelEbpf
         end
       end
 
-      # Bare scope block `{ <body> }` (body is a CBlock). Used for ringbuf
-      # scopes like spnl_emit. CPrinter indents structurally by depth.
+      # A bare scope, `{ <body> }`, whose body is a CBlock. It is what gives an
+      # emit its own ringbuf scope. Indented from depth like everything else.
       class CBraceBlock < CStmt
         attr_reader :body
         def initialize(body, nid: nil)
@@ -266,8 +266,8 @@ module SpinelEbpf
         end
       end
 
-      # The single printer. Expressions: precedence -> minimal parens.
-      # Statements: a single line with a trailing `;`. Indentation not handled here.
+      # The one printer. Expressions get the fewest parentheses precedence allows;
+      # a statement becomes one line ending in a semicolon. It does not indent.
       class CPrinter
         def expr(node)
           case node
@@ -284,7 +284,7 @@ module SpinelEbpf
           end
         end
 
-        # Print a statement as a single line with a trailing `;` (no indentation).
+        # Print a statement as a single line ending in a semicolon, unindented.
         def stmt(node)
           case node
           when CRawStmt  then node.text
@@ -298,14 +298,13 @@ module SpinelEbpf
 
         INDENT = "    "
 
-        # Expand a block into multiple lines (Array<String>) with depth-based
-        # indentation.
+        # Expand a block into an array of lines, indented for the given depth.
         def block_lines(block, depth)
           block.stmts.flat_map { |s| stmt_lines(s, depth) }
         end
 
-        # Expand one statement (or nested block/if/brace) into multiple lines at
-        # depth indentation.
+        # Expand one statement -- or a nested block, if, or brace -- into lines at
+        # the given depth.
         def stmt_lines(node, depth)
           case node
           when CIf         then if_lines(node, depth)
@@ -334,24 +333,24 @@ module SpinelEbpf
           ["#{pad}{"] + block_lines(node.body, depth + 1) + ["#{pad}}"]
         end
 
-        # Print if a CExpr, otherwise use the value as-is (allows return strings
-        # from not-yet-migrated lowering).
+        # Print a CExpr; pass anything else through, which is what allows lowering
+        # code that still returns a string.
         def val(x)
           x.is_a?(CExpr) ? expr(x) : x.to_s
         end
 
         def binop(node)
           p = node.prec
-          # Left-associative: parenthesize the left child when its precedence is
-          # strictly lower, the right child when it is lower or equal. This keeps
-          # a-b-c flat and a-(b-c) parenthesized.
+          # Left associative: the left child needs parentheses only when its
+          # precedence is strictly lower, the right child also when it is equal.
+          # That keeps a-b-c flat while preserving the parentheses in a-(b-c).
           ls = paren_if(node.lhs, node.lhs.prec < p)
           rs = paren_if(node.rhs, node.rhs.prec <= p)
           "#{ls} #{node.op} #{rs}"
         end
 
-        # Cast operand: cast/unary/postfix/primary are >= so they need no parens;
-        # only a binary (weaker) operand is parenthesized.
+        # The operand of a cast: casts, unary, postfix and primary all bind at
+        # least as tightly and need nothing; only a binary operand is parenthesised.
         def cast_operand(operand)
           paren_if(operand, operand.prec < CAST_PREC)
         end
@@ -367,7 +366,7 @@ module SpinelEbpf
 
       module_function
 
-      # --- concise builders (for assembling trees readably from builtins) ---
+      # --- terse builders, so a builtin can assemble a tree readably ---
 
       def lit(text, nid: nil)
         CLit.new(text, nid: nil)
@@ -397,9 +396,9 @@ module SpinelEbpf
         CParen.new(inner, nid: nil)
       end
 
-      # The frequently-used defensive cast ((__s64) x) in one place. Reproduces
-      # byte-identically the outer parens the current code uses when embedding a
-      # builtin return value into a larger expression.
+      # The defensive cast ((__s64) x), which appears everywhere, in one place. It
+      # reproduces exactly the outer parentheses the old code puts around a
+      # builtin's result when embedding it in a larger expression.
       def s64(operand)
         paren(cast("__s64", operand))
       end
@@ -434,28 +433,27 @@ module SpinelEbpf
         CBraceBlock.new(body, nid: nil)
       end
 
-      # Expand a block into Array<String> with depth indentation (structural).
+      # Expand a block to an array of lines, indented from its depth.
       def render_block(block, depth = 0)
         CPrinter.new.block_lines(block, depth)
       end
 
-      # Expand one statement (incl. CBlock/CIf/CBraceBlock) into Array<String>
-      # with depth indentation.
+      # Expand one statement -- including a CBlock, CIf or CBraceBlock -- to lines
+      # at the given depth.
       def render_stmt(stmt, depth = 0)
         CPrinter.new.stmt_lines(stmt, depth)
       end
 
-      # --- Phase 4: linear-use / ownership analysis (the first pass that
-      # consumes the structure) ---
+      # --- linear use, the first analysis that consumes the tree's structure ---
       #
-      # Verifies the bpf_ringbuf reserve->submit discipline from the C-AST
-      # structure. Same "a resource you acquire must be released" = linear-use
-      # principle as aya's `RingBufEntry #[must_use]` or an skb ref leak. If a
-      # local bound to the return value of `bpf_ringbuf_reserve` is not released
-      # by `bpf_ringbuf_submit` / `bpf_ringbuf_discard` within the same tree, it
-      # is reported as a **leak** (return value = array of leaked local names,
-      # empty = OK). Foundation mechanism for the boundary ABI (own/borrow,
-      # linear-use).
+      # Checks the reserve-then-submit discipline of a ringbuf from the shape of the
+      # C-AST. It is the same rule as `#[must_use]` on a ring buffer entry in other
+      # eBPF frameworks, and the same rule the verifier applies to a leaked socket
+      # buffer reference: a resource you acquire must be released. A local bound to
+      # the result of `bpf_ringbuf_reserve` that is never passed to
+      # `bpf_ringbuf_submit` or `bpf_ringbuf_discard` anywhere in the same tree is
+      # reported as a leak. The return value is the list of leaked local names, so
+      # an empty array means the tree is clean.
       RINGBUF_ACQUIRE = "bpf_ringbuf_reserve"
       RINGBUF_RELEASE = %w[bpf_ringbuf_submit bpf_ringbuf_discard].freeze
 
@@ -476,8 +474,8 @@ module SpinelEbpf
         reserved.uniq - released
       end
 
-      # Walk the CStmt tree (recursing into CBlock/CBraceBlock/CIf), yielding
-      # each statement.
+      # Walk the statement tree, recursing into blocks, braces and conditionals,
+      # and yield each statement.
       def walk_stmts(node, &blk)
         case node
         when CBlock      then node.stmts.each { |s| walk_stmts(s, &blk) }
@@ -494,7 +492,7 @@ module SpinelEbpf
         expr.is_a?(CCall) && expr.callee == callee
       end
 
-      # Returns the local name `p` for either `*p` or `p` declarators.
+      # Return the local's name, `p`, from either declarator form: `*p` or `p`.
       def strip_declarator(name)
         name.to_s.sub(/\A\*+/, "")
       end

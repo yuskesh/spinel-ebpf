@@ -3,7 +3,7 @@
 # SPINEL-IR v1 parser (read + dump, byte-equivalent round-trip).
 #
 # Implements the format documented in
-# deps/spinel/docs/ANALYZE-IR.md
+# third_party/spinel/docs/ANALYZE-IR.md
 #
 # The parser is intentionally schema-light: it reads any well-formed
 # SPINEL-IR v1 file into a plain Hash of records, without re-deriving
@@ -102,7 +102,7 @@ module SpinelEbpf
         ParseSpinelIR.split_ints_n(rec.payload, rec.count)
       end
 
-      # Decoded per-method-body local-scope type table. spinel analyze
+      # decoded per-method-body local-scope type table. spinel analyze
       # emits two scope records per method body node — SN (local variable names)
       # and ST (their inferred spinel types), both "|"-joined then %-escaped and
       # keyed by the body node id. Returns { body_nid => [[name, spinel_type], ...] }.
