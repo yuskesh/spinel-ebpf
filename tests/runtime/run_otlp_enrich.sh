@@ -13,10 +13,10 @@ OTLP="$REPO_ROOT/src/runtime/otlp"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "[enrich] enricher registry unit test (otlp_enrich + otlp_k8s + otlp_peer)"
+echo "[enrich] enricher registry unit test (otlp_enrich + otlp_k8s + otlp_cri + otlp_peer)"
 "$CC" -O2 -Wall -Wextra -I "$OTLP" -I "$REPO_ROOT/include" \
   tests/runtime/otlp_enrich_test.c \
-  "$OTLP/otlp_enrich.c" "$OTLP/otlp_k8s.c" "$OTLP/otlp_peer.c" \
+  "$OTLP/otlp_enrich.c" "$OTLP/otlp_k8s.c" "$OTLP/otlp_cri.c" "$OTLP/otlp_peer.c" \
   -o "$TMP/enrich"
 "$TMP/enrich"
 echo "[enrich] OK"
