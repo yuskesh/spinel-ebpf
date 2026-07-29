@@ -11,6 +11,12 @@ observability, `struct_ops` schedulers and qdiscs, and even a kernel-assisted
 HTTP server can all be written as Ruby methods, type-inferred and compiled ahead
 of time, with no interpreter and no hand-written C.
 
+The same source can also leave Linux entirely: with `--target amp-m7` or
+`--target amp-m33` the bytecode is compiled ahead of time to a Thumb blob that
+runs on a Cortex-M core beside the Linux one, with no VM and no JIT on the device.
+And what a probe observes can be exported as OpenTelemetry — traces, metrics or
+logs — straight from the compiled binary, with no collector in between.
+
 ```ruby
 # count packets per L4 protocol, entirely in the kernel (XDP)
 class ProtoCounter < BPF::XDP
@@ -81,8 +87,13 @@ A non-exhaustive tour of the surface the codegen supports:
   reactor (`on :xdp`, `on :kprobe, "fn"`, `on :timer, every: 5.seconds`,
   `on :perf_event, hz: 99`), and module-style constants (`XDP::PASS`,
   `IP::Proto::TCP`).
+- **Typed consumers**: `on_emit :<channel> do |ev| … end` receives a record
+  handle whose properties are generated from one declaration, so a misspelled
+  field is a compile error rather than a silent zero. `to_span(ev)` turns a
+  record into an OpenTelemetry span; which channel it means is resolved from the
+  enclosing block, and an ambiguous use fails at compile time with the reason.
 
-Two things built on this surface:
+Three things built on this surface:
 
 - **Observability tools** under `examples/observability/` — a Ruby reimagining of
   many bcc tools (opensnoop, runqlat, biolatency, tcplife, profile, offcputime,
@@ -91,6 +102,72 @@ Two things built on this surface:
   single-process HTTP/1.0 server, to SO_REUSEPORT multi-worker, to a pure-XDP TCP
   "slice" that completes the handshake, request and response without the kernel
   TCP stack ever creating a socket.
+- **OpenTelemetry export** under `examples/observability/otlp/` — see below.
+
+## Telemetry, without a collector
+
+A probe's events can leave the machine as OpenTelemetry directly from the compiled
+binary. All three signals are supported over both transports — OTLP/HTTP+protobuf
+and OTLP/gRPC (a minimal HTTP/2 client, no gRPC library) — with the encoders
+committed in-tree, so building a probe that exports needs no protobuf toolchain.
+
+```sh
+spinel-ebpf compile app.rb --instrument --instrument-self \
+    --instrument-otlp http://127.0.0.1:4318          # per-method RED as metrics
+spinel-ebpf compile app.rb --instrument --instrument-self \
+    --instrument-otlp-traces grpc://127.0.0.1:4317   # ... as a span tree instead
+```
+
+The endpoint's scheme picks the transport (`http://`, `grpc://`, and with TLS built
+in, `https://` and `grpcs://`). Deployment details stay in the environment rather
+than the binary, following the OpenTelemetry variables: `OTEL_EXPORTER_OTLP_HEADERS`
+for token auth, `_COMPRESSION=gzip`, `_PROTOCOL=http/json` for a readable wire
+format, per-signal `_TRACES_ENDPOINT` / `_METRICS_ENDPOINT` / `_LOGS_ENDPOINT`
+honoured **verbatim including the path** (some vendors do not use `/v1/<signal>`),
+and client certificates for mutual TLS. Which means a probe can talk to a
+commercial backend with no collector in the path.
+
+Above the raw export, the runtime adds context the probe does not have to know
+about: Kubernetes pod, namespace and workload resolved from a cgroup id; the
+container's real name from the CRI; a connection's peer classified as another pod,
+a Service, or an external address; and related events assembled into a span tree
+under one request rather than a flat list. Those are runtime enrichers, so a probe
+gains them without changing a line — and on a machine that is not running
+Kubernetes they are simply absent.
+
+## Beyond Linux: the same Ruby on a real-time core
+
+Many SoCs pair the Linux cores with a Cortex-M core. `--target amp-m7` and
+`--target amp-m33` compile a probe for that core instead:
+
+```sh
+spinel-ebpf compile probe.rb --target amp-m33 --build   # -> a Thumb blob + a manifest
+```
+
+The eBPF bytecode becomes the portable, checkable intermediate form, and the
+compilation to native Thumb happens **on the build host**, using the micro-bpf
+JIT as an ahead-of-time compiler. A JIT is a pure function from bytes to bytes, so
+running it early costs nothing and leaves the real-time core carrying no VM and no
+JIT — only a loader, a helper table and a ring producer. The application core
+stages a blob into shared memory and reads the events back out.
+
+Two properties follow from fixing the memory ABI:
+
+- **A probe can be swapped while the core runs.** The firmware is built once and
+  the blob is replaced underneath it, over a command ring, with the instance
+  variables zeroed per install so a new probe never reads the old one's state.
+- **Verification is decoupled from execution.** That core has no verifier, so
+  `amp_check` inspects the bytecode before it ships: a helper allowlist, no
+  backward branches, every load and store inside the ABI's regions, a bound on
+  stack-relative access — and it **denies anything it cannot interpret**, rather
+  than passing along what it has no rule for. It also computes a static cost, so a
+  program too expensive for an attach point is refused rather than discovered late.
+
+Two board profiles ship (`include/spnl/amp_abi_*.h`), and a board is nothing but a
+set of address values: one selector header names which to read, and nothing in the
+generator, the runtime or the drain knows that boards exist. Measured on the same
+Ruby source, the two blobs are the same length in instructions and differ in
+exactly two operands — the two addresses that get baked in.
 
 ## Self-instrumentation
 
@@ -142,6 +219,23 @@ codegen links against these). Afterwards `bin/spinel-ebpf` works with no further
 configuration — its default `SPINEL_DIR` is `deps/spinel`. Override with
 `SPINEL_REPO` / `SPINEL_REF` / `SPINEL_DIR` / `SPINEL_C_BIN`.
 
+Three optional dependencies are off by default, because nothing in normal use
+needs them:
+
+```sh
+SPNL_WITH_TLS=1   scripts/setup.sh   # mbedTLS: an https:// or grpcs:// OTLP endpoint
+SPNL_WITH_PROTO=1 scripts/setup.sh   # OTLP schemas + nanopb: decode telemetry in tests,
+                                     #   or regenerate the committed encoders
+SPNL_WITH_AMP=1   scripts/setup.sh   # the micro-bpf VM: --target amp-m7 / amp-m33
+```
+
+The last one is worth a note, because the name is misleading. It fetches the
+**micro-bpf fork** of rbpf, not upstream rbpf: upstream has an x86-64 JIT and a
+Cranelift backend and no ARM or Thumb backend at all, while the fork keeps
+upstream's package name and repository URL in its metadata — so a dependency
+listing cannot tell them apart. The setup script checks for the Thumb emitter and
+says so plainly if what it found is the wrong one.
+
 ### 3. Compile
 
 ```sh
@@ -159,52 +253,107 @@ spinel-ebpf compile foo.rb --native-only        # emit only native C (no eBPF)
 spinel-ebpf compile foo.rb --build              # build all the way to one binary
 spinel-ebpf compile foo.rb --build --ebpf-dispatch   # native calls route into eBPF
 spinel-ebpf compile foo.rb -o build/            # output directory (default build/)
+
+spinel-ebpf compile foo.rb --target amp-m33 --build  # a Thumb blob for a Cortex-M core
+                                                     #   (amp-m7 for the other profile)
 ```
 
-See `spinel-ebpf --help` for the full flag set (`--instrument*`,
-`--int-overflow`, etc.).
+Three subcommands answer questions about a program without running it:
+
+```sh
+spinel-ebpf check foo.rb            # partition -> codegen -> clang -> load+verifier,
+                                    #   reporting {stage, ok, error} and stopping at
+                                    #   the first failure. --json for tooling.
+spinel-ebpf describe foo.rb         # which emit sites bind to which on_emit consumers,
+                                    #   and the record channels a probe writes together
+                                    #   with the telemetry attributes they become
+spinel-ebpf capabilities foo.rb     # the builtin domains a file uses (or the whole
+                                    #   registry with no file). --json emits the
+                                    #   machine-readable contract: builtin signatures,
+                                    #   attach kinds, the Ruby subset, record channels
+```
+
+`describe` and `capabilities --json` exist for a specific reason: the useful part of
+a compiler that hides a class of bug is being able to state what it accepts. A
+generator — a person or a model — can read the contract instead of guessing, and
+`describe` shows the wire consequence of a probe without reading the emitted C.
+
+See `spinel-ebpf --help` for the full flag set (`--instrument*`, `--int-overflow`,
+`--amp-*`, etc.).
 
 ## Repository layout
 
 ```
 bin/spinel-ebpf          the command-line driver
-src/spinel_ebpf/         Ruby: IR/AST parsing, partition, eBPF codegen,
-                         transparent dispatch, plugins, self-instrument
-src/codegen_c/           the production in-process eBPF codegen (C)
+src/spinel_ebpf/         Ruby: IR/AST parsing, partition, eBPF codegen, transparent
+                         dispatch, plugins, typed consumers, self-instrument
+src/codegen_c/           the production in-process eBPF codegen (C), and the two
+                         declarations it derives contracts from: the ringbuf record
+                         layout and the probe context / attach-point schema
 src/runtime/             host-side C runtime (libbpf wrappers) + socket/PTY shims
-include/spnl/            shared host<->kernel event header
-examples/                observability tools, the HTTP server, profiling demos
-tools/                   golden-output gate, helpers
-tests/                   host unit tests + fixtures
-docs/                    architecture and design notes
+src/runtime/otlp/        the OpenTelemetry exporter: encoders, HTTP and gRPC
+                         transports, TLS, and the enrichers (Kubernetes, CRI, peer)
+src/runtime/amp/         the real-time-core side: the fixed-ABI runtime, the
+                         pre-deployment bytecode checker, the capability table
+include/spnl/            shared event header, ring layout, and one file per board ABI
+examples/                observability tools, the HTTP server, OTLP demos, and the
+                         Cortex-M firmware for both board profiles
+tools/                   golden-output gate, the contract generators and their
+                         evolution gates, a Ruby port of many bcc tools
+tests/                   host unit tests + fixtures, and runtime harnesses that
+                         drive the exporter and the real-time-core pieces
+deps/                    fetched by scripts/setup.sh; not committed
+docs/                    architecture notes
 ```
 
 ## Testing
 
-Testing has two tiers. Tier 1 is kernel-independent and runs in CI; tier 2
-needs a real eBPF-capable kernel and runs on a host (or container) booted on
-one.
+Three tiers. Tier 1 is kernel-independent and runs in CI. Tier 2 needs no kernel
+either but does need a compiler and a shell, so it runs locally. Tier 3 needs a
+real eBPF-capable kernel and runs on a host booted on one.
 
 ```sh
-# --- tier 1: kernel-independent (also the GitHub CI) ---
+# --- tier 1: kernel-independent (this is what CI runs) ---
 
-# host unit tests (pure Ruby: parsing, partition, codegen)
+# host unit tests (pure Ruby: parsing, partition, codegen, consumers, contracts)
 for t in tests/spinel_ebpf/*_test.rb; do ruby -Isrc -Itests "$t" || break; done
 
-# codegen regression gate: emitted .bpf.c must match the committed golden files
-ruby tools/golden.rb            # use --update to regenerate after intended changes
+# the emitted .bpf.c must match the committed golden files
+ruby tools/golden.rb            # --update to regenerate after an intended change
 
-# --- tier 2: needs an eBPF-capable kernel ---
+# the two contract gates. Both refuse a change that is not append-only, because a
+# record offset and a context field id are baked into artifacts already shipped.
+ruby tools/record_gate.rb       # ringbuf record layout + the attributes it exposes
+ruby tools/probe_ctx_gate.rb    # probe context fields + attach points
 
-# compile representative programs (XDP, kprobe, TC, struct_ops), then load +
-# verify each in the running kernel. Run as root on a host booted on the
-# custom kernel, after scripts/setup.sh has built the compiler.
+# this tree's own hygiene: English prose, and no reference to a path or document
+# that does not exist here
+ruby scripts/check-public-paths.rb
+sh   scripts/check-public-prose.sh
+
+# --- tier 2: needs a compiler, not a kernel ---
+
+# end-to-end harnesses under tests/runtime -- each builds what it needs and
+# asserts on the result. A few examples; there are around thirty.
+sh tests/runtime/run_otlp_roundtrip.sh      # encode telemetry, decode it back
+sh tests/runtime/run_amp_ring.sh            # the shared ring ABI, including wraparound
+sh tests/runtime/run_amp_check.sh           # the pre-deployment bytecode checker
+sh tests/runtime/run_probe_capability.sh    # publish -> read -> admit a capability table
+
+# --- tier 3: needs an eBPF-capable kernel ---
+
+# compile representative programs (XDP, kprobe, TC, struct_ops), then load and
+# verify each in the running kernel. Run as root after scripts/setup.sh.
 sudo scripts/kernel-test.sh
 ```
 
-CI stops at tier 1 because hosted runners can't boot the custom kernel.
-Compile/load is exercised end-to-end by `scripts/kernel-test.sh` and by
-building the examples with `bin/spinel-ebpf … --build`.
+CI stops at tier 1 because hosted runners cannot boot the custom kernel. It does
+build the compiler dependency and emit `.bpf.c` for a sample, so the in-process
+codegen is exercised against the real spinel objects on every push.
+
+Some tier-2 harnesses skip themselves when an optional dependency is absent — the
+ones that decode a payload need `SPNL_WITH_PROTO=1`, the TLS ones need
+`SPNL_WITH_TLS=1`. A skip is reported, not silently passed.
 
 ## License
 
