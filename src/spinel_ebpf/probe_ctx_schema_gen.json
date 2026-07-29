@@ -1,0 +1,22 @@
+{
+  "schema": "spinel-ebpf.probe-ctx-contract/1",
+  "format_version": 1,
+  "bitmap_words": 4,
+  "fields": [
+    { "id": 1, "name": "thread.current.id", "ctype": "uint32_t", "size": 4, "signed": 0, "expose": "int", "note": "k_thread identity of the thread being switched in; the dispatcher passes the thread's numeric id, never its pointer" },
+    { "id": 2, "name": "thread.current.priority", "ctype": "int8_t", "size": 1, "signed": 1, "expose": "int", "note": "Zephyr priority of that thread; negative values are cooperative, so this field is sign-extended into the frame" },
+    { "id": 3, "name": "timestamp.cycles", "ctype": "uint64_t", "size": 8, "signed": 0, "expose": "int", "note": "free-running cycle counter read by the dispatcher at hook entry, before the probe runs, so every field of one event shares one instant" }
+  ],
+  "attaches": [
+    { "id": 1, "name": "thread.switched_in", "exec_class": "SCHED_LOCKED", "max_cycle_budget": 500, "hook": "sys_port_trace_k_thread_switched_in", "kconfig": "CONFIG_OBS_ATTACH_THREAD_SWITCHED_IN", "fields": ["thread.current.id", "thread.current.priority", "timestamp.cycles"], "bitmap": [14, 0, 0, 0], "note": "Zephyr calls this from the scheduler with interrupts locked on the paths measured so far, so it is declared SCHED_LOCKED -- the stricter of the two plausible classes. Measuring it may allow relaxing to THREAD later, which is additive, and discovering the reverse would be a breaking change, which is why the strict class is the default" }
+  ],
+  "slot_states": [
+    { "name": "EMPTY", "value": 0, "note": "no blob; IVARS and code slot are zeroed" },
+    { "name": "STAGED", "value": 1, "note": "blob written to staging, nothing validated yet" },
+    { "name": "READY", "value": 2, "note": "manifest, capability binding and cost admitted" },
+    { "name": "ACTIVE", "value": 3, "note": "dispatcher may call it" },
+    { "name": "QUIESCING", "value": 4, "note": "dispatcher will not call it; calls already entered may run" },
+    { "name": "DETACHED", "value": 5, "note": "active_calls == 0" },
+    { "name": "RECLAIMABLE", "value": 6, "note": "ring drained and acknowledged; nothing left to read" }
+  ]
+}

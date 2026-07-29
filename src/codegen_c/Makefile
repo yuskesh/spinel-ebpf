@@ -15,6 +15,9 @@ OUT     := $(ROOT)/build/codegen_c
 BIN     := $(OUT)/spinel_ebpf_cc
 TEMPLATES := $(wildcard templates/*.template.c)
 MIRROR_GEN := $(ROOT)/tools/gen_record_mirror.c
+PCTX_GEN := $(ROOT)/tools/gen_probe_ctx.c
+PCTX_OUT := $(ROOT)/src/runtime/amp/probe_ctx_gen.h
+PCTX_JSON := $(ROOT)/src/spinel_ebpf/probe_ctx_schema_gen.json
 MIRROR_OUT := $(ROOT)/src/runtime/otlp/record_mirror_gen.h
 SCHEMA_JSON := $(ROOT)/src/spinel_ebpf/record_schema_gen.json
 
@@ -26,7 +29,7 @@ $(BIN): spinel_ebpf_cc.c templates_gen.h record_schema.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
 
-.PHONY: templates mirror gate golden oracle clean
+.PHONY: templates mirror gate golden oracle clean probe-ctx
 templates: $(TEMPLATES)
 	@ruby $(ROOT)/tools/embed_templates.rb
 
@@ -41,6 +44,14 @@ mirror: record_schema.h $(MIRROR_GEN)
 	@$(OUT)/gen_record_mirror        > $(MIRROR_OUT)
 	@$(OUT)/gen_record_mirror --json > $(SCHEMA_JSON)
 	@echo "wrote $(MIRROR_OUT) $(SCHEMA_JSON)"
+
+probe-ctx: probe_ctx_schema.h $(PCTX_GEN)
+	@mkdir -p $(OUT)
+	@$(CC) $(CFLAGS) -o $(OUT)/gen_probe_ctx $(PCTX_GEN)
+	@$(OUT)/gen_probe_ctx        > $(PCTX_OUT)
+	@$(OUT)/gen_probe_ctx --json > $(PCTX_JSON)
+	@echo "wrote $(PCTX_OUT) $(PCTX_JSON)"
+
 
 # The record contract may only grow. Checks (a) the committed derived
 # artifacts are what record_schema.h generates now, (b) nothing published has

@@ -1,0 +1,55 @@
+{
+  "schema": "spinel-ebpf.probe-ctx-snapshot/1",
+  "format_version": 1,
+  "bitmap_words": 4,
+  "fields": {
+    "thread.current.id": {
+      "id": 1,
+      "ctype": "uint32_t",
+      "size": 4,
+      "signed": 0,
+      "expose": "int"
+    },
+    "thread.current.priority": {
+      "id": 2,
+      "ctype": "int8_t",
+      "size": 1,
+      "signed": 1,
+      "expose": "int"
+    },
+    "timestamp.cycles": {
+      "id": 3,
+      "ctype": "uint64_t",
+      "size": 8,
+      "signed": 0,
+      "expose": "int"
+    }
+  },
+  "attaches": {
+    "thread.switched_in": {
+      "id": 1,
+      "exec_class": "SCHED_LOCKED",
+      "max_cycle_budget": 500,
+      "fields": [
+        "thread.current.id",
+        "thread.current.priority",
+        "timestamp.cycles"
+      ],
+      "bitmap": [
+        14,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "slot_states": {
+    "EMPTY": 0,
+    "STAGED": 1,
+    "READY": 2,
+    "ACTIVE": 3,
+    "QUIESCING": 4,
+    "DETACHED": 5,
+    "RECLAIMABLE": 6
+  }
+}

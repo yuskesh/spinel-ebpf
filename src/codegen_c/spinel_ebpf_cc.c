@@ -557,6 +557,11 @@ static int g_amp_nivars = 0;
  * KEEP IN SYNC with that header -- changing either value is an ABI-version bump.
  * (Not #included to avoid adding -Iinclude to every codegen build site; the
  * amp regression greps these values against the header, catching drift.) */
+/* These are the **defaults**, not the only possible values. A second board
+ * profile needs different addresses, because its real-time core executes from
+ * DDR and the ahead-of-time compiler cannot bake an immediate with bit 31 set.
+ * So both emitted values sit behind `#ifndef` and the build step supplies the
+ * board's own -- which is how the generator itself stays board-agnostic. */
 #define AMP_ABI_VERSION_MIRROR 1u          /* = AMP_ABI_VERSION */
 #define AMP_IVARS_BASE_MIRROR  0x2003FF00u /* = AMP_IVARS_BASE (DTCM top - 256B) */
 static int amp_ivar_slot(const char *iv) {   /* iv keeps its '@' */
@@ -4140,13 +4145,19 @@ static char *amp_codegen_program(IR *ir, AST *ast, const char *base) {
     "\n#ifdef SPNL_AMP_MANIFEST   /* M7 loader reads this; clang -target bpf skips it */\n"
     "enum { AMP_TRIG_MANUAL = 0, AMP_TRIG_TIMER = 1, AMP_TRIG_IRQ = 2, AMP_TRIG_CMD = 3 };\n"
     "/* fixed-ABI manifest fields the M7 loader gates on.\n"
-    " *   amp_abi_version -- must equal spnl/amp_abi_imx95m7.h AMP_ABI_VERSION;\n"
-    " *                     the loader rejects a version mismatch loudly (no silent\n"
-    " *                     breakage across firmware/blob ABI revisions).\n"
+    " *   amp_abi_version -- must equal the board profile's AMP_ABI_VERSION\n"
+    " *                     (spnl/amp_abi.h); the loader rejects a mismatch loudly,\n"
+    " *                     so neither a firmware/blob ABI revision nor a blob built\n"
+    " *                     for another board's address map goes through silently.\n"
+    " *                     Override with -DSPNL_AMP_ABI_VERSION when building for a\n"
+    " *                     board other than the default profile.\n"
     " *   amp_ivars_size  -- bytes of the IVARS carveout this probe uses (= 4 * #ivars);\n"
     " *                     the loader zeroes exactly this span per slot-install so a\n"
     " *                     hot-swapped probe never reads the previous probe's ivars. */\n"
-    "static const unsigned amp_abi_version = %uu;\n"
+    "#ifndef SPNL_AMP_ABI_VERSION\n"
+    "#define SPNL_AMP_ABI_VERSION %uu\n"
+    "#endif\n"
+    "static const unsigned amp_abi_version = SPNL_AMP_ABI_VERSION;\n"
     "static const unsigned amp_ivars_size  = %uu;\n"
     "struct amp_trigger { const char *fn; int kind; unsigned param; };\n"
     "static const struct amp_trigger amp_triggers[] = {\n",

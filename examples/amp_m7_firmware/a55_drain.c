@@ -19,9 +19,16 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include "spnl/amp_abi.h"
 #include "spnl/amp_ring.h"
 
-#define AMP_RING_PHYS 0x88400000UL   /* must match amp_producer.c */
+/* The ring's physical address is **board ABI**, not a constant of this tool. It
+ * used to be spelled out here with a "must match the producer" note, which is the
+ * kind of agreement that holds right up until a second board exists. Taking it
+ * from the selected profile is what lets one source drain either board -- and the
+ * portability claim is only worth something if nothing here knows which board it
+ * is looking at. */
+#define AMP_RING_PHYS ((unsigned long)AMP_RING_BASE)
 #define MAP_LEN       0x10000UL      /* 64 KiB window (ctrl + slots) */
 
 int main(void)
