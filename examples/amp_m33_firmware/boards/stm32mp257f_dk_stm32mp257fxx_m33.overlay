@@ -1,0 +1,104 @@
+/*
+ * Copyright (c) 2025, STMicroelectronics
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+
+/ {
+	chosen {
+		/*
+		 * shared memory reserved for the inter-processor communication
+		 */
+		zephyr,ipc_shm = &ipc_shmem;
+		zephyr,ipc = &mailbox;
+	};
+
+	ipc_shmem: memory1@81200000 {
+		compatible = "mmio-sram";
+		reg = <0x81200000 DT_SIZE_M(1)>;
+	};
+
+	/*
+	 * The AMP telemetry window: the shared DDR the M33 writes and Linux reads.
+	 *
+	 * This is `spare1@81300000` in the vendor Linux device tree -- a `no-map`
+	 * reservation the board gives to nobody in particular, which is why it is
+	 * free for us. It begins exactly where ipc_shmem above ends, so it sits in
+	 * the same stretch of DDR as the RPMsg vrings both cores already use today.
+	 * That adjacency is the reason to expect the DDR firewall to grant it to
+	 * both; the firewall's own configuration lives in the secure world and
+	 * cannot be read from Linux, so this is an expectation to be tested, not a
+	 * fact yet.
+	 *
+	 * Declaring it here is not paperwork. This image is built with
+	 * CONFIG_ARM_MPU=y and CONFIG_MPU_GAP_FILLING=y, so anything the device tree
+	 * does not describe is actively made inaccessible -- a probe that pokes the
+	 * raw address faults on its first store, before the firewall ever sees the
+	 * access. Measured the hard way: an earlier version of this firmware used a
+	 * literal, and the write it was supposed to be testing never happened.
+	 *
+	 * CACHED, with the producer flushing explicitly -- deliberately, and after
+	 * getting it wrong once. The obvious-looking choice is NOCACHE, since another
+	 * core reads these bytes. But Linux maps this same physical memory through
+	 * /dev/mem with O_SYNC, which is a *Device* mapping, and mapping one physical
+	 * address as Device on one core and Normal-non-cacheable on the other is the
+	 * mismatched-attributes case the ARM architecture leaves unpredictable.
+	 *
+	 * The AMP cache contract already said what to do: the producer keeps the region
+	 * cached and flushes the record, then the index, in that order. That is what
+	 * the i.MX95 firmware does and it is what this one does too -- the ordering
+	 * discipline lives in the producer, and the two boards stay comparable.
+	 */
+	amp_shm: memory2@81300000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x81300000 DT_SIZE_K(512)>;
+		zephyr,memory-region = "AMP_SHM";
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_RAM)>;
+	};
+
+	/*
+	 * The two addresses the AOT blob carries -- the helper table it
+	 * calls and the @ivar carveout it reads and writes -- cannot live in the DDR
+	 * this core executes from. The micro-bpf JIT refuses to bake an immediate
+	 * with bit31 set, and every DDR address on this SoC has it. i.MX95 never met
+	 * this because its M7 runs from ITCM/DTCM at 0x000.../0x200....
+	 *
+	 * The M33's own internal SRAM is the way out: it sits at 0x0A0..., so bit31
+	 * is clear, and it is inside the Cortex-M **Code** region (0x00000000 -
+	 * 0x1FFFFFFF), which is executable under the default memory map -- both of
+	 * the helper table's requirements at once.
+	 *
+	 * These have to be declared here and not merely used. This image builds with
+	 * CONFIG_MPU_GAP_FILLING=y, so memory the device tree does not describe is
+	 * actively made inaccessible; a probe that pokes the raw address faults on
+	 * its first store. That was measured the hard way on the shared window above,
+	 * where an earlier version used a literal and the write never happened.
+	 *
+	 * The split mirrors i.MX95's ITCM/DTCM: executable code region in one bank,
+	 * writable data in the other. Code is ATTR_MPU_FLASH (RX) exactly as ITCM is
+	 * there, so the runtime's existing write-window -- disable the MPU briefly
+	 * with interrupts locked, write, restore -- carries over unchanged. That the
+	 * window did not have to be touched for this board is itself part of what
+	 * the portability claim predicts.
+	 *
+	 * Whether the resource isolation controller actually grants these banks to
+	 * the M33 is not knowable from Linux -- the assignment lives in the secure
+	 * world -- so this firmware measures it at boot, before the runtime relies
+	 * on it.
+	 */
+	amp_code: memory3@a07f000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0a07f000 DT_SIZE_K(4)>;   /* top of cm33-sram2 */
+		zephyr,memory-region = "AMP_CODE";
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_FLASH)>;
+	};
+
+	amp_ivars: memory4@a05f000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0a05f000 DT_SIZE_K(4)>;   /* top of cm33-sram1 */
+		zephyr,memory-region = "AMP_IVARS";
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_RAM)>;
+	};
+};
