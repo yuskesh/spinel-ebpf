@@ -22,7 +22,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include "spnl/amp_abi_imx95m7.h"
+#include "spnl/amp_abi.h"
 
 int main(int argc, char **argv)
 {

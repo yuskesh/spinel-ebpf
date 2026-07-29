@@ -22,7 +22,7 @@
 #define SPNL_AMP_M7_RUNTIME_H
 
 #include <stdint.h>
-#include "spnl/amp_abi_imx95m7.h"
+#include "spnl/amp_abi.h"
 #include "spnl/amp_ring.h"
 
 #ifndef AMP_RT_HELPER_BASE

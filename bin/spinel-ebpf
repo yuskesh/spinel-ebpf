@@ -38,6 +38,30 @@ VERSION = "0.0.1"
 PROJECT_ROOT = File.expand_path("..", __dir__)
 SPINEL_DIR   = ENV["SPINEL_DIR"] || File.join(PROJECT_ROOT, "deps/spinel")
 
+# AMP board profiles. Adding a second real-time core must not fork the compiler,
+# so a board is nothing but a **name for a set of address values**: a header to
+# read them from, and a macro that selects that header everywhere else. Nothing in
+# the code generator, the real-time-core runtime or the application-core drain
+# branches on which entry this is. If something ever has to, the claim that vendor
+# dependence is confined to the ABI addresses and the board overlay has weakened,
+# and that belongs in the record rather than behind a conditional.
+AMP_BOARDS = {
+  "amp-m7" => {
+    key:     :imx95m7,
+    label:   "i.MX95 Cortex-M7 (ARMv7E-M)",
+    header:  "include/spnl/amp_abi_imx95m7.h",
+    define:  "SPNL_AMP_BOARD_IMX95M7",
+    service: "spinel-amp-m7",
+  },
+  "amp-m33" => {
+    key:     :stm32mp2m33,
+    label:   "STM32MP257F-DK Cortex-M33 (ARMv8-M Mainline)",
+    header:  "include/spnl/amp_abi_stm32mp2m33.h",
+    define:  "SPNL_AMP_BOARD_STM32MP2M33",
+    service: "spinel-amp-m33",
+  },
+}.freeze
+
 # Resolve mode from CLI flags + environment, in this order of precedence:
 # explicit --native-only > explicit --ebpf-mixed > SPINEL_EBPF_MODE env > default eBPF.
 # Conflicting explicit flags (both --native-only and --ebpf-mixed) are an error.
@@ -174,9 +198,12 @@ def cmd_compile(argv)
     op.on("--ebpf-mixed",
           "Partition Ruby into (native C + eBPF C). [default]") { opts[:ebpf_mixed] = true }
     op.on("--target TARGET",
-          "codegen target. 'linux' (default) or 'amp-m7' (i.MX95 M7 via micro-bpf AOT)") { |t|
-      abort "error: unknown --target '#{t}' (expected 'linux' or 'amp-m7')" unless %w[linux amp-m7].include?(t)
-      opts[:amp_m7] = (t == "amp-m7")
+          "codegen target. 'linux' (default), 'amp-m7' (i.MX95 Cortex-M7) or " \
+          "'amp-m33' (STM32MP257F-DK Cortex-M33). The two amp targets share every line of " \
+          "codegen and runtime; they differ only in the fixed-ABI address values.") { |t|
+      known = ["linux", *AMP_BOARDS.keys]
+      abort "error: unknown --target '#{t}' (expected #{known.map { |k| "'#{k}'" }.join(', ')})" unless known.include?(t)
+      opts[:amp] = AMP_BOARDS[t]   # nil for 'linux'
     }
     op.on("--build",
           "also compile/link into single binary (requires Linux + clang + libbpf-dev + bpftool)") { opts[:build] = true }
@@ -382,7 +409,7 @@ def cmd_compile(argv)
   # spnl_emit -> amp_emit) for the micro-bpf ARMv7E-M host-AOT; the C codegen
   # selects handlers via cc_method_eligible, so force emission regardless of tags.
   ebpf_count = result.methods.count { |m| m.tag == :ebpf }
-  if ebpf_count > 0 || opts[:amp_m7]
+  if ebpf_count > 0 || opts[:amp]
     bpf_path = File.join(opts[:output_dir], "#{base}.bpf.c")
     # emit .bpf.c via the in-process C codegen (byte-identical
     # to the Ruby CodegenBpf, which is now retained as the regression oracle).
@@ -391,13 +418,14 @@ def cmd_compile(argv)
       # (cc_is_consumer_fn reads SPNL_EBPF_EXCLUDE), so a self-instrument unit
       # keeps them native while still emitting the uprobe progs.
       icc_env = {}
-      icc_env["SPNL_AMP_M7"] = "1" if opts[:amp_m7]   # amp-m7 codegen path
+      icc_env["SPNL_AMP_M7"] = "1" if opts[:amp]   # AMP codegen path (board-agnostic)
       icc_env["SPNL_EBPF_EXCLUDE"] = opts[:self_targets].join(",") if opts[:self_targets] && !opts[:self_targets].empty?
       File.write(bpf_path, IO.popen(icc_env, [icc, input, base], &:read))
       abort "error: in-process eBPF codegen failed for #{input}\n" \
             "       (re-run with --native-only to skip eBPF emission)" unless $?.success?
-      if opts[:amp_m7]
-        puts "[spinel-ebpf] amp-m7: wrote #{bpf_path} (clang -target bpf -> micro-bpf ARMv7E-M AOT)"
+      if opts[:amp]
+        puts "[spinel-ebpf] amp: wrote #{bpf_path} for #{opts[:amp][:label]} " \
+             "(clang -target bpf -> micro-bpf Thumb AOT)"
       else
         puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs, in-process)"
       end
@@ -427,7 +455,7 @@ def cmd_compile(argv)
   # --build does the full toolchain. Native-only short-circuits to plain
   # spinel build; eBPF-mixed runs the full Ruby -> binary pipeline.
   if opts[:build]
-    if opts[:amp_m7]
+    if opts[:amp]
       # amp-m7 output is blob + manifest (M7 and A55 are separate cores =
       # separate artifacts), NOT the Linux single binary. Separate build path.
       build_amp(base, opts[:output_dir], opts)
@@ -620,21 +648,42 @@ end
 #                     manifest dumper) + service.name / otlp.endpoint (deployment
 #                     config, NOT baked into the blob).
 def build_amp(base, build_dir, opts)
+  board = opts[:amp]
   bpf_c = File.join(build_dir, "#{base}.bpf.c")
   bpf_o = File.join(build_dir, "#{base}.bpf.o")
-  abort "error: amp-m7 --build: missing #{bpf_c} (codegen step did not run)" unless File.exist?(bpf_c)
+  abort "error: amp --build: missing #{bpf_c} (codegen step did not run)" unless File.exist?(bpf_c)
 
-  clang = which("clang") or abort "error: amp-m7 --build needs clang (-target bpf)"
-  run! [clang, "-O2", "-target", "bpf", "-c", bpf_c, "-o", bpf_o]
+  clang = which("clang") or abort "error: amp --build needs clang (-target bpf)"
+
+  # The two addresses the blob carries are supplied here, from the board profile
+  # header. The generated .bpf.c declares SPNL_AMP_IVARS_BASE behind `#ifndef`
+  # precisely so this step can name the board's value without the compiler having
+  # to know that boards exist.
+  ivars_base = amp_abi_const("AMP_IVARS_BASE", board)
+  run! [clang, "-O2", "-target", "bpf",
+        format("-DSPNL_AMP_IVARS_BASE=%#010xu", ivars_base),
+        "-c", bpf_c, "-o", bpf_o]
 
   driver = amp_aot_driver or abort <<~MSG
-    error: amp-m7 --build needs the micro-bpf host AOT driver (bytecode -> Thumb).
-      build it:  (cd tools/amp_aot_driver && cargo build --release)
+    error: amp --build needs the micro-bpf host AOT driver (bytecode -> Thumb).
+      run:       scripts/setup.sh   (fetches the micro-bpf fork this driver builds against)
+      then:      (cd tools/amp_aot_driver && cargo build --release)
       or set:    SPNL_AMP_AOT_DRIVER=/path/to/aot-driver
   MSG
 
-  hbase  = opts[:amp_helper_base] || amp_abi_const("AMP_HELPER_BASE")   # 0x0003FF00 (real board)
-  sbytes = amp_abi_const("AMP_HELPER_SLOT_BYTES")                       # 8
+  hbase  = opts[:amp_helper_base] || amp_abi_const("AMP_HELPER_BASE", board)
+  sbytes = amp_abi_const("AMP_HELPER_SLOT_BYTES", board)
+  # The ahead-of-time compiler cannot bake an immediate with bit 31 set beyond 8
+  # bits, so an address that cannot be baked has to fail here, with the reason --
+  # not later, as a blob that silently calls address zero.
+  [["helper table", hbase], ["ivars", ivars_base]].each do |what, addr|
+    next if (addr & 0x8000_0000).zero?
+    abort "error: amp --build: #{what} base #{format('%#010x', addr)} has bit 31 set.\n" \
+          "       The ahead-of-time compiler cannot bake such an immediate into the blob,\n" \
+          "       so this address has to live below 0x80000000 on #{board[:label]}.\n" \
+          "       (Fix the value in #{board[:header]}, not here.)"
+  end
+
   blob = File.join(build_dir, "#{base}.blob")
   env = { "AMP_HELPER_1" => format("0x%08x", hbase),
           "AMP_HELPER_2" => format("0x%08x", hbase + sbytes) }
@@ -643,9 +692,11 @@ def build_amp(base, build_dir, opts)
   manifest = File.join(build_dir, "#{base}.manifest")
   write_amp_manifest(manifest, bpf_c, build_dir, opts)
 
-  puts "[spinel-ebpf] amp-m7 --build: wrote #{blob} + #{manifest}"
-  puts "[spinel-ebpf] amp-m7: blob -> M7 staging (a55_stage), manifest -> A55 fixed drain " \
-       "(amp_a55_drain). Two cores = blob + manifest, not one binary."
+  puts "[spinel-ebpf] amp --build (#{board[:label]}): wrote #{blob} + #{manifest}"
+  puts "[spinel-ebpf] amp: helper@#{format('%#010x', hbase)} ivars@#{format('%#010x', ivars_base)} " \
+       "abi=#{amp_abi_const('AMP_ABI_VERSION', board)}"
+  puts "[spinel-ebpf] amp: blob -> real-time-core staging (a55_stage), manifest -> the fixed " \
+       "drain (amp_a55_drain). Two cores = blob + manifest, not one binary."
 end
 
 # Locate the host AOT driver binary (external Rust tool over rbpf-for-microcontrollers).
@@ -655,12 +706,11 @@ def amp_aot_driver
   cands.find { |p| File.executable?(p) }
 end
 
-# Read a `#define <NAME> <int>` from the fixed ABI header (single source of truth:
-# the CLI greps the same header the runtime/codegen mirror use, not a duplicate).
-def amp_abi_const(name)
-  hdr = File.join(PROJECT_ROOT, "include/spnl/amp_abi_imx95m7.h")
-  # the header carries UTF-8 (Japanese) comments; read as UTF-8 so the ASCII regex
-  # doesn't choke on multibyte bytes under a US-ASCII default external encoding.
+# Read a `#define <NAME> <int>` from the selected board's fixed ABI header (single
+# source of truth: the CLI greps the same header the runtime and the codegen mirror
+# use, not a duplicate). `board` is an AMP_BOARDS entry; nil means the default.
+def amp_abi_const(name, board = nil)
+  hdr = File.join(PROJECT_ROOT, (board || AMP_BOARDS["amp-m7"])[:header])
   m = File.read(hdr, encoding: "UTF-8")[/^\s*#define\s+#{Regexp.escape(name)}\s+(0x[0-9A-Fa-f]+|\d+)u?\b/, 1]
   abort "error: #{name} not found in #{hdr}" unless m
   Integer(m)
@@ -670,20 +720,27 @@ end
 # + deployment config (service.name / otlp.endpoint). probe-specific info lives in
 # the manifest, never baked into the blob.
 def write_amp_manifest(path, bpf_c, build_dir, opts)
+  board = opts[:amp] || AMP_BOARDS["amp-m7"]
   dumper_src = File.join(PROJECT_ROOT, "src/runtime/amp/amp_manifest_dump.c")
   cc = ENV["CC"] || which("cc") || "cc"
   dumper = File.join(build_dir, "amp_manifest_dump")
+  # The manifest has to state the ABI the blob was actually built for, or the
+  # loader's version gate becomes a rubber stamp. Both the board macro and the
+  # version come from the same profile the blob's addresses came from.
   run! [cc, "-O2", "-Wno-int-conversion",
         %(-DAMP_BPF_C="#{File.expand_path(bpf_c)}"),
+        "-D#{board[:define]}",
+        format("-DSPNL_AMP_ABI_VERSION=%uu", amp_abi_const("AMP_ABI_VERSION", board)),
         "-I", File.join(PROJECT_ROOT, "include"),
         dumper_src, "-o", dumper]
   fields = IO.popen([dumper], &:read)
   abort "error: amp manifest dump failed" unless $?.success?
 
-  service  = opts[:amp_service_name]  || "spinel-amp-m7"
+  service  = opts[:amp_service_name]  || board[:service]
   endpoint = opts[:amp_otlp_endpoint] || "http://127.0.0.1:4318"
   File.write(path,
-             "# spinel-ebpf amp-m7 manifest\n" \
+             "# spinel-ebpf amp manifest\n" \
+             "board=#{board[:key]}\n" \
              "service.name=#{service}\n" \
              "otlp.endpoint=#{endpoint}\n" \
              "#{fields}")

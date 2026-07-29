@@ -37,7 +37,7 @@ long amp_drain_build(struct amp_ring *r, const struct amp_manifest *m,
 }
 
 #ifndef AMP_DRAIN_NO_MAIN
-#include "spnl/amp_abi_imx95m7.h"
+#include "spnl/amp_abi.h"
 #include "otlp_grpc.h"   /* otlp_transport_send */
 
 #include <stdio.h>
