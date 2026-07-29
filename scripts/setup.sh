@@ -40,12 +40,16 @@
 #   MBEDTLS_REF   tag / branch / commit   (default v3.6.6, an LTS release)
 #   MBEDTLS_DIR   checkout location       (default <repo>/deps/mbedtls)
 #   SPNL_WITH_PROTO set to 1 to also fetch opentelemetry-proto + nanopb (default: off)
+#   SPNL_WITH_AMP   set to 1 to also fetch the micro-bpf VM (default: off)
 #   PROTO_REPO    git URL                 (default https://github.com/open-telemetry/opentelemetry-proto.git)
 #   PROTO_REF     tag / branch / commit   (default v1.10.0, the pin the encoders were generated from)
 #   PROTO_DIR     checkout location       (default <repo>/deps/opentelemetry-proto)
 #   NANOPB_REPO   git URL                 (default https://github.com/nanopb/nanopb.git)
 #   NANOPB_REF    tag / branch / commit   (default 0.4.9.1, matching the vendored runtime)
 #   NANOPB_DIR    checkout location       (default <repo>/deps/nanopb)
+#   UBPF_REPO     git URL                 (default https://github.com/SzymonKubica/rbpf-for-microcontrollers.git)
+#   UBPF_REF      tag / branch / commit   (default 84ecb5b, the pin the driver was built against)
+#   UBPF_DIR      checkout location       (default <repo>/tools/rbpf-for-microcontrollers)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -61,6 +65,9 @@ PROTO_DIR="${PROTO_DIR:-$HERE/deps/opentelemetry-proto}"
 NANOPB_REPO="${NANOPB_REPO:-https://github.com/nanopb/nanopb.git}"
 NANOPB_REF="${NANOPB_REF:-0.4.9.1}"
 NANOPB_DIR="${NANOPB_DIR:-$HERE/deps/nanopb}"
+UBPF_REPO="${UBPF_REPO:-https://github.com/SzymonKubica/rbpf-for-microcontrollers.git}"
+UBPF_REF="${UBPF_REF:-84ecb5b}"
+UBPF_DIR="${UBPF_DIR:-$HERE/tools/rbpf-for-microcontrollers}"
 
 echo ">>> spinel: $SPINEL_REPO @ $SPINEL_REF"
 echo ">>> into:   $SPINEL_DIR"
@@ -155,8 +162,45 @@ if [ "${SPNL_WITH_PROTO:-0}" = "1" ]; then
   echo ">>> OK: OTLP schemas + nanopb generator"
 fi
 
+# 6. Optional: the ahead-of-time compiler for the real-time-core targets
+#    (--target amp-m7 / amp-m33). Only needed to turn bytecode into a Thumb blob.
+#
+#    **Which rbpf.** This is the micro-bpf fork, not upstream rbpf. Upstream has an
+#    x86-64 JIT and a Cranelift backend and **no ARM or Thumb backend at all**; the
+#    Thumb emitter these targets depend on exists only in the fork. The fork keeps
+#    upstream's package metadata (name "rbpf", repository qmonnet/rbpf), so a
+#    dependency listing cannot tell them apart -- hence this note rather than a
+#    bare URL.
+#
+#    It lands in tools/ rather than deps/ because tools/amp_aot_driver names it by
+#    relative path, and that driver is sixty lines of glue: it loads the bytecode,
+#    runs the interpreter as an oracle, and calls the fork's JIT on the build host
+#    so the result is ahead-of-time rather than on-device. The real-time core then
+#    carries no VM and no JIT.
+if [ "${SPNL_WITH_AMP:-0}" = "1" ]; then
+  echo ">>> micro-bpf VM: $UBPF_REPO @ $UBPF_REF"
+  if [ ! -d "$UBPF_DIR/.git" ]; then
+    mkdir -p "$(dirname "$UBPF_DIR")"
+    git clone "$UBPF_REPO" "$UBPF_DIR"
+    git -C "$UBPF_DIR" checkout -q "$UBPF_REF"
+  else
+    git -C "$UBPF_DIR" remote set-url origin "$UBPF_REPO"
+    git -C "$UBPF_DIR" fetch origin
+    git -C "$UBPF_DIR" checkout -q "$UBPF_REF"
+  fi
+  [ -f "$UBPF_DIR/src/jit_thumbv7em.rs" ] || {
+    echo "!!! missing: $UBPF_DIR/src/jit_thumbv7em.rs"
+    echo "!!! That file is the Thumb emitter, and its absence means this checkout is"
+    echo "!!! upstream rbpf rather than the micro-bpf fork. The amp targets cannot"
+    echo "!!! produce a blob without it."
+    exit 1; }
+  echo ">>> OK: micro-bpf VM. Build the driver with: (cd tools/amp_aot_driver && cargo build --release)"
+fi
+
 echo ">>> spinel-ebpf is ready$tls_note. Try: bin/spinel-ebpf compile <file>.rb --build"
 [ "${SPNL_WITH_TLS:-0}" = "1" ] ||
   echo ">>> (TLS is off. For an https:// or grpcs:// OTLP endpoint, re-run with SPNL_WITH_TLS=1.)"
 [ "${SPNL_WITH_PROTO:-0}" = "1" ] ||
   echo ">>> (OTLP schemas are off. To decode telemetry in tests/runtime, re-run with SPNL_WITH_PROTO=1.)"
+[ "${SPNL_WITH_AMP:-0}" = "1" ] ||
+  echo ">>> (The real-time-core compiler is off. For --target amp-m7 or amp-m33, re-run with SPNL_WITH_AMP=1.)"

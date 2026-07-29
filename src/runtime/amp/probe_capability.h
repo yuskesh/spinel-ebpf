@@ -57,7 +57,7 @@ struct probe_capability_header {
  * the writer is assumed, and what is left to detect is corruption and staleness.
  * Introducing a real signature means introducing a key, and that belongs to the
  * multi-tenant / OTA design where the writer is *not* trusted -- a separate
- * decision, with its own ADR, not a field widened here in advance. */
+ * decision of its own, not a field widened here in advance. */
 uint64_t probe_capability_hash(const struct probe_attach_capability *entries, uint32_t n);
 
 _Static_assert(sizeof(struct probe_capability_header) == 56,

@@ -1,4 +1,17 @@
-// Host-AOT driver.
+// Host-AOT driver: sixty lines that turn verified bytecode into a Thumb blob.
+//
+// The compilation itself is not ours. It is the JIT from the micro-bpf fork of
+// rbpf, called here **on the build host** rather than on the device -- a JIT is a
+// pure function from bytes to bytes, so running it early makes it an ahead-of-time
+// compiler and leaves the real-time core carrying no VM and no JIT at all.
+//
+// The dependency is `../rbpf-for-microcontrollers`, fetched by scripts/setup.sh
+// with SPNL_WITH_AMP=1. It has to be that fork: upstream rbpf ships an x86-64 JIT
+// and a Cranelift backend and no ARM or Thumb backend, so upstream cannot emit a
+// single byte for these targets. The fork keeps upstream's package metadata, so
+// the Cargo dependency alone will not tell you which one you have. The tell is a
+// Thumb emitter source file in the checkout's src directory; setup.sh checks for it.
+//
 //  - interp oracle uses REAL host helpers (id 1 = amp_emit +100, id 2 = amp_ktime).
 //  - AOT bakes M7 helper addresses from env AMP_HELPER_1..8 = 0x... (transmuted;
 //    the JIT only reads each as an address, never calls it at compile time).
