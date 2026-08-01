@@ -83,6 +83,52 @@ int           spnl_oneshot_add(long n);       /* += n; returns 1 iff K reached *
 unsigned long spnl_oneshot_count(void);        /* current cumulative tally */
 void          spnl_oneshot_exit(void);         /* clean exit(0): destructors detach BPF */
 
+/* ---- channel balance -------------------------------------------------------
+ * Per-channel record counts, so a probe can be asked "did anything actually
+ * come out of you". The one-shot tally above is a single global number: useful
+ * for deciding when to stop, useless for telling which channel is silent.
+ *
+ * This lives at the drain layer, not in an exporter, because the failure it
+ * catches has nothing to do with telemetry. A probe that compiles, verifies,
+ * attaches and emits nothing is wrong whether it was going to print those
+ * records to a console or ship them as spans. Anything that drains a ringbuf
+ * should call these, including paths that never touch OTLP.
+ *
+ *   spnl_channel_seen(map)     register the channel; makes "0 records" sayable
+ *   spnl_channel_in(map, n)    n more records came out of it
+ *
+ * Only inbound records are counted here. What a consumer then does with a
+ * record -- turn it into a span, print it, or skip it -- is the consumer's to
+ * report, and "the runtime discarded it" and "the probe filtered it out" must
+ * not be conflated: the first is a symptom, the second is the feature. */
+/* The channel exists in the loaded object. Called by the loader for every
+ * ringbuf map before anything drains, so a channel that no userspace code ever
+ * reads can still be named at exit -- the emit-but-never-drain failure. */
+void          spnl_channel_declare(const char *map_name);
+void          spnl_channel_seen(const char *map_name);
+/* A record became an output (span pushed, line printed, ...). Consumer-side. */
+void          spnl_channel_out(const char *map_name, long n);
+/* The runtime discarded a record because it did not satisfy the channel's
+ * contract. `reason`/`hint` must be literals (stored by pointer). */
+void          spnl_channel_dropped(const char *map_name, const char *reason, const char *hint);
+/* The probe's own consumer skipped it. Never reported as a problem. */
+void          spnl_channel_filtered(const char *map_name, long n);
+void          spnl_channel_in(const char *map_name, long n);
+int           spnl_channel_count(void);            /* channels registered so far */
+const char   *spnl_channel_name(int i);            /* NULL when i is out of range */
+unsigned long spnl_channel_in_count(int i);
+/* Print the per-channel tally. Armed automatically by the first drain (or by
+ * the loader declaring channels), so it runs on every exit path, including the
+ * signal deaths -- `timeout N`, Ctrl-C -- that these probes normally end with.
+ * Diagnosis only: never changes the exit status.
+ *
+ *   SPNL_CHANNEL_REPORT=0    silent
+ *   SPNL_CHANNEL_REPORT=kv   one `spnl.channel <name> in=.. out=..` line per
+ *                            channel, for a tool to read. Kept separate from
+ *                            the prose so the prose stays free to improve. */
+void          spnl_channel_report(FILE *fp);
+void          spnl_channel_report_arm(void);
+
 /* dump a per-unit log2 histogram (BPF_MAP_TYPE_ARRAY of 64 __u64 slots)
  * to `fp` in bcc-compatible ASCII format. `label` is printed as the value
  * axis label (e.g. "usecs", "bytes"). Returns 0 on success, negative errno

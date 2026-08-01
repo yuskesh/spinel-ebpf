@@ -14,6 +14,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <signal.h>   /* channel report: survive `timeout N` / Ctrl-C */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,365 @@ struct spnl_runtime {
  * SPNL_MAX_EVENTS; K<=0/unset disables the feature (unlimited = legacy). See
  * spnl_runtime.h for the full contract. */
 static unsigned long g_spnl_event_count = 0;
+
+/* ---- channel balance: how many records each channel drained ---------------
+ * The one-shot tally above is a single global number, which answers "when do I
+ * stop" but not "did anything come out of channel X". That second question is
+ * the one that catches the most common way a probe is silently wrong: it
+ * compiles, it verifies, it attaches, and it emits nothing.
+ *
+ * Counted here rather than in an exporter on purpose. Every drain path funnels
+ * through spnl_channel_in() -- spnl_stream (which only prints to the console),
+ * spnl_runtime_ringbuf_drain, the typed consumers, the OTLP push funnels -- so
+ * the count is available whether or not telemetry is being exported at all. A
+ * probe that just prints lines gets the same diagnosis as one that ships spans.
+ *
+ * `in` is deliberately the only counter at this layer. What happens to a record
+ * afterwards belongs to whoever consumed it, and the two ways a record can fail
+ * to become an output are not the same thing: the runtime discarding it because
+ * it does not satisfy the channel's contract is a symptom, whereas the probe's
+ * own consumer skipping it is the probe working as designed. Reporting them
+ * with the same word would tell a reader to go fix a feature. */
+#define SPNL_CHAN_MAX      16
+#define SPNL_CHAN_NAME_MAX 64
+
+#define SPNL_CHAN_DROPS_MAX 4
+
+struct spnl_chan_stat {
+    char          name[SPNL_CHAN_NAME_MAX];
+    unsigned long in;
+    unsigned long out;
+    /* Reasons the runtime discarded a record, kept apart from `out` because
+     * they mean different things to a reader. A record the probe's own filter
+     * skipped is neither: see spnl_channel_filtered. */
+    struct { const char *reason; const char *hint; unsigned long n; }
+                  drops[SPNL_CHAN_DROPS_MAX];
+    int           ndrops;
+    unsigned long filtered;
+    /* Whether a drain ever touched this channel. A channel declared by the
+     * loader but never drained is a different failure from one that drained
+     * nothing, and needs the opposite advice -- see the report. */
+    int           drained;
+};
+static struct spnl_chan_stat g_spnl_chans[SPNL_CHAN_MAX];
+static int                   g_spnl_nchans = 0;
+
+/* Find `map_name`, registering it on first use. Past SPNL_CHAN_MAX the tally is
+ * dropped (NULL) rather than growing -- a diagnostic must not become a leak. */
+static struct spnl_chan_stat *chan_intern(const char *map_name)
+{
+    for (int i = 0; i < g_spnl_nchans; i++)
+        if (!strcmp(g_spnl_chans[i].name, map_name)) return &g_spnl_chans[i];
+    if (g_spnl_nchans >= SPNL_CHAN_MAX) return NULL;
+    struct spnl_chan_stat *s = &g_spnl_chans[g_spnl_nchans++];
+    strncpy(s->name, map_name, sizeof(s->name) - 1);
+    return s;
+}
+
+/* Record that `n` records came out of `map_name`. */
+void spnl_channel_in(const char *map_name, long n)
+{
+    if (!map_name || n <= 0) return;
+    struct spnl_chan_stat *s = chan_intern(map_name);
+    if (!s) return;
+    s->in += (unsigned long)n;
+    s->drained = 1;
+}
+
+/* The channel exists in the loaded object. Called by the loader for every
+ * ringbuf map, before anything drains, so that a channel nobody ever reads can
+ * still be named at exit.
+ *
+ * That is the failure this catches, and it is the one that has cost the most
+ * time here: a probe that emits perfectly well into a ringbuf that no userspace
+ * code ever drains. Nothing errors, nothing warns, the result is simply empty.
+ * Without declaration the runtime cannot even tell such a channel exists. */
+void spnl_channel_declare(const char *map_name)
+{
+    if (!map_name) return;
+    spnl_channel_report_arm();
+    chan_intern(map_name);
+}
+
+/* Registering a channel with zero records is what makes "nothing came out"
+ * reportable: without it, a channel that never fired is indistinguishable from
+ * one that was never drained. Call this when a drain starts. */
+void spnl_channel_seen(const char *map_name)
+{
+    if (!map_name) return;
+    spnl_channel_report_arm();
+    struct spnl_chan_stat *s = chan_intern(map_name);
+    if (s) s->drained = 1;
+}
+
+static struct spnl_chan_stat *chan_find(const char *map_name)
+{
+    if (!map_name) return NULL;
+    for (int i = 0; i < g_spnl_nchans; i++)
+        if (!strcmp(g_spnl_chans[i].name, map_name)) return &g_spnl_chans[i];
+    return NULL;
+}
+
+/* A record became an output: a span, a printed line, whatever the consumer
+ * produces. Counted by the consumer, since only it knows what "produced" means. */
+void spnl_channel_out(const char *map_name, long n)
+{
+    struct spnl_chan_stat *s = chan_find(map_name);
+    if (s && n > 0) s->out += (unsigned long)n;
+}
+
+/* The runtime discarded a record because it did not satisfy the channel's
+ * contract -- a DNS record whose QNAME will not parse, say. `reason` is a short
+ * stable id and `hint` is what to do about it; both are expected to be string
+ * literals owned by the caller, so they are stored by pointer.
+ *
+ * Distinct from spnl_channel_filtered on purpose. This one is a symptom worth
+ * surfacing; that one is the probe working as designed. */
+void spnl_channel_dropped(const char *map_name, const char *reason, const char *hint)
+{
+    struct spnl_chan_stat *s = chan_find(map_name);
+    if (!s || !reason) return;
+    for (int i = 0; i < s->ndrops; i++) {
+        if (!strcmp(s->drops[i].reason, reason)) { s->drops[i].n++; return; }
+    }
+    if (s->ndrops >= SPNL_CHAN_DROPS_MAX) return;
+    s->drops[s->ndrops].reason = reason;
+    s->drops[s->ndrops].hint   = hint;
+    s->drops[s->ndrops].n      = 1;
+    s->ndrops++;
+}
+
+/* The probe's own consumer chose to skip this record. Never reported as a
+ * problem: emitting broadly and narrowing in userspace is a supported design,
+ * and a warning here would contradict it. */
+void spnl_channel_filtered(const char *map_name, long n)
+{
+    struct spnl_chan_stat *s = chan_find(map_name);
+    if (s && n > 0) s->filtered += (unsigned long)n;
+}
+
+int spnl_channel_count(void) { return g_spnl_nchans; }
+
+/* Print what each channel actually produced. Registered as an atexit handler by
+ * the first drain, so it reports on every exit path -- the one-shot exit, the
+ * timeout, and a plain return from main.
+ *
+ * This is a diagnosis, not a gate: it never changes the exit status. A high
+ * drop rate can be entirely correct (emitting broadly and filtering in
+ * userspace is a design this project recommends), so the wording says
+ * "suspicious" and leaves the judgement to a reader. The one case stated
+ * plainly is zero, because a channel that drained nothing at all is either
+ * attached to something that never fired or filtering everything away, and
+ * both are worth knowing before drawing conclusions from an empty result. */
+/* Written with write(2) rather than stdio because this same code runs from a
+ * signal handler (see spnl_channel_report_arm): `timeout N` and Ctrl-C are how
+ * these probes normally end, and neither runs atexit. fprintf from a handler
+ * can deadlock against a drain loop that is mid-printf, and a diagnostic that
+ * hangs the process it is diagnosing is worse than no diagnostic. Everything
+ * below is either a string literal or arithmetic on a stack buffer. */
+static void w_str(int fd, const char *s)
+{
+    size_t n = strlen(s);
+    while (n) {
+        ssize_t k = write(fd, s, n);
+        if (k <= 0) return;
+        s += k; n -= (size_t)k;
+    }
+}
+
+static void w_num(int fd, unsigned long v)
+{
+    char b[24];
+    int i = (int)sizeof(b);
+    b[--i] = '\0';
+    if (!v) b[--i] = '0';
+    while (v) { b[--i] = (char)('0' + (v % 10)); v /= 10; }
+    w_str(fd, &b[i]);
+}
+
+/* Channel name, padded to a fixed column so the numbers line up; "" for
+ * continuation lines. Always at least one space, so a name wider than the
+ * column separates from what follows instead of running into it. */
+static void w_chan(int fd, const char *name)
+{
+    w_str(fd, "  ");
+    w_str(fd, name);
+    size_t n = strlen(name);
+    do { w_str(fd, " "); n++; } while (n < 24);
+}
+
+/* A stable projection of the same numbers, for a machine to read.
+ *
+ * Deliberately separate from the prose above. The prose exists to be improved
+ * -- reworded, given better advice -- and a tool that parses it would make
+ * every such improvement a breaking change. Same reason the record contract's
+ * gate projects only structure and leaves note/condition out of it. */
+static void spnl_channel_report_kv_fd(int fd)
+{
+    for (int i = 0; i < g_spnl_nchans; i++) {
+        const struct spnl_chan_stat *s = &g_spnl_chans[i];
+        unsigned long dropped = 0;
+        for (int d = 0; d < s->ndrops; d++) dropped += s->drops[d].n;
+
+        w_str(fd, "spnl.channel ");   w_str(fd, s->name);
+        w_str(fd, " drained=");       w_num(fd, (unsigned long)s->drained);
+        w_str(fd, " in=");            w_num(fd, s->in);
+        w_str(fd, " out=");           w_num(fd, s->out);
+        w_str(fd, " dropped=");       w_num(fd, dropped);
+        w_str(fd, " filtered=");      w_num(fd, s->filtered);
+        w_str(fd, "\n");
+    }
+}
+
+/* 0 = silent, 1 = prose (default), 2 = key/value */
+static int g_spnl_report_mode = 1;
+
+static void spnl_channel_report_fd(int fd)
+{
+    if (g_spnl_nchans == 0) return;   /* no ringbuf channels: nothing to say */
+    if (g_spnl_report_mode == 2) { spnl_channel_report_kv_fd(fd); return; }
+
+    w_str(fd, "[spinel-ebpf] channel balance\n");
+    for (int i = 0; i < g_spnl_nchans; i++) {
+        const struct spnl_chan_stat *s = &g_spnl_chans[i];
+
+        /* Declared but never drained. Distinct from "drained nothing", and the
+         * advice is the opposite: the attach point is not the suspect, the
+         * missing userspace half is. */
+        if (!s->drained) {
+            w_chan(fd, s->name);
+            w_str(fd, "** never drained **\n");
+            w_chan(fd, "");
+            w_str(fd, "  the probe writes to this ringbuf but no userspace code reads it,\n");
+            w_chan(fd, "");
+            w_str(fd, "  so every record was discarded by the kernel. emitting is not\n");
+            w_chan(fd, "");
+            w_str(fd, "  exporting: see `spinel-ebpf describe` for this channel's\n");
+            w_chan(fd, "");
+            w_str(fd, "  userspace_export, and call it (or consume the channel with\n");
+            w_chan(fd, "");
+            w_str(fd, "  on_emit) from main.\n");
+            continue;
+        }
+
+        if (s->in == 0) {
+            w_chan(fd, s->name);
+            w_str(fd, "in 0   ** nothing came out **\n");
+            w_chan(fd, "");
+            w_str(fd, "  the channel drained cleanly but no record ever arrived.\n");
+            w_chan(fd, "");
+            w_str(fd, "  check that the attach point fires (lsm/* needs lsm=...,bpf on\n");
+            w_chan(fd, "");
+            w_str(fd, "  the kernel cmdline; fmod_ret/* does not) and that the probe's\n");
+            w_chan(fd, "");
+            w_str(fd, "  own filter is not rejecting everything.\n");
+            continue;
+        }
+
+        unsigned long dropped = 0;
+        for (int d = 0; d < s->ndrops; d++) dropped += s->drops[d].n;
+
+        w_chan(fd, s->name);
+        w_str(fd, "in ");       w_num(fd, s->in);
+        if (s->out)      { w_str(fd, "   out ");      w_num(fd, s->out); }
+        if (s->filtered) { w_str(fd, "   filtered "); w_num(fd, s->filtered); }
+        if (dropped)     { w_str(fd, "   dropped ");  w_num(fd, dropped); }
+        w_str(fd, "\n");
+
+        /* Flag a drop rate only when it dominates. Discarding some records is
+         * normal; discarding nearly all of them usually means the records are
+         * not the kind this channel expects, which points at the attach point
+         * or the filter rather than at the data. */
+        for (int d = 0; d < s->ndrops; d++) {
+            int major = (s->drops[d].n * 2 > s->in);
+            w_chan(fd, "");
+            w_str(fd, "  ");
+            w_str(fd, s->drops[d].reason);
+            w_str(fd, ": ");
+            w_num(fd, s->drops[d].n);
+            w_str(fd, major ? "   ** suspicious **\n" : "\n");
+            if (major && s->drops[d].hint) {
+                w_chan(fd, "");
+                w_str(fd, "  ");
+                w_str(fd, s->drops[d].hint);
+                w_str(fd, "\n");
+            }
+        }
+    }
+}
+
+void spnl_channel_report(FILE *fp)
+{
+    if (!fp) fp = stderr;
+    fflush(fp);
+    spnl_channel_report_fd(fileno(fp));
+}
+
+/* Report at most once, however the process ends. Not a lock: the paths that
+ * race here are an atexit handler and a signal handler in the same thread. */
+static volatile sig_atomic_t g_spnl_report_done = 0;
+
+static void spnl_channel_report_once(void)
+{
+    if (g_spnl_report_done) return;
+    g_spnl_report_done = 1;
+    spnl_channel_report_fd(STDERR_FILENO);
+}
+
+static void spnl_channel_atexit(void) { spnl_channel_report_once(); }
+
+/* Report, then die exactly as we would have without the handler, so the exit
+ * status a caller sees is unchanged. This is a diagnostic, not a gate. */
+static void spnl_channel_onsignal(int sig)
+{
+    spnl_channel_report_once();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+/* Arm the report once, from whichever drain (or declaration) runs first.
+ *
+ * atexit alone is not enough: these probes are normally time-boxed with
+ * `timeout N` or stopped with Ctrl-C, and a signal death skips atexit
+ * entirely -- the exits where the diagnosis matters most were the ones not
+ * covered. Handlers are installed only where the probe has not set its own,
+ * so a probe that manages its own shutdown keeps doing so. */
+void spnl_channel_report_arm(void)
+{
+    static int armed = 0;
+    if (armed) return;
+    armed = 1;
+
+    /* 0 silences it entirely (for a probe whose stderr is parsed by something
+     * else); kv swaps the prose for the machine-readable projection. */
+    const char *e = getenv("SPNL_CHANNEL_REPORT");
+    if (e && e[0] == '0') { g_spnl_report_done = 1; return; }
+    if (e && !strcmp(e, "kv")) g_spnl_report_mode = 2;
+
+    atexit(spnl_channel_atexit);
+
+    static const int sigs[] = { SIGTERM, SIGINT, SIGHUP };
+    for (unsigned i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) {
+        struct sigaction old;
+        if (sigaction(sigs[i], NULL, &old) == 0 && old.sa_handler == SIG_DFL) {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = spnl_channel_onsignal;
+            sigemptyset(&sa.sa_mask);
+            sigaction(sigs[i], &sa, NULL);
+        }
+    }
+}
+
+const char *spnl_channel_name(int i)
+{
+    return (i >= 0 && i < g_spnl_nchans) ? g_spnl_chans[i].name : NULL;
+}
+
+unsigned long spnl_channel_in_count(int i)
+{
+    return (i >= 0 && i < g_spnl_nchans) ? g_spnl_chans[i].in : 0;
+}
 
 static long spnl_oneshot_limit(void)
 {
@@ -239,7 +599,9 @@ int spnl_runtime_ringbuf_drain(spnl_runtime *rt,
 
     struct ring_buffer *rb = ring_buffer__new(fd, rb_trampoline, &slot, NULL);
     if (!rb) return -errno;
+    spnl_channel_seen(map_name);   /* register even if this poll yields nothing */
     int n = ring_buffer__poll(rb, timeout_ms);
+    if (n > 0) spnl_channel_in(map_name, n);
     /* after this cycle's records were delivered to cb (lossless), honour
      * SPNL_MAX_EVENTS. Reaching K exits cleanly (destructors detach BPF). */
     if (n > 0 && spnl_oneshot_add(n)) { ring_buffer__free(rb); spnl_oneshot_exit(); }

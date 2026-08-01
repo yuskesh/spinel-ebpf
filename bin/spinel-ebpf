@@ -1309,6 +1309,9 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     #include "#{base}.skel.h"
 
     #{storage}struct #{skel_name} *_spnl_skel;
+    /* The sole ringbuf being drained, or "" when several are merged into one
+       poll (counts are then not attributable to a single channel). */
+    static const char *_spnl_last_chan = "";
 
     /* track XDP-attached interfaces so the destructor can detach. */
     static int  _spnl_xdp_ifindex = 0;
@@ -2196,6 +2199,17 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         } else {
             fprintf(stderr, "[spinel-ebpf] BPF loaded and attached\\n");
         }
+        /* Name every ringbuf the program writes to, before any of them is
+         * drained. Without this the runtime cannot tell "this channel produced
+         * nothing" from "nobody ever read this channel" -- and the second is
+         * the failure where a probe emits perfectly and the result is empty. */
+        {
+            struct bpf_map *_m;
+            bpf_object__for_each_map(_m, _spnl_skel->obj) {
+                if (bpf_map__type(_m) == BPF_MAP_TYPE_RINGBUF)
+                    spnl_channel_declare(bpf_map__name(_m));
+            }
+        }
         /* populate PROG_ARRAY *before* attaching the XDP dispatcher so
          * a tail_call right out of the gate doesn't hit an empty slot. */
         _spnl_prog_array_populate();
@@ -2476,6 +2490,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         if (!_spnl_skel) return -1;
         struct ring_buffer *rb = NULL;
         struct bpf_map *map;
+        const char *nchan_names = NULL;   /* the sole ringbuf, or "" when several */
         bpf_object__for_each_map(map, _spnl_skel->obj) {
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
@@ -2487,6 +2502,12 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             else if (strstr(nm, "_events"))       cb = _spnl_stream_int_cb;
             else continue;
             int fd = bpf_map__fd(map);
+            /* Register before polling: a channel that never fires has to be
+               distinguishable from one that was never drained. */
+            spnl_channel_seen(nm);
+            _spnl_last_chan = _spnl_last_chan[0] ? "" : nm;
+            if (!nchan_names) nchan_names = nm;   /* single-channel: attribute exactly */
+            else              nchan_names = "";   /* several: poll counts are not separable */
             if (!rb) rb = ring_buffer__new(fd, cb, NULL, NULL);
             else     ring_buffer__add(rb, fd, cb, NULL);
         }
@@ -2498,6 +2519,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             /* event-boxed one-shot. Each polled record is 1 event; once the
              * SPNL_MAX_EVENTS=K tally is reached, exit cleanly (records already
              * printed = lossless; destructor detaches BPF, fd-GC backstop). */
+            /* ring_buffer__poll aggregates every map added above, so a count is
+               only attributable when exactly one channel is being drained. With
+               several, the per-channel registrations still make "this one was
+               silent" visible; the totals just aren't split. */
+            if (n > 0 && nchan_names && nchan_names[0]) spnl_channel_in(nchan_names, n);
             if (n > 0 && spnl_oneshot_add(n)) { ring_buffer__free(rb); spnl_oneshot_exit(); }
             if (polls > 0) polls--;
         }
@@ -2539,6 +2565,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             const char *nm = bpf_map__name(map);
             if (!strstr(nm, "_l7stream_events")) continue;
             int fd = bpf_map__fd(map);
+            /* Register the channel before polling: "drained nothing" has to be
+               distinguishable from "never drained". Every path that reads a
+               ringbuf goes through here, including the ones with no exporter. */
+            spnl_channel_seen(nm);
+            _spnl_last_chan = _spnl_last_chan[0] ? "" : nm;
             if (!rb) rb = ring_buffer__new(fd, _spnl_l7stream_cb, NULL, NULL);
             else     ring_buffer__add(rb, fd, _spnl_l7stream_cb, NULL);
         }
@@ -2586,11 +2617,18 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                 strstr(nm, "_pair_events") || strstr(nm, "_emit3_events") ||
                 strstr(nm, "_emit4_events")) continue;
             int fd = bpf_map__fd(map);
+            /* Register the channel before polling: "drained nothing" has to be
+               distinguishable from "never drained". Every path that reads a
+               ringbuf goes through here, including the ones with no exporter. */
+            spnl_channel_seen(nm);
+            _spnl_last_chan = _spnl_last_chan[0] ? "" : nm;
             if (!rb) rb = ring_buffer__new(fd, _spnl_collect_int_cb, NULL, NULL);
             else     ring_buffer__add(rb, fd, _spnl_collect_int_cb, NULL);
         }
         if (!rb) return 0;
+        int _before = _spnl_ccount;
         ring_buffer__poll(rb, timeout_ms);
+        if (_spnl_ccount > _before) spnl_channel_in(_spnl_last_chan, _spnl_ccount - _before);
         ring_buffer__free(rb);
         return _spnl_ccount;
     }
@@ -2618,13 +2656,21 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         struct bpf_map *map;
         bpf_object__for_each_map(map, _spnl_skel->obj) {
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
-            if (!strstr(bpf_map__name(map), "_pair_events")) continue;
+            const char *nm = bpf_map__name(map);
+            if (!strstr(nm, "_pair_events")) continue;
             int fd = bpf_map__fd(map);
+            /* Register the channel before polling: "drained nothing" has to be
+               distinguishable from "never drained". Every path that reads a
+               ringbuf goes through here, including the ones with no exporter. */
+            spnl_channel_seen(nm);
+            _spnl_last_chan = _spnl_last_chan[0] ? "" : nm;
             if (!rb) rb = ring_buffer__new(fd, _spnl_collect_pair_cb, NULL, NULL);
             else     ring_buffer__add(rb, fd, _spnl_collect_pair_cb, NULL);
         }
         if (!rb) return 0;
+        int _before = _spnl_ccount_pair;
         ring_buffer__poll(rb, timeout_ms);
+        if (_spnl_ccount_pair > _before) spnl_channel_in(_spnl_last_chan, _spnl_ccount_pair - _before);
         ring_buffer__free(rb);
         return _spnl_ccount_pair;
     }
@@ -2651,6 +2697,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                 cb = _spnl_collect_int_cb;
             else continue;
             int fd = bpf_map__fd(map);
+            /* Register the channel before polling: "drained nothing" has to be
+               distinguishable from "never drained". Every path that reads a
+               ringbuf goes through here, including the ones with no exporter. */
+            spnl_channel_seen(nm);
+            _spnl_last_chan = _spnl_last_chan[0] ? "" : nm;
             if (!_spnl_consumer_rb) _spnl_consumer_rb = ring_buffer__new(fd, cb, NULL, NULL);
             else                    ring_buffer__add(_spnl_consumer_rb, fd, cb, NULL);
         }
