@@ -28,6 +28,7 @@ N 11 SymbolNode
 S 11 value kprobe
 N 12 StringNode
 S 12 content do_sys_openat2
+I 12 fzl 1
 A 10 arguments 11,12
 R 9 arguments 10
 N 13 BlockNode
@@ -77,6 +78,7 @@ N 28 SymbolNode
 S 28 value kretprobe
 N 29 StringNode
 S 29 content do_sys_openat2
+I 29 fzl 1
 A 27 arguments 28,29
 R 26 arguments 27
 N 30 BlockNode
@@ -109,6 +111,7 @@ N 39 SymbolNode
 S 39 value fentry
 N 40 StringNode
 S 40 content tcp_v4_rcv
+I 40 fzl 1
 A 38 arguments 39,40
 R 37 arguments 38
 N 41 BlockNode
@@ -151,6 +154,7 @@ N 53 SymbolNode
 S 53 value fexit
 N 54 StringNode
 S 54 content tcp_v4_rcv
+I 54 fzl 1
 A 52 arguments 53,54
 R 51 arguments 52
 N 55 BlockNode
@@ -185,8 +189,10 @@ N 65 SymbolNode
 S 65 value tracepoint
 N 66 StringNode
 S 66 content syscalls
+I 66 fzl 1
 N 67 StringNode
 S 67 content sys_enter_write
+I 67 fzl 1
 A 64 arguments 65,66,67
 R 63 arguments 64
 N 68 BlockNode
@@ -223,6 +229,7 @@ N 79 SymbolNode
 S 79 value uprobe
 N 80 StringNode
 S 80 content /usr/bin/bash:readline
+I 80 fzl 1
 A 78 arguments 79,80
 R 77 arguments 78
 N 81 BlockNode
@@ -255,6 +262,7 @@ N 90 SymbolNode
 S 90 value uretprobe
 N 91 StringNode
 S 91 content /usr/bin/bash:readline
+I 91 fzl 1
 A 89 arguments 90,91
 R 88 arguments 89
 N 92 BlockNode
@@ -287,10 +295,13 @@ N 101 SymbolNode
 S 101 value usdt
 N 102 StringNode
 S 102 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+I 102 fzl 1
 N 103 StringNode
 S 103 content libstdcxx
+I 103 fzl 1
 N 104 StringNode
 S 104 content throw
+I 104 fzl 1
 A 100 arguments 101,102,103,104
 R 99 arguments 100
 N 105 BlockNode

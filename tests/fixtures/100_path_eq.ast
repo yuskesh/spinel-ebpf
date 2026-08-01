@@ -34,6 +34,7 @@ N 14 LocalVariableReadNode
 S 14 name file
 N 15 StringNode
 S 15 content /etc/spnl_locked_file
+I 15 fzl 1
 A 13 arguments 14,15
 R 12 arguments 13
 R 12 block -1

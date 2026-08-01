@@ -28,6 +28,7 @@ N 11 SymbolNode
 S 11 value uprobe
 N 12 StringNode
 S 12 content /usr/bin/bash:readline
+I 12 fzl 1
 N 13 KeywordHashNode
 N 14 AssocNode
 N 15 SymbolNode
@@ -79,10 +80,13 @@ N 29 SymbolNode
 S 29 value usdt
 N 30 StringNode
 S 30 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+I 30 fzl 1
 N 31 StringNode
 S 31 content libstdcxx
+I 31 fzl 1
 N 32 StringNode
 S 32 content throw
+I 32 fzl 1
 N 33 KeywordHashNode
 N 34 AssocNode
 N 35 SymbolNode

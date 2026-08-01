@@ -185,6 +185,7 @@ R 63 receiver -1
 N 64 ArgumentsNode
 N 65 StringNode
 S 65 content [demo]%20XDP%20per-protocol%20counter%20attached.%20sleeping%2015s;%20dump%204%20counters%20via%20bpftool.
+I 65 fzl 1
 A 64 arguments 65
 R 63 arguments 64
 R 63 block -1
@@ -205,6 +206,7 @@ R 69 receiver -1
 N 70 ArgumentsNode
 N 71 StringNode
 S 71 content [demo]%20exiting.
+I 71 fzl 1
 A 70 arguments 71
 R 69 arguments 70
 R 69 block -1

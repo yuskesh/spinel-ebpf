@@ -28,6 +28,7 @@ R 11 receiver -1
 N 12 ArgumentsNode
 N 13 StringNode
 S 13 content /usr/bin/spnlbad
+I 13 fzl 1
 A 12 arguments 13
 R 11 arguments 12
 R 11 block -1
@@ -41,6 +42,7 @@ N 16 LocalVariableReadNode
 S 16 name file
 N 17 StringNode
 S 17 content /etc/spnl_parent_file
+I 17 fzl 1
 A 15 arguments 16,17
 R 14 arguments 15
 R 14 block -1

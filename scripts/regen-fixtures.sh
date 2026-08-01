@@ -18,7 +18,10 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SPINEL_DIR="${SPINEL_DIR:-$ROOT/deps/spinel}"
 FIX_DIR="$ROOT/tests/fixtures"
-SPINEL="$SPINEL_DIR/build/spinel"
+# Upstream builds bin/spinel; build/spinel is a fossil from an older layout that
+# no Makefile rule produces any more. Prefer bin/, fall back for old checkouts.
+SPINEL="$SPINEL_DIR/bin/spinel"
+[ -x "$SPINEL" ] || SPINEL="$SPINEL_DIR/build/spinel"
 CC_BIN="$ROOT/build/codegen_c/spinel-ebpf-cc"
 
 if [ ! -x "$SPINEL" ]; then

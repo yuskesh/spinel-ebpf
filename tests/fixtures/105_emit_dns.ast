@@ -28,8 +28,10 @@ N 12 LocalVariableReadNode
 S 12 name sk
 N 13 StringNode
 S 13 content sock
+I 13 fzl 1
 N 14 StringNode
 S 14 content __sk_common.skc_dport
+I 14 fzl 1
 A 11 arguments 12,13,14
 R 10 arguments 11
 R 10 block -1

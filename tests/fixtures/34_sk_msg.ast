@@ -76,6 +76,7 @@ R 26 receiver -1
 N 27 ArgumentsNode
 N 28 StringNode
 S 28 content [demo]%20sk_msg%20+%20sk_skb%20programs%20loaded%20(attach%20happens%20separately)
+I 28 fzl 1
 A 27 arguments 28
 R 26 arguments 27
 R 26 block -1

@@ -23,6 +23,7 @@ N 9 LocalVariableReadNode
 S 9 name path
 N 10 StringNode
 S 10 content r
+I 10 fzl 1
 A 8 arguments 9,10
 R 6 arguments 8
 N 11 BlockNode
@@ -63,6 +64,7 @@ R 20 receiver -1
 N 21 ArgumentsNode
 N 22 StringNode
 S 22 content /etc/hostname
+I 22 fzl 1
 A 21 arguments 22
 R 20 arguments 21
 R 20 block -1

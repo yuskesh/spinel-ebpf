@@ -131,6 +131,7 @@ R 49 receiver -1
 N 50 ArgumentsNode
 N 51 StringNode
 S 51 content [echo]%20tcp_listen%20failed
+I 51 fzl 1
 A 50 arguments 51
 R 49 arguments 50
 R 49 block -1
@@ -154,6 +155,7 @@ R 55 receiver -1
 N 56 ArgumentsNode
 N 57 StringNode
 S 57 content [echo]%20listening%20on%20127.0.0.1:8080
+I 57 fzl 1
 A 56 arguments 57
 R 55 arguments 56
 R 55 block -1
@@ -194,6 +196,7 @@ R 69 receiver -1
 N 70 ArgumentsNode
 N 71 StringNode
 S 71 content [echo]%20accept%20failed
+I 71 fzl 1
 A 70 arguments 71
 R 69 arguments 70
 R 69 block -1
@@ -229,6 +232,7 @@ R 79 receiver -1
 N 80 ArgumentsNode
 N 81 StringNode
 S 81 content [echo]%20accepted%20client
+I 81 fzl 1
 A 80 arguments 81
 R 79 arguments 80
 R 79 block -1
@@ -255,6 +259,7 @@ N 88 ArgumentsNode
 N 89 InterpolatedStringNode
 N 90 StringNode
 S 90 content [echo]%20got:%20
+I 90 fzl 1
 N 91 EmbeddedStatementsNode
 N 92 StatementsNode
 N 93 LocalVariableReadNode
@@ -262,6 +267,7 @@ S 93 name line
 A 92 body 93
 R 91 statements 92
 A 89 parts 90,91
+I 89 fzl 1
 A 88 arguments 89
 R 87 arguments 88
 R 87 block -1
@@ -276,6 +282,7 @@ N 97 LocalVariableReadNode
 S 97 name client
 N 98 StringNode
 S 98 content echo:%20
+I 98 fzl 1
 A 96 arguments 97,98
 R 94 arguments 96
 R 94 block -1
@@ -304,6 +311,7 @@ N 107 LocalVariableReadNode
 S 107 name client
 N 108 StringNode
 S 108 content %0A
+I 108 fzl 1
 A 106 arguments 107,108
 R 104 arguments 106
 R 104 block -1
@@ -338,6 +346,7 @@ R 117 receiver -1
 N 118 ArgumentsNode
 N 119 StringNode
 S 119 content [echo]%20done
+I 119 fzl 1
 A 118 arguments 119
 R 117 arguments 118
 R 117 block -1

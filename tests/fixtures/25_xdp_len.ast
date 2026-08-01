@@ -67,6 +67,7 @@ R 21 receiver -1
 N 22 ArgumentsNode
 N 23 StringNode
 S 23 content [demo]%20XDP%20attached;%20sleeping%2010s.%20Dump%20counters%20via%20bpftool.
+I 23 fzl 1
 A 22 arguments 23
 R 21 arguments 22
 R 21 block -1
@@ -87,6 +88,7 @@ R 27 receiver -1
 N 28 ArgumentsNode
 N 29 StringNode
 S 29 content [demo]%20exiting.
+I 29 fzl 1
 A 28 arguments 29
 R 27 arguments 28
 R 27 block -1

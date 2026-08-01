@@ -99,6 +99,7 @@ R 31 receiver -1
 N 32 ArgumentsNode
 N 33 StringNode
 S 33 content [demo]%205%20records%20dispatched;%20bpf_path_counts%20should%20now%20be%20{1:3,%202:1,%203:1}
+I 33 fzl 1
 A 32 arguments 33
 R 31 arguments 32
 R 31 block -1
@@ -109,6 +110,7 @@ R 34 receiver -1
 N 35 ArgumentsNode
 N 36 StringNode
 S 36 content [demo]%20sleep%205s%20so%20bpftool%20can%20poke%20at%20the%20map%20before%20destructor%20releases%20it
+I 36 fzl 1
 A 35 arguments 36
 R 34 arguments 35
 R 34 block -1

@@ -4,7 +4,7 @@
 # subset) -- no sp_ws_* C shims. This is the payoff of `:binstr`: client
 # WS frames are masked binary and routinely contain 0x00 bytes, so the frame
 # read MUST be binary-safe. `sp_net_rl_recv_some` declared `:binstr` builds the
-# String from sp_net_bin_len bytes (not strlen), so embedded NULs survive; the
+# String from sp_ffi_bin_len bytes (not strlen), so embedded NULs survive; the
 # echo is written with `sp_net_write_bytes` (explicit length, NUL-safe). With
 # the old `:str` mode the frame would truncate at the first NUL.
 #
