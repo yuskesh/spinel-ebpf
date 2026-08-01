@@ -19,6 +19,7 @@ N 7 CallNode
 S 7 name +
 N 8 StringNode
 S 8 content hello,%20
+I 8 fzl 1
 R 7 receiver 8
 N 9 ArgumentsNode
 N 10 LocalVariableReadNode
@@ -31,6 +32,7 @@ R 6 receiver 7
 N 11 ArgumentsNode
 N 12 StringNode
 S 12 content !
+I 12 fzl 1
 A 11 arguments 12
 R 6 arguments 11
 R 6 block -1
@@ -46,6 +48,7 @@ R 14 receiver -1
 N 15 ArgumentsNode
 N 16 StringNode
 S 16 content world
+I 16 fzl 1
 A 15 arguments 16
 R 14 arguments 15
 R 14 block -1

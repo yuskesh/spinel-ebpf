@@ -456,6 +456,8 @@ int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, 
     static struct log_rec_raw raw[OTLP_MAX_LOGS];
     struct log_collector coll = { raw, 0, OTLP_MAX_LOGS, 1 /* is_str */ };
     if (otlp_drain(obj, map_name, log_rb_cb, &coll) != 0) return -1;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -501,6 +503,19 @@ int spnl_otlp_audit_span_push_obj(struct bpf_object *obj, const char *map_name, 
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);   /* end of the cycle: flush the remainder, losing nothing */
+    /* One span is three str records (path/comm/parent), so `out` is counted in
+     * records too -- otherwise a healthy run would read as if two thirds of the
+     * traffic had been discarded. A leftover fraction is dropped rather than
+     * carried to the next drain: the packed-record channels avoid this triple
+     * desync by construction, but the str path still has it, and it disappearing
+     * silently is exactly what this counter exists to prevent. */
+    spnl_channel_out(map_name, (long)sent * 3);
+    if (coll.n > (size_t)sent * 3)
+        spnl_channel_dropped(map_name, "incomplete_triple",
+            "emit_path / emit_comm / emit_parent_path form one span only as a "
+            "complete set of three. A leftover fraction means the three are "
+            "emitted under different conditions, or a triple was split across a "
+            "drain boundary. Call all three unconditionally in the handler.");
     fprintf(stderr, "[otlp] pushed %d audit spans (%zu str records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -665,6 +680,8 @@ int spnl_otlp_conn_span_push_obj(struct bpf_object *obj, const char *map_name, c
     g_rec_conn_n = 0;
     if (otlp_drain(obj, map_name, conn_rb_cb, &coll) != 0) return -1;
     g_rec_conn_n = (int)coll.n;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -681,6 +698,7 @@ int spnl_otlp_conn_span_push_obj(struct bpf_object *obj, const char *map_name, c
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)sent);
     fprintf(stderr, "[otlp] pushed %d conn spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -696,7 +714,14 @@ int spnl_rec_conn_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     struct conn_collector coll = { g_rec_conn, 0, OTLP_MAX_LOGS };
     g_rec_conn_n = 0;
     if (otlp_drain_ms(obj, map_name, conn_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
     g_rec_conn_n = (int)coll.n;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
+       record cannot filter one either. */
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
     return g_rec_conn_n;
 }
 
@@ -803,6 +828,8 @@ int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, co
     g_rec_dns_n = 0;
     if (otlp_drain(obj, map_name, dns_rb_cb, &coll) != 0) return -1;
     g_rec_dns_n = (int)coll.n;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -814,11 +841,21 @@ int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, co
         otlp_generic_span_t s;
         otlp_kv_t attrs[8];
         static char namebuf[160];
-        if (!dns_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) continue;
+        if (!dns_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) {
+            /* The channel's egress contract says a record whose QNAME does not
+             * parse produces no span. Counting it here turns that silent
+             * discard into something a reader can see. */
+            spnl_channel_dropped(map_name, "unparseable_qname",
+                "the record's raw bytes are not a DNS query. emit_dns expects the "
+                "payload of a UDP send to port 53 -- check the attach point "
+                "(udp_sendmsg) and the port filter (dport == 13568).");
+            continue;
+        }
         otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)sent);
     fprintf(stderr, "[otlp] pushed %d dns spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -852,7 +889,14 @@ int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int tim
     struct dns_collector coll = { g_rec_dns, 0, OTLP_MAX_LOGS };
     g_rec_dns_n = 0;
     if (otlp_drain_ms(obj, map_name, dns_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
     g_rec_dns_n = (int)coll.n;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
+       record cannot filter one either. */
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
     return g_rec_dns_n;
 }
 
@@ -969,6 +1013,8 @@ int spnl_otlp_l7_span_push_obj(struct bpf_object *obj, const char *map_name, con
     g_rec_l7_n = 0;
     if (otlp_drain(obj, map_name, l7_rb_cb, &coll) != 0) return -1;
     g_rec_l7_n = (int)coll.n;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -985,6 +1031,7 @@ int spnl_otlp_l7_span_push_obj(struct bpf_object *obj, const char *map_name, con
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)sent);
     fprintf(stderr, "[otlp] pushed %d l7 spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -1000,7 +1047,14 @@ int spnl_rec_l7_drain_obj(struct bpf_object *obj, const char *map_name, int time
     struct l7_collector coll = { g_rec_l7, 0, OTLP_MAX_LOGS };
     g_rec_l7_n = 0;
     if (otlp_drain_ms(obj, map_name, l7_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
     g_rec_l7_n = (int)coll.n;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
+       record cannot filter one either. */
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
     return g_rec_l7_n;
 }
 
@@ -1149,6 +1203,8 @@ int spnl_otlp_http_span_push_obj(struct bpf_object *obj, const char *map_name, c
     g_rec_http_n = 0;
     if (otlp_drain(obj, map_name, http_rb_cb, &coll) != 0) return -1;
     g_rec_http_n = (int)coll.n;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -1165,6 +1221,7 @@ int spnl_otlp_http_span_push_obj(struct bpf_object *obj, const char *map_name, c
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)sent);
     fprintf(stderr, "[otlp] pushed %d http spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -1180,7 +1237,14 @@ int spnl_rec_http_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     struct http_collector coll = { g_rec_http, 0, OTLP_MAX_LOGS };
     g_rec_http_n = 0;
     if (otlp_drain_ms(obj, map_name, http_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
     g_rec_http_n = (int)coll.n;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
+       record cannot filter one either. */
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
     return g_rec_http_n;
 }
 
@@ -1265,6 +1329,8 @@ int spnl_otlp_redis_span_push_obj(struct bpf_object *obj, const char *map_name, 
     static spnl_rec_redis_t raw[OTLP_MAX_LOGS];
     struct redis_collector coll = { raw, 0, OTLP_MAX_LOGS };
     if (otlp_drain(obj, map_name, redis_rb_cb, &coll) != 0) return -1;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     int64_t off = otlp_ktime_to_unix_off();
     const char *svc = getenv("OTEL_SERVICE_NAME");
@@ -1315,6 +1381,7 @@ int spnl_otlp_redis_span_push_obj(struct bpf_object *obj, const char *map_name, 
         sent++;
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)sent);
     fprintf(stderr, "[otlp] pushed %d redis spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -1566,6 +1633,8 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
     offcpu_set_stack_ctx(obj, stacks_map);   /* the stack map wait.kind resolves against */
     if (otlp_drain(obj, map_name, offcpu_rb_cb, &coll) != 0) return -1;
     g_rec_offcpu_n = (int)coll.n;
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
 
     const char *svc = getenv("OTEL_SERVICE_NAME");
     if (!svc || !svc[0]) svc = g_service;
@@ -1575,6 +1644,11 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
     uint64_t now_unix = (uint64_t)tnow.tv_sec * 1000000000ull + (uint64_t)tnow.tv_nsec;
     otlp_batch_begin(&g_span_batch, endpoint, svc, g_version, "spinel-ebpf");
     int sent = 0;
+    /* `out` is counted in records, not spans: this is the one channel where a
+     * single record can become two spans (the request window and the wait
+     * nested inside it), and counting spans would make out exceed in and turn
+     * the balance into nonsense. */
+    int rec_out = 0;
     for (size_t i = 0; i < coll.n; i++) {
         spnl_rec_offcpu_t *rr = &coll.recs[i];
         /* Render one record as a two-span tree:
@@ -1593,6 +1667,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
 
         otlp_batch_add(&g_span_batch, &parent);   /* the whole tree goes into one batch */
         sent++;
+        rec_out++;
 
         /* Emit the wait child only when there actually was one. A CPU-bound request
          * has no wait and so gets no child, which is an honest waterfall of pure
@@ -1619,6 +1694,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
         }
     }
     otlp_batch_flush_final(&g_span_batch);
+    spnl_channel_out(map_name, (long)rec_out);
     fprintf(stderr, "[otlp] pushed %d offcpu spans (%zu records, %d posts, last HTTP %d) -> %s\n",
             sent, coll.n, g_span_batch.posts, g_span_batch.last_status, endpoint);
     return sent > 0 ? g_span_batch.last_status : 0;
@@ -1639,6 +1715,11 @@ int spnl_rec_offcpu_drain_obj(struct bpf_object *obj, const char *map_name,
     offcpu_set_stack_ctx(obj, stacks_map);
     if (otlp_drain_ms(obj, map_name, offcpu_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
     g_rec_offcpu_n = (int)coll.n;
+    /* Typed consumers drain here, and they are as entitled to the
+       diagnosis as any other path: a consumer that never sees a
+       record cannot filter one either. */
+    spnl_channel_seen(map_name);
+    spnl_channel_in(map_name, (long)coll.n);
     return g_rec_offcpu_n;
 }
 

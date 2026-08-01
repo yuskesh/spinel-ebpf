@@ -28,6 +28,7 @@ N 11 SymbolNode
 S 11 value uprobe
 N 12 StringNode
 S 12 content /opt/app/goclient:crypto/tls.(*Conn).Write
+I 12 fzl 1
 A 10 arguments 11,12
 R 9 arguments 10
 N 13 BlockNode
@@ -73,6 +74,7 @@ N 27 SymbolNode
 S 27 value uprobe
 N 28 StringNode
 S 28 content /opt/app/goclient:crypto/tls.(*Conn).Read
+I 28 fzl 1
 A 26 arguments 27,28
 R 25 arguments 26
 N 29 BlockNode
@@ -116,6 +118,7 @@ N 42 SymbolNode
 S 42 value go_uret
 N 43 StringNode
 S 43 content /opt/app/goclient:crypto/tls.(*Conn).Read
+I 43 fzl 1
 A 41 arguments 42,43
 R 40 arguments 41
 N 44 BlockNode

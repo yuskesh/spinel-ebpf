@@ -28,6 +28,7 @@ N 11 SymbolNode
 S 11 value uprobe
 N 12 StringNode
 S 12 content /usr/bin/bash:readline
+I 12 fzl 1
 A 10 arguments 11,12
 R 9 arguments 10
 N 13 BlockNode

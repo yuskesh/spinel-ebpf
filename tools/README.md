@@ -85,6 +85,29 @@ Taken on the custom eBPF-enabled kernel inside the build container:
 - `runqslower`/`fileslower`: captured run-queue waits of 1.2-14ms and vfs_reads of 603/412ms as threshold crossings.
 
 
+## Checking a probe you just wrote
+
+`invariants.rb` is not an observability tool: it takes a probe and a workload and
+checks the three properties that can be verified **without knowing what the probe
+is trying to measure** — the same workload twice gives the same count
+(determinism), a narrower filter never counts more (monotonicity), and the host's
+BPF state returns to what it was (halting).
+
+```bash
+ruby tools/invariants.rb --probe my_probe.rb --workload 'sh workload.sh'
+ruby tools/invariants.rb --probe wide.rb --narrower narrow.rb --workload 'sh workload.sh'
+```
+
+It reads the machine-readable form of the channel balance report
+(`SPNL_CHANNEL_REPORT=kv`, see the top-level README), so it works for any probe
+with a ring buffer, whether or not it exports telemetry. Exit status is 1 on a
+violation.
+
+Being one file is the point: these three are the only properties that do not
+encode the probe's intent, so the file does not grow as probes do. Passing all
+three is *not* evidence that a probe measures what it was meant to — a probe that
+measures generic UDP while believing it measures DNS passes all three.
+
 ## Extending
 
 Combine the attach kinds the DSL covers (kprobe / uprobe / USDT / tracepoint /

@@ -210,4 +210,65 @@ class IntrospectTest < Minitest::Test
     r = I.report(src, "t.rb")
     assert_match(/calls none of the builtins that write the record \(emit_dns \/ dns_emit\)/, r)
   end
+
+  # ---- `# @intent` / `# @expect`: shown, never checked ----------------------
+
+  ANNOTATED = <<~RB
+    # @intent  record which process resolved which name
+    # @expect  one span per query
+    #          A and AAAA are separate queries, so one resolution emits two
+    # an ordinary comment (not indented enough to be a continuation)
+    def kprobe__udp_sendmsg(sk, msg, len)
+      emit_dns(msg)
+    end
+  RB
+
+  def test_annotations_are_parsed_with_line_and_tag
+    a = I.annotations(ANNOTATED)
+    assert_equal 2, a.length
+    assert_equal ["intent", "expect"], a.map { |x| x[:tag] }
+    assert_equal [1, 2], a.map { |x| x[:line] }
+    assert_match(/which process resolved which name/, a[0][:text])
+  end
+
+  # Continuations are folded in: silently dropping what the author wrote is as
+  # bad as showing something they did not write.
+  def test_indented_continuation_is_folded_into_the_previous_annotation
+    a = I.annotations(ANNOTATED)
+    assert_match(/A and AAAA are separate queries/, a[1][:text])
+  end
+
+  # And the converse: a following comment that is not indented is not absorbed.
+  def test_ordinary_comment_after_an_annotation_is_not_swallowed
+    a = I.annotations(ANNOTATED)
+    refute(a.any? { |x| x[:text].include?("an ordinary comment") },
+           "an under-indented comment was taken as stated intent")
+  end
+
+  # A continuation must be adjacent, so a comment elsewhere in the file cannot
+  # be pulled into an annotation written earlier.
+  def test_continuation_must_be_adjacent
+    src = "# @intent  foo\n\n#     detached, so not a continuation\n"
+    a = I.annotations(src)
+    assert_equal 1, a.length
+    assert_equal "foo", a[0][:text]
+  end
+
+  def test_report_shows_stated_intent_and_says_it_is_not_checked
+    r = I.report(ANNOTATED, "t.rb")
+    assert_match(/stated intent/, r)
+    assert_match(/not checked/, r)
+    assert_match(/@intent/, r)
+  end
+
+  # With none written the section still appears, so the annotations are
+  # discoverable -- but it is **not** a warning. Making it one would be read as
+  # "writing @intent makes the probe safe".
+  def test_missing_intent_is_a_hint_not_a_warning
+    src = "def kprobe__x(a)\n  spnl_emit(a)\nend\n"
+    r = I.report(src, "t.rb")
+    assert_match(/stated intent .*:\n  \(none\)/, r)
+    warn_section = r[/\nwarnings:\n.*/m]
+    refute_match(/@intent/, warn_section)
+  end
 end

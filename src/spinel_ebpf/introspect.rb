@@ -144,6 +144,45 @@ module SpinelEbpf
       { "" => ":int", "_pair" => ":pair", "_str" => ":str", "3" => ":tuple3", "4" => ":tuple4" }[k] || k
     end
 
+    # `# @intent` / `# @expect` -- what the author says the probe records.
+    # **Never checked.**
+    #
+    # Whether a probe measures the thing it was meant to measure cannot be
+    # decided mechanically, and there is a measurement behind that claim: an
+    # audit probe emitting two of its three str records per event balanced
+    # perfectly -- the channel report read `in 30 out 30` -- while the spans it
+    # produced carried the process name in the position that is documented to
+    # hold the file path. Counts agreeing is not evidence that meanings agree.
+    #
+    # So this is not a place to add a check. It is a place to put the author's
+    # claim next to the attributes the probe actually emits, and leave the
+    # comparison to whoever reads them -- a person or a model. Presenting it as
+    # a check is the dangerous way for this feature to break: it would be read
+    # as "writing @intent makes the probe safe".
+    ANNOTATION_RE = /^\s*#\s*@(intent|expect)\b[:：]?\s*(.*)$/.freeze
+    # A continuation line must be indented at least four spaces past the `#`.
+    # Requiring the indent keeps an ordinary comment that happens to follow an
+    # annotation from being swallowed into it: showing something the author did
+    # not write as the author's intent is as bad as dropping what they did.
+    ANNOTATION_CONT_RE = /^\s*#\s{4,}(\S.*)$/.freeze
+
+    def annotations(source)
+      out  = []
+      prev = -1   # last line taken (annotation or continuation); continuations must be adjacent
+      source.each_line.with_index(1) do |ln, i|
+        if (m = ANNOTATION_RE.match(ln))
+          text = m[2].strip
+          next if text.empty?
+          out << { line: i, tag: m[1], text: text }
+          prev = i
+        elsif !out.empty? && i == prev + 1 && (c = ANNOTATION_CONT_RE.match(ln))
+          out.last[:text] = "#{out.last[:text]} #{c[1].strip}"
+          prev = i
+        end
+      end
+      out
+    end
+
     # Human-readable report (String). path is shown in the header.
     def report(source, path)
       es = emits(source)
@@ -273,6 +312,24 @@ module SpinelEbpf
         gated.each do |b, g|
           out << format("    ! %s is only usable in: %s\n", b, g[:valid_secs].join(" | "))
         end
+      end
+
+      # Put the author's claim right next to the attributes that actually go out.
+      # Reconciling the two stays a reader's job -- deliberately not a warning,
+      # because a warning would make writing the annotation look like passing a
+      # check.
+      anns = annotations(source)
+      out << "\nstated intent (material to compare against; **not checked**):\n"
+      if anns.empty?
+        out << "  (none) writing `# @intent <what this probe records>` and\n"
+        out << "         `# @expect <what should come out, in one line>` puts the\n"
+        out << "         claim beside the egress attributes above. Neither is checked.\n"
+      else
+        anns.each { |a| out << format("  L%-4d @%-6s %s\n", a[:line], a[:tag], a[:text]) }
+        out << "  ^ compare these against the egress attributes of the record channels\n"
+        out << "    above. Counts agreeing is not evidence that meanings agree: a probe\n"
+        out << "    whose str triples were split still balanced at in == out while\n"
+        out << "    putting the process name where the file path belongs.\n"
       end
 
       out << "\nwarnings:\n"

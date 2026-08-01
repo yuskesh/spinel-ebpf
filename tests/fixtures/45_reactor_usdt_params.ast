@@ -28,10 +28,13 @@ N 11 SymbolNode
 S 11 value usdt
 N 12 StringNode
 S 12 content /usr/lib/aarch64-linux-gnu/libstdc++.so.6
+I 12 fzl 1
 N 13 StringNode
 S 13 content libstdcxx
+I 13 fzl 1
 N 14 StringNode
 S 14 content throw
+I 14 fzl 1
 A 10 arguments 11,12,13,14
 R 9 arguments 10
 N 15 BlockNode

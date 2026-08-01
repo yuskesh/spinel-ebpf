@@ -16,6 +16,10 @@
  * that callers using read_line invoke instead.
  */
 #include "sp_net.h"   /* upstream decls: sp_net_close / sp_net_recv_some / sp_net_shutdown_requested */
+#include "sp_alloc.h" /* sp_ffi_bin_len: upstream's binary-safe FFI return contract.
+                         It used to be sp_net_bin_len, declared in sp_net.h; upstream
+                         renamed it and moved it here when it stopped being specific
+                         to sockets and became the contract for any :binstr return. */
 
 /* read_line-aware variants are part of this TU's contract; declare for callers. */
 void        sp_net_read_line_reset(int fd);
@@ -151,11 +155,11 @@ const char *sp_net_rl_recv_some(int fd, int maxlen) {
     static char buf[SP_NET_BUFSIZE];
     if (maxlen <= 0 || maxlen >= SP_NET_BUFSIZE) maxlen = SP_NET_BUFSIZE - 1;
     int rem = sp_net_read_line_buffered_remaining(fd, buf, maxlen);
-    /* publish sp_net_bin_len so the FFI `:binstr` return mode is binary-safe
+    /* publish sp_ffi_bin_len so the FFI `:binstr` return mode is binary-safe
        on the read_line-buffered path too (the upstream sp_net_recv_some path below
        already sets it). Needed when a body with embedded NULs follows headers. */
-    if (rem > 0) { buf[rem] = '\0'; sp_net_bin_len = rem; return buf; }
-    return sp_net_recv_some(fd, maxlen);   /* upstream verbatim recv (sets sp_net_bin_len) */
+    if (rem > 0) { buf[rem] = '\0'; sp_ffi_bin_len = rem; return buf; }
+    return sp_net_recv_some(fd, maxlen);   /* upstream verbatim recv (sets sp_ffi_bin_len) */
 }
 
 /* ---------- zero-copy static file ---------- */
@@ -290,7 +294,7 @@ int sp_pty_set_winsize(int fd, int rows, int cols) {
 static unsigned char sp_pty_buf[SP_NET_BUFSIZE];
 
 /* read up to maxlen bytes from the pty master; binary-safe for the FFI :binstr
- * return mode (byte count published in sp_net_bin_len). "" (len 0) = EOF/error. */
+ * return mode (byte count published in sp_ffi_bin_len). "" (len 0) = EOF/error. */
 const char *sp_pty_read(int fd, int maxlen) {
     if (maxlen <= 0 || maxlen > SP_NET_BUFSIZE - 1) maxlen = SP_NET_BUFSIZE - 1;
     ssize_t n;
@@ -301,7 +305,7 @@ const char *sp_pty_read(int fd, int maxlen) {
         n = 0; break;
     }
     sp_pty_buf[n] = '\0';
-    sp_net_bin_len = (int)n;
+    sp_ffi_bin_len = (int)n;
     return (const char *)sp_pty_buf;
 }
 

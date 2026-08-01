@@ -54,7 +54,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 SPINEL_REPO="${SPINEL_REPO:-https://github.com/yuskesh/spinel.git}"
-SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.07.21}"
+SPINEL_REF="${SPINEL_REF:-spinel-ebpf-base-2026.08.02}"
 SPINEL_DIR="${SPINEL_DIR:-$HERE/deps/spinel}"
 MBEDTLS_REPO="${MBEDTLS_REPO:-https://github.com/Mbed-TLS/mbedtls.git}"
 MBEDTLS_REF="${MBEDTLS_REF:-v3.6.6}"

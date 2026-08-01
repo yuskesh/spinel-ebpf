@@ -1,7 +1,7 @@
 # `:binstr` FFI return mode — binary-safe recv.
 #
 # `:str` builds the Ruby String up to the first NUL (C-string); `:binstr` builds
-# it from exactly `sp_net_bin_len` bytes, so binary payloads with embedded NULs
+# it from exactly `sp_ffi_bin_len` bytes, so binary payloads with embedded NULs
 # survive — the basis for binary protocols (WebSocket frames, binary uploads).
 # spinel also sets TCP_NODELAY on accepted fds automatically.
 #

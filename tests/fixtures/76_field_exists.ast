@@ -28,8 +28,10 @@ N 11 LocalVariableReadNode
 S 11 name sk
 N 12 StringNode
 S 12 content sock
+I 12 fzl 1
 N 13 StringNode
 S 13 content sk_sndbuf
+I 13 fzl 1
 A 10 arguments 11,12,13
 R 9 arguments 10
 R 9 block -1

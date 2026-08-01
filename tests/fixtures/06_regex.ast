@@ -51,6 +51,7 @@ R 18 receiver -1
 N 19 ArgumentsNode
 N 20 StringNode
 S 20 content a@b.com
+I 20 fzl 1
 A 19 arguments 20
 R 18 arguments 19
 R 18 block -1
@@ -69,6 +70,7 @@ R 23 receiver -1
 N 24 ArgumentsNode
 N 25 StringNode
 S 25 content nope
+I 25 fzl 1
 A 24 arguments 25
 R 23 arguments 24
 R 23 block -1

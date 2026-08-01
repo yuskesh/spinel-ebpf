@@ -281,6 +281,76 @@ generator — a person or a model — can read the contract instead of guessing,
 See `spinel-ebpf --help` for the full flag set (`--instrument*`, `--int-overflow`,
 `--amp-*`, etc.).
 
+## When a probe produces nothing: `SPNL_CHANNEL_REPORT`
+
+A probe that compiles, verifies, attaches and then produces an empty result is the
+most common way to be wrong here, and the least self-announcing: nothing errors and
+nothing warns. Set `SPNL_CHANNEL_REPORT=1` and every probe prints, on exit, how many
+records came out of each ring buffer and what became of them.
+
+```
+[spinel-ebpf] channel balance
+  audit_dns_dns_events    in 412   out 412
+```
+
+The counters live in the drain layer, not in the exporter, so a probe that only
+prints lines to a console gets the same diagnosis as one that ships spans. Three
+failures are reported in deliberately different wording, because the advice for each
+is different:
+
+```
+  probe_events            ** never drained **
+                            the probe writes to this ringbuf but no userspace code
+                            reads it, so every record was discarded by the kernel.
+```
+The kernel side is fine; the userspace half is missing. `spinel-ebpf describe` names
+the export call for that channel — call it, or consume the channel with `on_emit`.
+
+```
+  probe_events            in 0   ** nothing came out **
+```
+The channel was drained cleanly and no record ever arrived. The attach point never
+fired, or the probe's own filter rejects everything. (`lsm/*` programs need
+`lsm=...,bpf` on the kernel command line; `fmod_ret/*` do not.)
+
+```
+  audit_dns_dns_events    in 3   dropped 3
+                            unparseable_qname: 3   ** suspicious **
+                            the record's raw bytes are not a DNS query. ...
+```
+Records arrived but the runtime discarded them, because they do not satisfy the
+channel's contract. Each drop reason carries what to check. `** suspicious **`
+appears only when the drops dominate the traffic — discarding some records is
+normal, discarding nearly all of them usually means the attach point is wrong.
+
+Records that the probe's *own* consumer skipped are counted separately as
+`filtered` and are never flagged. Emitting broadly and narrowing in userspace is a
+design this project recommends, and a warning there would contradict it.
+
+Two other values:
+
+```sh
+SPNL_CHANNEL_REPORT=0    # silent
+SPNL_CHANNEL_REPORT=kv   # one machine-readable line per channel:
+                         #   spnl.channel <name> drained=1 in=412 out=412 dropped=0 filtered=0
+```
+
+`kv` exists so that tools parse a stable projection rather than the prose; the prose
+is meant to keep improving, and anything parsing it would make every improvement a
+breaking change.
+
+The report is armed by the first drain and prints on every exit path, including
+`timeout N` and Ctrl-C — the ways these probes normally end, and the ones a plain
+`atexit` handler misses. It is a diagnosis, never a gate: it does not change the
+exit status.
+
+**What it cannot catch.** It counts records; it does not know what they mean. A
+probe that measures generic UDP while believing it measures DNS is deterministic,
+balanced, and completely wrong — its report reads `in 30 out 30`. Judging that a
+probe measures the thing it was meant to measure still needs intent, which is why
+`spinel-ebpf describe` prints the author's stated intent next to the attributes the
+probe actually emits, and leaves the comparison to a reader.
+
 ## Repository layout
 
 ```

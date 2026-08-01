@@ -101,6 +101,7 @@ R 34 receiver -1
 N 35 ArgumentsNode
 N 36 StringNode
 S 36 content [demo]%20XDP%20ICMP%20drop%20attached.%20ping%20will%20time%20out;%20counters%20via%20bpftool.
+I 36 fzl 1
 A 35 arguments 36
 R 34 arguments 35
 R 34 block -1
@@ -121,6 +122,7 @@ R 40 receiver -1
 N 41 ArgumentsNode
 N 42 StringNode
 S 42 content [demo]%20exiting;%20ping%20should%20work%20again%20after%20destructor%20detaches.
+I 42 fzl 1
 A 41 arguments 42
 R 40 arguments 41
 R 40 block -1

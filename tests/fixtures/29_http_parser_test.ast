@@ -87,6 +87,7 @@ R 31 receiver 32
 N 33 ArgumentsNode
 N 34 StringNode
 S 34 content %20
+I 34 fzl 1
 A 33 arguments 34
 R 31 arguments 33
 R 31 block -1
@@ -123,10 +124,13 @@ R 44 receiver 45
 N 46 ArgumentsNode
 N 47 StringNode
 S 47 content 
+I 47 fzl 1
 N 48 StringNode
 S 48 content 
+I 48 fzl 1
 N 49 StringNode
 S 49 content 
+I 49 fzl 1
 N 50 IntegerNode
 I 50 value 0
 A 46 arguments 47,48,49,50
@@ -198,6 +202,7 @@ R 70 receiver 71
 N 72 ArgumentsNode
 N 73 StringNode
 S 73 content HTTP/1.0
+I 73 fzl 1
 A 72 arguments 73
 R 70 arguments 72
 R 70 block -1
@@ -211,6 +216,7 @@ R 74 receiver 75
 N 76 ArgumentsNode
 N 77 StringNode
 S 77 content HTTP/1.1
+I 77 fzl 1
 A 76 arguments 77
 R 74 arguments 76
 R 74 block -1
@@ -265,6 +271,7 @@ R 88 receiver 89
 N 93 ArgumentsNode
 N 94 StringNode
 S 94 content /
+I 94 fzl 1
 A 93 arguments 94
 R 88 arguments 93
 R 88 block -1
@@ -340,6 +347,7 @@ R 119 receiver 120
 N 121 ArgumentsNode
 N 122 StringNode
 S 122 content :%20method=
+I 122 fzl 1
 A 121 arguments 122
 R 119 arguments 121
 R 119 block -1
@@ -362,6 +370,7 @@ R 117 receiver 118
 N 126 ArgumentsNode
 N 127 StringNode
 S 127 content %20path=
+I 127 fzl 1
 A 126 arguments 127
 R 117 arguments 126
 R 117 block -1
@@ -384,6 +393,7 @@ R 115 receiver 116
 N 131 ArgumentsNode
 N 132 StringNode
 S 132 content %20version=
+I 132 fzl 1
 A 131 arguments 132
 R 115 arguments 131
 R 115 block -1
@@ -406,6 +416,7 @@ R 113 receiver 114
 N 136 ArgumentsNode
 N 137 StringNode
 S 137 content %20valid=
+I 137 fzl 1
 A 136 arguments 137
 R 113 arguments 136
 R 113 block -1
@@ -443,12 +454,14 @@ R 142 receiver -1
 N 143 ArgumentsNode
 N 144 StringNode
 S 144 content get_root
+I 144 fzl 1
 N 145 CallNode
 S 145 name parse_request_line
 R 145 receiver -1
 N 146 ArgumentsNode
 N 147 StringNode
 S 147 content GET%20/%20HTTP/1.0
+I 147 fzl 1
 A 146 arguments 147
 R 145 arguments 146
 R 145 block -1
@@ -463,12 +476,14 @@ R 148 receiver -1
 N 149 ArgumentsNode
 N 150 StringNode
 S 150 content get_health
+I 150 fzl 1
 N 151 CallNode
 S 151 name parse_request_line
 R 151 receiver -1
 N 152 ArgumentsNode
 N 153 StringNode
 S 153 content GET%20/health%20HTTP/1.0
+I 153 fzl 1
 A 152 arguments 153
 R 151 arguments 152
 R 151 block -1
@@ -483,12 +498,14 @@ R 154 receiver -1
 N 155 ArgumentsNode
 N 156 StringNode
 S 156 content get_deep_path
+I 156 fzl 1
 N 157 CallNode
 S 157 name parse_request_line
 R 157 receiver -1
 N 158 ArgumentsNode
 N 159 StringNode
 S 159 content GET%20/a/b/c%20HTTP/1.0
+I 159 fzl 1
 A 158 arguments 159
 R 157 arguments 158
 R 157 block -1
@@ -503,12 +520,14 @@ R 160 receiver -1
 N 161 ArgumentsNode
 N 162 StringNode
 S 162 content get_v11
+I 162 fzl 1
 N 163 CallNode
 S 163 name parse_request_line
 R 163 receiver -1
 N 164 ArgumentsNode
 N 165 StringNode
 S 165 content GET%20/%20HTTP/1.1
+I 165 fzl 1
 A 164 arguments 165
 R 163 arguments 164
 R 163 block -1
@@ -523,12 +542,14 @@ R 166 receiver -1
 N 167 ArgumentsNode
 N 168 StringNode
 S 168 content post
+I 168 fzl 1
 N 169 CallNode
 S 169 name parse_request_line
 R 169 receiver -1
 N 170 ArgumentsNode
 N 171 StringNode
 S 171 content POST%20/api%20HTTP/1.0
+I 171 fzl 1
 A 170 arguments 171
 R 169 arguments 170
 R 169 block -1
@@ -543,12 +564,14 @@ R 172 receiver -1
 N 173 ArgumentsNode
 N 174 StringNode
 S 174 content head
+I 174 fzl 1
 N 175 CallNode
 S 175 name parse_request_line
 R 175 receiver -1
 N 176 ArgumentsNode
 N 177 StringNode
 S 177 content HEAD%20/robots.txt%20HTTP/1.0
+I 177 fzl 1
 A 176 arguments 177
 R 175 arguments 176
 R 175 block -1
@@ -563,12 +586,14 @@ R 178 receiver -1
 N 179 ArgumentsNode
 N 180 StringNode
 S 180 content delete
+I 180 fzl 1
 N 181 CallNode
 S 181 name parse_request_line
 R 181 receiver -1
 N 182 ArgumentsNode
 N 183 StringNode
 S 183 content DELETE%20/items/42%20HTTP/1.1
+I 183 fzl 1
 A 182 arguments 183
 R 181 arguments 182
 R 181 block -1
@@ -583,12 +608,14 @@ R 184 receiver -1
 N 185 ArgumentsNode
 N 186 StringNode
 S 186 content empty_line
+I 186 fzl 1
 N 187 CallNode
 S 187 name parse_request_line
 R 187 receiver -1
 N 188 ArgumentsNode
 N 189 StringNode
 S 189 content 
+I 189 fzl 1
 A 188 arguments 189
 R 187 arguments 188
 R 187 block -1
@@ -603,12 +630,14 @@ R 190 receiver -1
 N 191 ArgumentsNode
 N 192 StringNode
 S 192 content missing_path
+I 192 fzl 1
 N 193 CallNode
 S 193 name parse_request_line
 R 193 receiver -1
 N 194 ArgumentsNode
 N 195 StringNode
 S 195 content GET%20HTTP/1.0
+I 195 fzl 1
 A 194 arguments 195
 R 193 arguments 194
 R 193 block -1
@@ -623,12 +652,14 @@ R 196 receiver -1
 N 197 ArgumentsNode
 N 198 StringNode
 S 198 content extra_token
+I 198 fzl 1
 N 199 CallNode
 S 199 name parse_request_line
 R 199 receiver -1
 N 200 ArgumentsNode
 N 201 StringNode
 S 201 content GET%20/%20HTTP/1.0%20trailing
+I 201 fzl 1
 A 200 arguments 201
 R 199 arguments 200
 R 199 block -1
@@ -643,12 +674,14 @@ R 202 receiver -1
 N 203 ArgumentsNode
 N 204 StringNode
 S 204 content bad_version
+I 204 fzl 1
 N 205 CallNode
 S 205 name parse_request_line
 R 205 receiver -1
 N 206 ArgumentsNode
 N 207 StringNode
 S 207 content GET%20/%20HTTP/2.0
+I 207 fzl 1
 A 206 arguments 207
 R 205 arguments 206
 R 205 block -1
@@ -663,12 +696,14 @@ R 208 receiver -1
 N 209 ArgumentsNode
 N 210 StringNode
 S 210 content no_version
+I 210 fzl 1
 N 211 CallNode
 S 211 name parse_request_line
 R 211 receiver -1
 N 212 ArgumentsNode
 N 213 StringNode
 S 213 content GET%20/
+I 213 fzl 1
 A 212 arguments 213
 R 211 arguments 212
 R 211 block -1
@@ -683,12 +718,14 @@ R 214 receiver -1
 N 215 ArgumentsNode
 N 216 StringNode
 S 216 content relative_path
+I 216 fzl 1
 N 217 CallNode
 S 217 name parse_request_line
 R 217 receiver -1
 N 218 ArgumentsNode
 N 219 StringNode
 S 219 content GET%20foo%20HTTP/1.0
+I 219 fzl 1
 A 218 arguments 219
 R 217 arguments 218
 R 217 block -1
@@ -703,12 +740,14 @@ R 220 receiver -1
 N 221 ArgumentsNode
 N 222 StringNode
 S 222 content uppercase_get
+I 222 fzl 1
 N 223 CallNode
 S 223 name parse_request_line
 R 223 receiver -1
 N 224 ArgumentsNode
 N 225 StringNode
 S 225 content get%20/%20HTTP/1.0
+I 225 fzl 1
 A 224 arguments 225
 R 223 arguments 224
 R 223 block -1
