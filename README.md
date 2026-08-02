@@ -198,6 +198,19 @@ the tracing stack. On Apple Silicon macOS, build one and install it into Apple
 [apple-container-ebpf-kernel](https://github.com/yuskesh/apple-container-ebpf-kernel)
 repo. (You can *compile* without it — you just can't load and run the result.)
 
+One runtime note: probes that use the BPF LSM (`SEC("lsm/…")`) additionally need
+`bpf` in the kernel's active `lsm=` list, which on Apple `container` 1.2.0+ is a
+per-run flag:
+
+```sh
+container run --kernel-arg lsm=lockdown,capability,landlock,yama,apparmor,bpf …
+```
+
+Pass the full list — a user-supplied `lsm=` replaces the runtime default
+verbatim. Everything else (`fmod_ret`, kprobes, tracepoints, XDP, `struct_ops`)
+needs no flag. Without it the probe attaches and never fires, which the channel
+report below diagnoses.
+
 ### 2. Build the spinel compiler dependency
 
 spinel-ebpf builds against a small [fork of spinel](https://github.com/yuskesh/spinel)
@@ -311,7 +324,9 @@ the export call for that channel — call it, or consume the channel with `on_em
 ```
 The channel was drained cleanly and no record ever arrived. The attach point never
 fired, or the probe's own filter rejects everything. (`lsm/*` programs need
-`lsm=...,bpf` on the kernel command line; `fmod_ret/*` do not.)
+`lsm=...,bpf` on the kernel command line — on Apple `container` 1.2.0+ that is
+`container run --kernel-arg lsm=lockdown,capability,landlock,yama,apparmor,bpf`;
+`fmod_ret/*` do not.)
 
 ```
   audit_dns_dns_events    in 3   dropped 3
