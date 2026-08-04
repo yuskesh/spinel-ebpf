@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>   /* getenv (OTEL_RESOURCE_ATTRIBUTES) */
 #include <string.h>
 
 #include <pb_encode.h>
@@ -69,7 +70,7 @@ static inline bool otlp_put_kv_int(pb_ostream_t *st, const pb_field_iter_t *fld,
 }
 
 /*
- * Resource.attributes callback。arg = otlp_resource_t*。
+ * Resource.attributes callback; arg is an otlp_resource_t*.
  * Alongside service.name (and service.version) this puts the semconv-compatible
  * common attributes on every signal: service.instance.id and
  * telemetry.sdk.{name,language,version}. Note one deliberate divergence from the
@@ -77,6 +78,7 @@ static inline bool otlp_put_kv_int(pb_ostream_t *st, const pb_field_iter_t *fld,
  * exporter keeps emitting it.
  */
 typedef struct { const char *name; const char *version; } otlp_resource_t;
+
 static inline bool otlp_enc_resource_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_resource_t *r = (const otlp_resource_t *)(*arg);
     if (r->name && r->name[0] && !otlp_put_kv_str(st, fld, "service.name", r->name)) return false;
@@ -85,6 +87,16 @@ static inline bool otlp_enc_resource_attrs(pb_ostream_t *st, const pb_field_iter
     if (!otlp_put_kv_str(st, fld, "telemetry.sdk.name", "spinel-ebpf")) return false;
     if (!otlp_put_kv_str(st, fld, "telemetry.sdk.language", "ruby")) return false;
     if (!otlp_put_kv_str(st, fld, "telemetry.sdk.version", "0")) return false;
+    /* The operator's own labels come LAST -- so that a label cannot silently
+     * shadow service.name / telemetry.sdk.*, and "who produced this" stays
+     * answerable no matter what got set. Shape only is enforced (the shared
+     * parser); the content is the operator's assertion, and this file is in no
+     * position to check it -- which is precisely why it has to be theirs and
+     * not the source's `# @intent` comment. */
+    otlp_kv_t ra[OTLP_ENV_RESOURCE_ATTRS_MAX];
+    int nra = otlp_env_kv_list("OTEL_RESOURCE_ATTRIBUTES", ra, OTLP_ENV_RESOURCE_ATTRS_MAX);
+    for (int i = 0; i < nra; i++)
+        if (!otlp_put_kv_str(st, fld, ra[i].key, ra[i].val)) return false;
     return true;
 }
 

@@ -1,0 +1,57 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/158_attach_multi_empty_list.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name FileOps
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 ArrayNode
+A 12 elements 
+A 10 arguments 11,12
+R 9 arguments 10
+N 13 BlockNode
+N 14 StatementsNode
+N 15 InstanceVariableWriteNode
+S 15 name @n
+N 16 CallNode
+S 16 name +
+N 17 InstanceVariableReadNode
+S 17 name @n
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 1
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+A 14 body 15
+R 13 body 14
+R 9 block 13
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

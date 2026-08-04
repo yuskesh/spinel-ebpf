@@ -43,7 +43,14 @@ class RecordGateTest < Minitest::Test
 
   def test_snapshot_is_the_current_contract
     _hdr, js = GATE.regenerate
-    assert_equal File.read(GATE::SNAPSHOT), GATE.snapshot_text(GATE.project(JSON.parse(js))),
+    # Compare STRUCTURE, not text. `JSON.pretty_generate` writes an empty array
+    # as `[]` from json 2.12 on and as `[\n\n]` before that, so a text comparison
+    # can only be green on one of the two hosts this suite runs on (measured:
+    # json 2.12.2 on the development host, 2.7.2 in the build container). The
+    # contract is the structure; where the generator puts whitespace is not part
+    # of it.
+    assert_equal JSON.parse(File.read(GATE::SNAPSHOT)),
+                 JSON.parse(GATE.snapshot_text(GATE.project(JSON.parse(js)))),
                  "the snapshot is out of date (even an append-only change updates the baseline, " \
                  "which is then committed)"
   end
@@ -70,6 +77,12 @@ class RecordGateTest < Minitest::Test
           "egress" => { "push_fn" => "spnl_otlp_demo_span_push", "span_name" => "demo {x}",
                         "span_kind" => "INTERNAL", "attributes" => %w[a.b c.d],
                         "enrichers" => %w[k8s] },
+          "metrics" => [
+            { "id" => "count", "name" => "spnl.demo.count", "kind" => "counter",
+              "unit" => "{demo}", "value_from" => "", "bounds" => "", "series_bound" => 3,
+              "labels" => [{ "key" => "spnl.demo.kind", "from" => "kind", "bound" => 3,
+                             "bound_from" => "value_map", "fallback" => "other" }] },
+          ],
           "consumer" => { "drain_fn" => "spnl_rec_demo_drain", "to_span_fn" => "spnl_rec_demo_to_span",
                           "properties" => [{ "name" => "pid", "kind" => "field",
                                              "expose" => "int", "ffi" => "spnl_rec_demo_pid" }] },
@@ -249,6 +262,98 @@ class RecordGateTest < Minitest::Test
     old = JSON.parse(JSON.generate(base))
     old["channels"]["demo"].delete("consumer")
     assert_empty GATE.violations(old, base)
+  end
+
+  # --- the metric contract --------------------------------------------------
+  #
+  # A metric is queried by name from outside the process, so the breaking changes
+  # are the ones that make a dashboard stop finding it (removed / renamed /
+  # re-typed) or start answering a different question (a label that vanishes
+  # merges series that were distinguished; a label that keeps its key and changes
+  # its source keeps the query working and changes what it means -- the worst of
+  # the three, because it is the only one nothing else can notice).
+
+  def test_removing_a_metric_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"] = [] }
+    assert_match(/metric `count` was removed/, v.join("\n"))
+  end
+
+  def test_renaming_a_metric_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"][0]["name"] = "spnl.demo.total" }
+    assert_match(/metric `count` name changed/, v.join("\n"))
+  end
+
+  def test_changing_a_metric_kind_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"][0]["kind"] = "histogram" }
+    assert_match(/metric `count` kind changed/, v.join("\n"))
+  end
+
+  def test_changing_a_metric_unit_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"][0]["unit"] = "s" }
+    assert_match(/metric `count` unit changed/, v.join("\n"))
+  end
+
+  def test_removing_a_metric_label_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"][0]["labels"] = [] }
+    assert_match(/lost label `spnl.demo.kind`/, v.join("\n"))
+  end
+
+  def test_repointing_a_label_at_another_property_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["metrics"][0]["labels"][0]["from"] = "pid" }
+    assert_match(/label `spnl.demo.kind` now reads `pid`/, v.join("\n"))
+  end
+
+  def test_adding_a_metric_is_allowed
+    v = mutate do |d|
+      d["channels"]["demo"]["metrics"] << {
+        "id" => "dur", "name" => "spnl.demo.duration", "kind" => "histogram", "unit" => "s",
+        "value_from" => "duration_ns", "bounds" => "otel_duration_s", "series_bound" => 1,
+        "labels" => [],
+      }
+    end
+    assert_empty v
+  end
+
+  # Widening a permitted set raises the ceiling. That is allowed -- it is how a
+  # status code gets added -- but the number lands in the snapshot, so it can only
+  # move through a reviewed diff. This test pins that it is allowed, so that the
+  # rule above is not read as "the bound may never change".
+  def test_widening_a_labels_bound_is_allowed_but_visible
+    v = mutate do |d|
+      m = d["channels"]["demo"]["metrics"][0]
+      m["labels"][0]["bound"] = 5
+      m["series_bound"] = 5
+    end
+    assert_empty v
+    refute_equal base["channels"]["demo"]["metrics"][0]["series_bound"], 5,
+                 "this test depends on series_bound being carried in the snapshot"
+  end
+
+  # The centre of the metric contract: series_bound has to be a number that can be
+  # computed from the declaration alone. Check that on the **committed** generated
+  # artifact rather than on a synthetic projection -- the product of the label
+  # bounds must be the declared series_bound.
+  def test_declared_series_bound_is_the_product_of_its_label_bounds
+    doc = JSON.parse(File.read(File.expand_path("../../src/spinel_ebpf/record_schema_gen.json", __dir__)))
+    seen = 0
+    doc["channels"].each do |c|
+      Array(c["metrics"]).each do |m|
+        want = Array(m["labels"]).map { |l| l["bound"] }.reduce(1, :*)
+        assert_equal want, m["series_bound"],
+                     "#{c['id']}.#{m['id']}: series_bound is not the product of its label bounds"
+        Array(m["labels"]).each do |l|
+          assert_includes %w[declared_set value_map], l["bound_from"],
+                          "#{l['key']}: the bound does not say where it comes from"
+          if l["bound_from"] == "declared_set"
+            assert_equal Array(l["values"]).length + 1, l["bound"],
+                         "#{l['key']}: bound does not equal \"the set plus its fallback\""
+            refute_empty l["fallback"].to_s, "#{l['key']}: nothing outside the set has anywhere to go"
+          end
+        end
+        seen += 1
+      end
+    end
+    assert_operator seen, :>, 0, "no metric is declared at all (this test would be idling)"
   end
 
   def test_removing_a_channel_is_rejected

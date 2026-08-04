@@ -1,0 +1,25 @@
+SPINEL-IR v1
+SA @meth_names 2 kprobe__vfs_read|fmod_ret__security_file_open
+SA @meth_param_names 2 file|file,ret
+SA @meth_param_types 2 int|int,int
+SA @meth_return_types 2 int|int
+IA @meth_body_ids 2 7,26
+SA @cls_names 1 Toplevel
+SA @cls_parents 1 
+SA @cls_ivar_names 1 @hits
+SA @cls_ivar_types 1 int
+SA @cls_meth_names 1 
+SA @cls_meth_returns 1 
+SA @cls_meth_ptypes 1 
+SA @cls_meth_params 1 
+SA @cls_meth_bodies 1 
+SN 7 file
+ST 7 unknown
+SN 26 file|ret
+ST 26 unknown|unknown
+INT @needs_regexp 0
+INT @needs_rand 0
+INT @needs_lambda 0
+INT @needs_file_io 0
+INT @needs_fiber 0
+INT @needs_bigint 0

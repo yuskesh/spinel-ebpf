@@ -9,5 +9,5 @@
         void *_tpb@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
         if (_tpb@E@) (void)bpf_probe_read_user(_tp@E@->str, 128, _tpb@E@);
         bpf_ringbuf_submit(_tp@E@, 0);
-    }
+    } else spnl_lost_inc();   /* ring full -> account the dropped record */
 }

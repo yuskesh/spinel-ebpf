@@ -9,6 +9,34 @@
 #include "spnl/types.h"
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
+/* === per-unit ringbuf lost-sample counter ===
+ * A bpf_ringbuf_reserve() that returns NULL (the ring filled faster than
+ * userspace drained it) would otherwise drop the record silently -- invisible to
+ * the drain-layer channel balance report, which can only count what came out.
+ * Every emit else-branch bumps this; the runtime reads it at exit and prints the
+ * 4th balance-report failure ("dropped by the kernel -- ring full").
+ *
+ * One PERCPU_ARRAY slot for the whole unit, not one per channel. Per-channel
+ * attribution would need a codegen-assigned slot table shared with the glue
+ * generator (two generators agreeing on indices) -- a unit-wide total answers the
+ * question that matters (were records dropped by ring-full, and about how many)
+ * with one map and no cross-generator contract. per-CPU so the bump needs no
+ * atomic; the runtime sums the slots. Inspektor Gadget keeps a per-CPU lost
+ * counter the same way. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u64));
+    __uint(max_entries, 1);
+} u_99_emit_path_lost SEC(".maps");
+
+static __always_inline void spnl_lost_inc(void)
+{
+    __u32 _z = 0;
+    __u64 *_l = bpf_map_lookup_elem(&u_99_emit_path_lost, &_z);
+    if (_l) *_l += 1;
+}
+
 /* === per-unit string-event channel === */
 struct u_99_emit_path_str_event {
     struct spnl_event_hdr hdr;
@@ -58,7 +86,7 @@ static __noinline __s64 lsm__file_open_inner(__s64 file, __s64 ret)
             __builtin_memset(_pe5->str, 0, sizeof(_pe5->str));
             bpf_d_path(&((struct file *)(unsigned long)(file))->f_path, _pe5->str, sizeof(_pe5->str));
             bpf_ringbuf_submit(_pe5, 0);
-        }
+        } else spnl_lost_inc();   /* ring full -> account the dropped record */
     }
     return 0;
 }
@@ -84,7 +112,7 @@ static __noinline __s64 fmod_ret__security_file_open_inner(__s64 file, __s64 ret
             __builtin_memset(_pe1->str, 0, sizeof(_pe1->str));
             bpf_d_path(&((struct file *)(unsigned long)(file))->f_path, _pe1->str, sizeof(_pe1->str));
             bpf_ringbuf_submit(_pe1, 0);
-        }
+        } else spnl_lost_inc();   /* ring full -> account the dropped record */
     }
     return ret;
 }

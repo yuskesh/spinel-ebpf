@@ -1,0 +1,83 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/125_mmap_file_path.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @denied
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name lsm__mmap_file
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name file
+N 7 RequiredParameterNode
+S 7 name reqprot
+N 8 RequiredParameterNode
+S 8 name prot
+N 9 RequiredParameterNode
+S 9 name flags
+A 5 requireds 6,7,8,9
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 10 StatementsNode
+N 11 CallNode
+S 11 name emit_path
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 LocalVariableReadNode
+S 13 name file
+A 12 arguments 13
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+N 14 IfNode
+N 15 CallNode
+S 15 name path_starts_with
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 LocalVariableReadNode
+S 17 name file
+N 18 StringNode
+S 18 content /tmp/
+I 18 fzl 1
+A 16 arguments 17,18
+R 15 arguments 16
+R 15 block -1
+S 15 call_operator .
+R 14 predicate 15
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @denied
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @denied
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 IntegerNode
+I 25 value -1
+A 19 body 20,25
+R 14 statements 19
+N 26 ElseNode
+N 27 StatementsNode
+N 28 IntegerNode
+I 28 value 0
+A 27 body 28
+R 26 statements 27
+R 14 subsequent 26
+A 10 body 11,14
+R 4 body 10
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

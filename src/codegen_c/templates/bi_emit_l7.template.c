@@ -20,7 +20,7 @@
                 _le@E@->start_ktime = _lst@E@->start_ns;
                 _le@E@->duration_ns = bpf_ktime_get_ns() - _lst@E@->start_ns;
                 bpf_ringbuf_submit(_le@E@, 0);
-            }
+            } else spnl_lost_inc();   /* ring full -> account the dropped record */
             bpf_map_delete_elem(&@UNIT@_req_start, &_lsk@E@);
         }
     }

@@ -13,5 +13,5 @@
         void *_lb@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
         if (_lb@E@ && _ln@E@) (void)bpf_probe_read_user(_ls@E@->raw, _ln@E@, _lb@E@);   /* len == bytes copied, byte-exact up to 128 */
         bpf_ringbuf_submit(_ls@E@, 0);
-    }
+    } else spnl_lost_inc();   /* ring full -> account the dropped record */
 }

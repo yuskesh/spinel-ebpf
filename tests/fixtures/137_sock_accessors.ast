@@ -1,0 +1,260 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/137_sock_accessors.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @conns
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @v6
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name kprobe__tcp_sendmsg
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name sk
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 9 StatementsNode
+N 10 IfNode
+N 11 AndNode
+N 12 CallNode
+S 12 name ==
+N 13 CallNode
+S 13 name sock_protocol
+R 13 receiver -1
+N 14 ArgumentsNode
+N 15 LocalVariableReadNode
+S 15 name sk
+A 14 arguments 15
+R 13 arguments 14
+R 13 block -1
+S 13 call_operator .
+R 12 receiver 13
+N 16 ArgumentsNode
+N 17 ConstantReadNode
+S 17 name IPPROTO_TCP
+A 16 arguments 17
+R 12 arguments 16
+R 12 block -1
+S 12 call_operator .
+R 11 left 12
+N 18 CallNode
+S 18 name ==
+N 19 CallNode
+S 19 name sock_state
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name sk
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 receiver 19
+N 22 ArgumentsNode
+N 23 ConstantReadNode
+S 23 name TCP_STATE_ESTABLISHED
+A 22 arguments 23
+R 18 arguments 22
+R 18 block -1
+S 18 call_operator .
+R 11 right 18
+R 10 predicate 11
+N 24 StatementsNode
+N 25 IfNode
+N 26 AndNode
+N 27 CallNode
+S 27 name >=
+N 28 CallNode
+S 28 name sock_dport
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 LocalVariableReadNode
+S 30 name sk
+A 29 arguments 30
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+R 27 receiver 28
+N 31 ArgumentsNode
+N 32 IntegerNode
+I 32 value 8100
+A 31 arguments 32
+R 27 arguments 31
+R 27 block -1
+S 27 call_operator .
+R 26 left 27
+N 33 CallNode
+S 33 name <=
+N 34 CallNode
+S 34 name sock_dport
+R 34 receiver -1
+N 35 ArgumentsNode
+N 36 LocalVariableReadNode
+S 36 name sk
+A 35 arguments 36
+R 34 arguments 35
+R 34 block -1
+S 34 call_operator .
+R 33 receiver 34
+N 37 ArgumentsNode
+N 38 IntegerNode
+I 38 value 8199
+A 37 arguments 38
+R 33 arguments 37
+R 33 block -1
+S 33 call_operator .
+R 26 right 33
+R 25 predicate 26
+N 39 StatementsNode
+N 40 InstanceVariableWriteNode
+S 40 name @conns
+N 41 CallNode
+S 41 name +
+N 42 InstanceVariableReadNode
+S 42 name @conns
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 IntegerNode
+I 44 value 1
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+R 40 value 41
+N 45 CallNode
+S 45 name spnl_emit4
+R 45 receiver -1
+N 46 ArgumentsNode
+N 47 CallNode
+S 47 name sock_dport
+R 47 receiver -1
+N 48 ArgumentsNode
+N 49 LocalVariableReadNode
+S 49 name sk
+A 48 arguments 49
+R 47 arguments 48
+R 47 block -1
+S 47 call_operator .
+N 50 CallNode
+S 50 name sock_sport
+R 50 receiver -1
+N 51 ArgumentsNode
+N 52 LocalVariableReadNode
+S 52 name sk
+A 51 arguments 52
+R 50 arguments 51
+R 50 block -1
+S 50 call_operator .
+N 53 CallNode
+S 53 name sock_daddr
+R 53 receiver -1
+N 54 ArgumentsNode
+N 55 LocalVariableReadNode
+S 55 name sk
+A 54 arguments 55
+R 53 arguments 54
+R 53 block -1
+S 53 call_operator .
+N 56 CallNode
+S 56 name sock_family
+R 56 receiver -1
+N 57 ArgumentsNode
+N 58 LocalVariableReadNode
+S 58 name sk
+A 57 arguments 58
+R 56 arguments 57
+R 56 block -1
+S 56 call_operator .
+A 46 arguments 47,50,53,56
+R 45 arguments 46
+R 45 block -1
+S 45 call_operator .
+N 59 IfNode
+N 60 CallNode
+S 60 name ==
+N 61 CallNode
+S 61 name sock_family
+R 61 receiver -1
+N 62 ArgumentsNode
+N 63 LocalVariableReadNode
+S 63 name sk
+A 62 arguments 63
+R 61 arguments 62
+R 61 block -1
+S 61 call_operator .
+R 60 receiver 61
+N 64 ArgumentsNode
+N 65 ConstantReadNode
+S 65 name AF_INET6
+A 64 arguments 65
+R 60 arguments 64
+R 60 block -1
+S 60 call_operator .
+R 59 predicate 60
+N 66 StatementsNode
+N 67 InstanceVariableWriteNode
+S 67 name @v6
+N 68 CallNode
+S 68 name +
+N 69 InstanceVariableReadNode
+S 69 name @v6
+R 68 receiver 69
+N 70 ArgumentsNode
+N 71 IntegerNode
+I 71 value 1
+A 70 arguments 71
+R 68 arguments 70
+R 68 block -1
+S 68 call_operator .
+R 67 value 68
+N 72 CallNode
+S 72 name spnl_emit_pair
+R 72 receiver -1
+N 73 ArgumentsNode
+N 74 CallNode
+S 74 name sock_daddr6_hi
+R 74 receiver -1
+N 75 ArgumentsNode
+N 76 LocalVariableReadNode
+S 76 name sk
+A 75 arguments 76
+R 74 arguments 75
+R 74 block -1
+S 74 call_operator .
+N 77 CallNode
+S 77 name sock_daddr6_lo
+R 77 receiver -1
+N 78 ArgumentsNode
+N 79 LocalVariableReadNode
+S 79 name sk
+A 78 arguments 79
+R 77 arguments 78
+R 77 block -1
+S 77 call_operator .
+A 73 arguments 74,77
+R 72 arguments 73
+R 72 block -1
+S 72 call_operator .
+A 66 body 67,72
+R 59 statements 66
+R 59 subsequent -1
+A 39 body 40,45,59
+R 25 statements 39
+R 25 subsequent -1
+A 24 body 25
+R 10 statements 24
+R 10 subsequent -1
+A 9 body 10
+R 6 body 9
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

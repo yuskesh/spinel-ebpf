@@ -2,7 +2,53 @@
   "schema": "spinel-ebpf.record-schema/1",
   "generated_by": "tools/gen_record_mirror.c (make -C src/codegen_c mirror)",
   "generated_from": "src/codegen_c/record_schema.h",
-  "note": "Ringbuf record contracts. offset/record_bytes are computed by the generator's layout rule -- the same one the kernel struct and the userspace mirror come from -- so nothing downstream re-derives C alignment. `egress` is what the userspace push_fn makes of one record; layer-2 enrichers (env-gated) may add more attributes. `consumer` is the typed-consumer contract: the exact `ev.<name>` set a Ruby `on_emit :<id>` block may read, and the FFI symbols it lowers to. A derived property carries `cap`: the output capacity, in bytes incl. NUL, that BOTH the accessor and the span builder hand the derivation, declared >= the longest value it can return. A field property has none -- it reads the record's bytes directly, so its width is the field's `bytes`.",
+  "note": "Ringbuf record contracts. offset/record_bytes are computed by the generator's layout rule -- the same one the kernel struct and the userspace mirror come from -- so nothing downstream re-derives C alignment. `egress` is what the userspace push_fn makes of one record; layer-2 enrichers (env-gated) may add more attributes. `consumer` is the typed-consumer contract: the exact `ev.<name>` set a Ruby `on_emit :<id>` block may read, and the FFI symbols it lowers to. A derived property carries `cap`: the output capacity, in bytes incl. NUL, that BOTH the accessor and the span builder hand the derivation, declared >= the longest value it can return. A field property has none -- it reads the record's bytes directly, so its width is the field's `bytes`. `value_maps` is the type-driven half: a property that carries `value_map` draws its value from exactly that closed set, `authority` says where the names come from and `btf_*` is how a test goes and checks that claim against the running kernel.",
+  "value_maps": [
+    {
+      "id": "tcp_state",
+      "authority": "the kernel's own TCP state enum (include/net/tcp_states.h; the same values are frozen into the uapi enum BPF_TCP_* in include/uapi/linux/bpf.h). Both are in vmlinux BTF, so the declaration below is checked against the running kernel rather than trusted",
+      "unknown": "unnamed(%ld)",
+      "arch_invariant": true,
+      "btf_mode": "names",
+      "btf_anchor": "TCP_ESTABLISHED",
+      "btf_prefix": "TCP_",
+      "btf_omit": "TCP_MAX_STATES",
+      "note": "the state a sock was in, spelled as the kernel spells it (without the TCP_ prefix, which is the enum's namespace and not part of the name of the state)",
+      "values": [
+        { "value": 1, "name": "ESTABLISHED" },
+        { "value": 2, "name": "SYN_SENT" },
+        { "value": 3, "name": "SYN_RECV" },
+        { "value": 4, "name": "FIN_WAIT1" },
+        { "value": 5, "name": "FIN_WAIT2" },
+        { "value": 6, "name": "TIME_WAIT" },
+        { "value": 7, "name": "CLOSE" },
+        { "value": 8, "name": "CLOSE_WAIT" },
+        { "value": 9, "name": "LAST_ACK" },
+        { "value": 10, "name": "LISTEN" },
+        { "value": 11, "name": "CLOSING" },
+        { "value": 12, "name": "NEW_SYN_RECV" },
+        { "value": 13, "name": "BOUND_INACTIVE" }
+      ]
+    },
+    {
+      "id": "conn_direction",
+      "authority": "this project's reading of the pre-ESTABLISHED TCP state. The names are this project's (semconv has no connection-direction key); only the two keys come from the kernel enum, and those are checked against its BTF",
+      "unknown": "other",
+      "arch_invariant": true,
+      "btf_mode": "keys",
+      "btf_anchor": "TCP_ESTABLISHED",
+      "btf_prefix": "TCP_",
+      "btf_omit": "",
+      "note": "\"active\" = we initiated, \"passive\" = we accepted, \"other\" = a transition into ESTABLISHED from neither (and, on a probe that emits every transition, any transition at all -- which is what spnl.conn.tcp_state is for)",
+      "values": [
+        { "value": 2, "name": "active" },
+        { "value": 3, "name": "passive" }
+      ]
+    }
+  ],
+  "bounds_sets": [
+    { "id": "otel_duration_s", "unit": "s", "authority": "OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read", "values": [0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10], "note": "seconds. A record carries nanoseconds, so a metric over a *_ns property declares value_unit \"ns\" and the generator emits the ns -> s conversion; the pair of units is checked against a closed list, so an unconverted nanosecond value cannot be silently bucketed against second boundaries" }
+  ],
   "channels": [
     {
       "id": "dns",
@@ -41,11 +87,11 @@
         "send_fn": "spnl_otlp_span_send",
         "flush_fn": "spnl_otlp_span_flush",
         "properties": [
-          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_pid", "source": "pid", "note": "producer tgid (init-ns)" },
-          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_dns_comm", "source": "comm", "note": "bpf_get_current_comm -> process.executable.name" },
-          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_cgid", "source": "cgid", "note": "cgroup id -> k8s.* pod attribution" },
-          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_duration_ns", "source": "duration_ns", "note": "resolution RTT; 0 = query-only" },
-          { "name": "qname", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_dns_qname", "source": "raw -> spnl_dns_qname()", "cap": 256, "note": "length-prefixed DNS labels walked in userspace (an in-kernel walk blows up verifier state); empty when the record is not a parseable query. cap 256 = the domain bound: a DNS name is at most 255 bytes (RFC 1035 2.3.4), +1 for the NUL. Today's source bounds it far tighter -- the walk reads raw[12..60) and each label costs its length byte back as the dot, so the output cannot exceed 52 characters -- but the cap is stated against the protocol, so widening `raw` does not silently start truncating names" }
+          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_pid", "source": "pid", "kfilter": "pid", "note": "producer tgid (init-ns)" },
+          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_dns_comm", "source": "comm", "kfilter": "comm", "note": "bpf_get_current_comm -> process.executable.name" },
+          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_cgid", "source": "cgid", "kfilter": "cgroup_id", "note": "cgroup id -> k8s.* pod attribution" },
+          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_dns_duration_ns", "source": "duration_ns", "kfilter": "", "note": "resolution RTT; 0 = query-only" },
+          { "name": "qname", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_dns_qname", "source": "raw -> spnl_dns_qname()", "kfilter": "", "cap": 256, "note": "length-prefixed DNS labels walked in userspace (an in-kernel walk blows up verifier state); empty when the record is not a parseable query. cap 256 = the domain bound: a DNS name is at most 255 bytes (RFC 1035 2.3.4), +1 for the NUL. Today's source bounds it far tighter -- the walk reads raw[12..60) and each label costs its length byte back as the dot, so the output cannot exceed 52 characters -- but the cap is stated against the protocol, so widening `raw` does not silently start truncating names" }
         ]
       }
     },
@@ -83,7 +129,8 @@
           { "key": "network.transport", "source": "constant \"tcp\"", "stability": "semconv", "condition": "always", "note": "the channel only observes TCP state transitions" },
           { "key": "network.type", "source": "family (AF_INET -> \"ipv4\", AF_INET6 -> \"ipv6\")", "stability": "semconv", "condition": "always", "note": " /" },
           { "key": "net.peer.srtt_us", "source": "srtt_us >> 3 (spnl_conn_srtt_us -- the same function as the property ev.srtt_us)", "stability": "spinel", "condition": "always", "note": "semconv has no smoothed-RTT key, so this is a project key; the value is L4 srtt, not an L7 round trip. the >>3 has one author, shared with the typed consumer" },
-          { "key": "spnl.conn.direction", "source": "oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other)", "stability": "spinel", "condition": "always", "note": "semconv has no connection-direction key" },
+          { "key": "spnl.conn.direction", "source": "oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other)", "stability": "spinel", "condition": "always", "note": "semconv has no connection-direction key. The mapping is the declared value map `conn_direction`, shared with the typed consumer's ev.direction" },
+          { "key": "spnl.conn.tcp_state", "source": "oldstate -> value map `tcp_state` (the kernel's enum, by name)", "stability": "spinel", "condition": "always", "note": "semconv has no TCP-state key. spnl.conn.direction answers who opened the connection and says \"other\" for every state that is neither SYN_SENT nor SYN_RECV -- which is most of them on a probe that emits transitions other than ESTABLISHED. This is the same byte read as the state it is, and it is the same function's output as the typed consumer's ev.tcp_state" },
           { "key": "process.executable.name", "source": "comm[16]", "stability": "semconv", "condition": "comm non-empty", "note": "recovered from the sock->owner map when the transition fires in softirq context" }
         ],
         "enrichers": ["k8s", "cri", "peer"]
@@ -95,15 +142,21 @@
         "send_fn": "spnl_otlp_span_send",
         "flush_fn": "spnl_otlp_span_flush",
         "properties": [
-          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_pid", "source": "pid", "note": "producer tgid; sock_owner_set restores it when the ESTABLISHED transition fires in softirq" },
-          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_comm", "source": "comm", "note": "bpf_get_current_comm -- the connecting process, not the idle task" },
-          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_dport", "source": "dport", "note": "remote port, host byte order" },
-          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_cgid", "source": "cgid", "note": "cgroup id -> k8s.* pod attribution" },
-          { "name": "peer", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_peer", "source": "family + daddr / daddr6_hi,daddr6_lo + dport -> spnl_conn_peer()", "cap": 64, "note": "\"<address>:<port>\" with the v4/v6 choice already made. The address half is the same function's output as network.peer.address and the port half is network.peer.port, so ev.peer is exactly the span name's subject (\"connect <peer>\") -- including the fact that an IPv6 address is NOT bracketed (\"::1:19377\"), because that is how the span name has spelled it since. cap 64 >= the longest such string: inet_ntop writes at most INET6_ADDRSTRLEN-1 = 45 characters, plus \":\" and 5 port digits and the NUL = 52" },
-          { "name": "direction", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_direction", "source": "oldstate -> spnl_conn_direction()", "cap": 16, "note": "\"active\" (we initiated: SYN_SENT -> ESTABLISHED), \"passive\" (we accepted: SYN_RECV -> ESTABLISHED), \"other\". Byte-identical to the span attribute spnl.conn.direction (same function). cap 16 >= the longest of that closed set of literals (\"passive\", 7 + NUL)" },
-          { "name": "srtt_us", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_srtt_us", "source": "srtt_us (the kernel's 1/8 us scale) -> spnl_conn_srtt_us()", "cap": 0, "note": "smoothed RTT in MICROSECONDS -- the same value the span attribute net.peer.srtt_us carries, because both are this one function's output. The >>3 that turns the kernel's 1/8 us into us is layer 2's business, so a consumer never divides by 8. Note it is the L4 smoothed RTT (a property of the connection), not an L7 round trip" }
+          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_pid", "source": "pid", "kfilter": "", "note": "producer tgid; sock_owner_set restores it when the ESTABLISHED transition fires in softirq" },
+          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_comm", "source": "comm", "kfilter": "", "note": "bpf_get_current_comm -- the connecting process, not the idle task" },
+          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_dport", "source": "dport", "kfilter": "", "note": "remote port, host byte order" },
+          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_cgid", "source": "cgid", "kfilter": "", "note": "cgroup id -> k8s.* pod attribution" },
+          { "name": "peer", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_peer", "source": "family + daddr / daddr6_hi,daddr6_lo + dport -> spnl_conn_peer()", "kfilter": "", "cap": 64, "note": "\"<address>:<port>\" with the v4/v6 choice already made. The address half is the same function's output as network.peer.address and the port half is network.peer.port, so ev.peer is exactly the span name's subject (\"connect <peer>\") -- including the fact that an IPv6 address is NOT bracketed (\"::1:19377\"), because that is how the span name has spelled it since. cap 64 >= the longest such string: inet_ntop writes at most INET6_ADDRSTRLEN-1 = 45 characters, plus \":\" and 5 port digits and the NUL = 52" },
+          { "name": "direction", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_direction", "source": "oldstate -> value map `conn_direction`", "value_map": "conn_direction", "kfilter": "", "cap": 16, "note": "\"active\" (we initiated: SYN_SENT -> ESTABLISHED), \"passive\" (we accepted: SYN_RECV -> ESTABLISHED), \"other\". Byte-identical to the span attribute spnl.conn.direction (same function). cap 16 >= the longest of that closed set of literals (\"passive\", 7 + NUL). The three-line switch this used to be is now the declared value map `conn_direction`, so the two state numbers it keys on are checked against the kernel's enum instead of trusted" },
+          { "name": "tcp_state", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_conn_tcp_state", "source": "oldstate -> value map `tcp_state`", "value_map": "tcp_state", "kfilter": "", "cap": 24, "note": "the pre-transition TCP state under its own name (\"SYN_SENT\", \"CLOSE\", ...) = the span attribute spnl.conn.tcp_state, from the declared value map `tcp_state` checked against the kernel's BTF enum. `direction` answers who opened the connection and collapses ten of the thirteen states into \"other\"; this keeps the state. A state this kernel has but the map does not name reads as \"unnamed(<n>)\" -- the number survives rather than borrowing a name. cap 24 >= both bounds, and unlike every other cap in this file the generator COMPUTES them rather than taking the note's word for it: the longest name (\"BOUND_INACTIVE\" = 14 + NUL) and the widest unnamed rendering of the source field (`oldstate` is a __u32, so \"unnamed(4294967295)\" = 19 + NUL). A closed set is the one derivation whose bound is a fact" },
+          { "name": "srtt_us", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_conn_srtt_us", "source": "srtt_us (the kernel's 1/8 us scale) -> spnl_conn_srtt_us()", "kfilter": "", "cap": 0, "note": "smoothed RTT in MICROSECONDS -- the same value the span attribute net.peer.srtt_us carries, because both are this one function's output. The >>3 that turns the kernel's 1/8 us into us is layer 2's business, so a consumer never divides by 8. Note it is the L4 smoothed RTT (a property of the connection), not an L7 round trip" }
         ]
-      }
+      },
+      "metrics": [
+        { "id": "count", "name": "spnl.conn.count", "kind": "counter", "unit": "{connection}", "value_from": "", "value_unit": "", "bounds": "", "series_bound": 3, "labels": [
+            { "key": "spnl.conn.direction", "from": "direction", "stability": "spinel", "bound": 3, "bound_from": "value_map", "value_map": "conn_direction", "fallback": "other", "note": "the same string the span attribute spnl.conn.direction carries (same value map, same function). Bound 3 = the map's two names plus its literal fallback \"other\", computed from `conn_direction` rather than declared here" }
+          ], "note": "how many connect records the probe emitted, split by who opened the connection. A counter rather than a histogram because this channel has no duration -- a connect is a point event and its span duration is 0. semconv has no key for \"connections a probe observed\", so the name is a project key, for the same reason spnl.conn.direction is" }
+      ]
     },
     {
       "id": "l7",
@@ -148,11 +201,11 @@
         "send_fn": "spnl_otlp_span_send",
         "flush_fn": "spnl_otlp_span_flush",
         "properties": [
-          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_pid", "source": "pid", "note": "producer tgid (the process that sent the request)" },
-          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_l7_comm", "source": "comm", "note": "bpf_get_current_comm -> process.executable.name" },
-          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_dport", "source": "dport", "note": "remote port, host byte order" },
-          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_duration_ns", "source": "duration_ns", "note": "send -> response-visible round trip (tcp_cleanup_rbuf), = span duration" },
-          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_cgid", "source": "cgid", "note": "cgroup id -> k8s.* pod attribution" }
+          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_pid", "source": "pid", "kfilter": "", "note": "producer tgid (the process that sent the request)" },
+          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_l7_comm", "source": "comm", "kfilter": "", "note": "bpf_get_current_comm -> process.executable.name" },
+          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_dport", "source": "dport", "kfilter": "", "note": "remote port, host byte order" },
+          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_duration_ns", "source": "duration_ns", "kfilter": "", "note": "send -> response-visible round trip (tcp_cleanup_rbuf), = span duration" },
+          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_l7_cgid", "source": "cgid", "kfilter": "", "note": "cgroup id -> k8s.* pod attribution" }
         ]
       }
     },
@@ -204,16 +257,22 @@
         "send_fn": "spnl_otlp_span_send",
         "flush_fn": "spnl_otlp_span_flush",
         "properties": [
-          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_pid", "source": "pid", "note": "producer tgid" },
-          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_comm", "source": "comm", "note": "bpf_get_current_comm -> process.executable.name" },
-          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_dport", "source": "dport", "note": "remote port, host byte order; 0 on the TLS path" },
-          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_duration_ns", "source": "duration_ns", "note": "request -> response round trip, = span duration" },
-          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_cgid", "source": "cgid", "note": "cgroup id -> k8s.* pod attribution" },
-          { "name": "method", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_method", "source": "req -> spnl_http_method()", "cap": 65, "note": "first token of the request head; empty when the head does not parse. cap 65 = req[64] + NUL, the bound had to reach for: the kernel-side filter only inspects the first 4 bytes, so a head with no space at all is reachable and the token is then the whole field" },
-          { "name": "path", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_path", "source": "req -> spnl_http_path()", "cap": 65, "note": "second token of the request head (path only -- no body, no headers). cap 65 = req[64] + NUL (same bound as `method`: the token cannot outgrow the field it is cut from)" },
-          { "name": "status", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_status", "source": "resp -> spnl_http_status()", "cap": 0, "note": "status digits of the response head; 0 when the head does not parse. >= 500 is what sets Span.status = ERROR on the egress side" }
+          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_pid", "source": "pid", "kfilter": "", "note": "producer tgid" },
+          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_comm", "source": "comm", "kfilter": "", "note": "bpf_get_current_comm -> process.executable.name" },
+          { "name": "dport", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_dport", "source": "dport", "kfilter": "", "note": "remote port, host byte order; 0 on the TLS path" },
+          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_duration_ns", "source": "duration_ns", "kfilter": "", "note": "request -> response round trip, = span duration" },
+          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_cgid", "source": "cgid", "kfilter": "", "note": "cgroup id -> k8s.* pod attribution" },
+          { "name": "method", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_method", "source": "req -> spnl_http_method()", "kfilter": "", "cap": 65, "note": "first token of the request head; empty when the head does not parse. cap 65 = req[64] + NUL, the bound had to reach for: the kernel-side filter only inspects the first 4 bytes, so a head with no space at all is reachable and the token is then the whole field" },
+          { "name": "path", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_http_path", "source": "req -> spnl_http_path()", "kfilter": "", "cap": 65, "note": "second token of the request head (path only -- no body, no headers). cap 65 = req[64] + NUL (same bound as `method`: the token cannot outgrow the field it is cut from)" },
+          { "name": "status", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_http_status", "source": "resp -> spnl_http_status()", "kfilter": "", "cap": 0, "note": "status digits of the response head; 0 when the head does not parse. >= 500 is what sets Span.status = ERROR on the egress side" }
         ]
-      }
+      },
+      "metrics": [
+        { "id": "duration", "name": "spnl.http.client.request.duration", "kind": "histogram", "unit": "s", "value_from": "duration_ns", "value_unit": "ns", "bounds": "otel_duration_s", "boundaries": [0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10], "bounds_authority": "OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read", "series_bound": 180, "labels": [
+            { "key": "http.request.method", "from": "method", "stability": "semconv", "bound": 10, "bound_from": "declared_set", "fallback": "_OTHER", "values": ["CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"], "note": "the same token spnl_http_method() gives the span attribute http.request.method, but projected onto OTel's known-method set. A request whose method is not in that set still gets a span carrying the exact token; only the metric label collapses. Bound 10 = 9 methods + _OTHER" },
+            { "key": "http.response.status_code", "from": "status", "stability": "semconv", "bound": 18, "bound_from": "declared_set", "fallback": "_OTHER", "values": ["200", "201", "202", "204", "301", "302", "304", "400", "401", "403", "404", "409", "429", "500", "502", "503", "504"], "note": "spnl_http_status() parses at most three digits, so the property alone admits 0..999 -- 180 000 series once multiplied by the method label. This declared set is what makes it a label: 17 codes worth a dashboard, everything else _OTHER. The RED error axis survives the collapse (500/502/503/504 are named), and the span still carries the exact code. Bound 18" }
+          ], "note": "RED for the HTTP channel. The value is the SAME property the span's duration is built from (duration_ns), so a rate/latency dashboard and a trace waterfall cannot disagree about how long a request took; the data point's `count` is the rate axis, so no separate counter is declared. Buckets are the OBI-aligned `otel_duration_s` set and the record's nanoseconds are converted once, by the generator, against a checked unit pair" }
+      ]
     },
     {
       "id": "redis",
@@ -291,6 +350,7 @@
           { "key": "spnl.offcpu_ns", "source": "min(offcpu_ns, duration_ns)", "stability": "spinel", "condition": "always", "note": "eBPF-specific -- how much of the request was spent not running" },
           { "key": "spnl.oncpu_ns", "source": "duration_ns - offcpu_ns", "stability": "spinel", "condition": "always", "note": "" },
           { "key": "spnl.wait.kind", "source": "wait_stack -> kallsyms scan (io / lock / sleep / net / other / none / unknown)", "stability": "spinel", "condition": "always", "note": "best-effort classification of the last wait's top frames. \"none\" = no voluntary off-CPU in the window (wait_stack < 0); \"unknown\" = the stack map or /proc/kallsyms could not be read. Same function as the typed consumer's ev.wait_kind" },
+          { "key": "spnl.wait.stack", "source": "wait_stack -> the same frames spnl.wait.kind classifies, symbolised (\";\"-joined, innermost first, at most SPNL_STACK_FRAMES of them)", "stability": "spinel", "condition": "SPNL_STACK_FRAMES > 0 and the frames could be read (default 0 = attribute absent)", "note": "WHERE the request waited, beside WHAT it waited on. Same function's output as the typed consumer's ev.wait_stack_trace, and the same frame fetch spnl.wait.kind classifies -- so the kind is always explained by a frame in this value. Why not semconv `code.stacktrace`: that key is the stack of the INSTRUMENTED code, and the instrumented code here is the Ruby probe -- these frames belong to the OBSERVED task, in the kernel. Naming them spnl.wait.* keeps them beside spnl.wait.kind (their sibling reading) and leaves code.stacktrace free for the case it actually describes, a user-space stack, which no record carries today. Opt-in because it is the one attribute here whose size is unbounded by the record: up to 448 bytes per span, on both the request-window span and its off-CPU wait child, inside batches of up to SPNL_OTLP_BATCH_MAX spans" },
           { "key": "process.executable.name", "source": "comm[16]", "stability": "semconv", "condition": "comm non-empty", "note": "" }
         ],
         "enrichers": ["k8s", "cri"]
@@ -302,16 +362,17 @@
         "send_fn": "spnl_otlp_span_send",
         "flush_fn": "spnl_otlp_span_flush",
         "properties": [
-          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_pid", "source": "pid", "note": "producer tgid (the request handler)" },
-          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_comm", "source": "comm", "note": "bpf_get_current_comm -> process.executable.name" },
-          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_duration_ns", "source": "duration_ns", "note": "whole request window (recv -> send), = parent span duration" },
-          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_cgid", "source": "cgid", "note": "cgroup id -> k8s.* pod attribution" },
-          { "name": "method", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_method", "source": "req -> spnl_http_method()", "cap": 65, "note": "first token of the request head -- the http channel's derivation, verbatim (offcpu.req is the same bounded copy of the same wire, pinned by a _Static_assert). cap 65 = req[64] + NUL, the same bound as http.method for the same reason" },
-          { "name": "path", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_path", "source": "req -> spnl_http_path()", "cap": 65, "note": "second token of the request head (path only). Shares http's derivation and bound" },
-          { "name": "status", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_status", "source": "resp -> spnl_http_status()", "cap": 0, "note": "status digits of the response head; 0 when it does not parse. >= 500 is what sets Span.status = ERROR on the egress side" },
-          { "name": "offcpu_ns", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_offcpu_ns", "source": "offcpu_ns clamped to duration_ns -> spnl_offcpu_offcpu_ns()", "cap": 0, "note": "nanoseconds of the request window spent NOT running -- the same value the span attribute spnl.offcpu_ns carries, because both are this one function's output. The clamp is not cosmetic: offcpu_ns is accumulated by sched_switch while duration_ns is measured by the recv/send pair, so a record whose sum exceeds its window is expressible, and the span has always reported the clamped number. A consumer filtering on `ev.offcpu_ns > x` therefore filters on exactly what it would see on the span" },
-          { "name": "oncpu_ns", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_oncpu_ns", "source": "duration_ns - min(offcpu_ns, duration_ns) -> spnl_offcpu_oncpu_ns()", "cap": 0, "note": "nanoseconds of the window spent running = the span attribute spnl.oncpu_ns. Not a field: the record carries the window and the wait, and this is their difference (so ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns by construction)" },
-          { "name": "wait_kind", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_wait_kind", "source": "wait_stack -> kallsyms scan of the captured frames -> spnl_offcpu_wait_kind()", "cap": 16, "note": "what the request was waiting ON, byte-identical to the span attribute spnl.wait.kind (same function): \"io\" / \"lock\" / \"sleep\" / \"net\" / \"other\" (a wait whose frames match no signature) / \"none\" (wait_stack < 0, i.e. the window contained no voluntary off-CPU) / \"unknown\" (the stack map or /proc/kallsyms could not be read). Best-effort by construction:  classifies the LAST wait's top frames, not every wait in the window. cap 16 >= the longest of that closed set of literals (\"unknown\", 7 + NUL)" }
+          { "name": "pid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_pid", "source": "pid", "kfilter": "", "note": "producer tgid (the request handler)" },
+          { "name": "comm", "kind": "field", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_comm", "source": "comm", "kfilter": "", "note": "bpf_get_current_comm -> process.executable.name" },
+          { "name": "duration_ns", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_duration_ns", "source": "duration_ns", "kfilter": "", "note": "whole request window (recv -> send), = parent span duration" },
+          { "name": "cgid", "kind": "field", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_cgid", "source": "cgid", "kfilter": "", "note": "cgroup id -> k8s.* pod attribution" },
+          { "name": "method", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_method", "source": "req -> spnl_http_method()", "kfilter": "", "cap": 65, "note": "first token of the request head -- the http channel's derivation, verbatim (offcpu.req is the same bounded copy of the same wire, pinned by a _Static_assert). cap 65 = req[64] + NUL, the same bound as http.method for the same reason" },
+          { "name": "path", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_path", "source": "req -> spnl_http_path()", "kfilter": "", "cap": 65, "note": "second token of the request head (path only). Shares http's derivation and bound" },
+          { "name": "status", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_status", "source": "resp -> spnl_http_status()", "kfilter": "", "cap": 0, "note": "status digits of the response head; 0 when it does not parse. >= 500 is what sets Span.status = ERROR on the egress side" },
+          { "name": "offcpu_ns", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_offcpu_ns", "source": "offcpu_ns clamped to duration_ns -> spnl_offcpu_offcpu_ns()", "kfilter": "", "cap": 0, "note": "nanoseconds of the request window spent NOT running -- the same value the span attribute spnl.offcpu_ns carries, because both are this one function's output. The clamp is not cosmetic: offcpu_ns is accumulated by sched_switch while duration_ns is measured by the recv/send pair, so a record whose sum exceeds its window is expressible, and the span has always reported the clamped number. A consumer filtering on `ev.offcpu_ns > x` therefore filters on exactly what it would see on the span" },
+          { "name": "oncpu_ns", "kind": "derived", "expose": "int", "ffi_ret": ":long", "ffi": "spnl_rec_offcpu_oncpu_ns", "source": "duration_ns - min(offcpu_ns, duration_ns) -> spnl_offcpu_oncpu_ns()", "kfilter": "", "cap": 0, "note": "nanoseconds of the window spent running = the span attribute spnl.oncpu_ns. Not a field: the record carries the window and the wait, and this is their difference (so ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns by construction)" },
+          { "name": "wait_kind", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_wait_kind", "source": "wait_stack -> kallsyms scan of the captured frames -> spnl_offcpu_wait_kind()", "kfilter": "", "cap": 16, "note": "what the request was waiting ON, byte-identical to the span attribute spnl.wait.kind (same function): \"io\" / \"lock\" / \"sleep\" / \"net\" / \"other\" (a wait whose frames match no signature) / \"none\" (wait_stack < 0, i.e. the window contained no voluntary off-CPU) / \"unknown\" (the stack map or /proc/kallsyms could not be read). Best-effort by construction:  classifies the LAST wait's top frames, not every wait in the window. cap 16 >= the longest of that closed set of literals (\"unknown\", 7 + NUL)" },
+          { "name": "wait_stack_trace", "kind": "derived", "expose": "str", "ffi_ret": ":str", "ffi": "spnl_rec_offcpu_wait_stack_trace", "source": "wait_stack -> the same frames wait_kind classifies, symbolised -> spnl_offcpu_wait_stack()", "kfilter": "", "cap": 448, "note": "WHERE the wait happened -- the frames themselves, \";\"-joined, INNERMOST FIRST, as kallsyms names without offsets. Named for the field it reads (`wait_stack` is a stack id and stays unexposed; this is the reading of it) but deliberately not the same word, because an index and a call stack are not the same value. Same-source guarantee: wait_kind and this property are two readings of ONE frame fetch -- spnl_offcpu_wait_stack() and spnl_offcpu_wait_kind() both call the same _oc_frames(), so a kind of \"io\" is always explained by a frame that is actually in this string. Innermost-first is that guarantee made visible: the classifier scans frames in this order and stops at the first match, so the reason is the leftmost matching frame. (The folded stack output this project also emits is the other way round -- outermost first -- because a flame graph is drawn from the root. This is not paste-compatible with it.) Empty unless the operator sets SPNL_STACK_FRAMES > 0 (default 0): a stack is the one property here that costs real bytes on every span, so it is off until somebody asks. The SAME number bounds both this string and the span attribute, so the two never differ in depth. cap 448 = the declared maximum depth, exactly: 8 frames x 55 characters (the symbol width the userspace kallsyms table stores, _oc_sym.n[56]) + 7 separators + NUL. A declared derivation never truncates, so the depth cap and the byte cap are one statement" }
         ]
       }
     },

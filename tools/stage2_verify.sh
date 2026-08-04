@@ -38,4 +38,29 @@ for rb in tests/fixtures/*.rb; do
 done
 echo "------------------------------------------------------------"
 echo "in-process .bpf.c vs golden: MATCH=$pass  MISMATCH=$mism  skip(no-golden)=$skip"
-[ $mism -eq 0 ]
+
+# The refusals have to hold on THIS path too. A fixture with no golden is
+# skipped above, so a context gate that stopped firing in the in-process build
+# would look exactly like a fixture that has no eBPF content. tools/golden.rb
+# pins the same set for the text driver; both drivers compile the same TU, and
+# this is the half a user's `spinel-ebpf compile` actually runs.
+REJ=tests/golden/codegen_reject.tsv
+rej_bad=0
+if [ -f "$REJ" ]; then
+  rej_n=0
+  while IFS="$(printf '\t')" read -r base _note; do
+    case "$base" in ''|'#'*) continue ;; esac
+    [ -f "tests/fixtures/$base.rb" ] || { echo "REJECT-LIST  $base has no fixture"; rej_bad=$((rej_bad + 1)); continue; }
+    rej_n=$((rej_n + 1))
+    if build/codegen_c/spinel-ebpf-cc "tests/fixtures/$base.rb" "$base" >/dev/null 2>&1; then
+      echo "NOT REFUSED  $base  (the in-process codegen accepted a fixture the text driver refuses)"
+      rej_bad=$((rej_bad + 1))
+    fi
+  done < "$REJ"
+  echo "in-process refusals vs $REJ: CHECKED=$rej_n  UNEXPECTEDLY_ACCEPTED=$rej_bad"
+else
+  echo "in-process refusals: $REJ missing (run: ruby tools/golden.rb --update)"
+  rej_bad=1
+fi
+
+[ $mism -eq 0 ] && [ $rej_bad -eq 0 ]

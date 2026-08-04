@@ -1,0 +1,148 @@
+# spinel-ebpf golden compile/load baseline.
+#
+# Each committed tests/golden/*.bpf.c compiled with the production clang
+# flags and loaded with tools/spnl_load_check.c. Only the STATUS column is
+# compared; `note` is prose for the reviewer, because the compiler or verifier
+# message itself is version-dependent and deliberately not pinned -- see the
+# header of tools/golden_compile.sh.
+#
+# A non-ok status is not permission to leave it broken: it is a claim that
+# somebody looked. Refresh with `sh tools/golden_compile.sh --update` and
+# review the diff -- a new failure means the generator started emitting C that
+# does not build or does not load.
+#
+# measured on aarch64 with clang 19 at -mcpu=v1
+#
+# golden	status	note
+02_integer_arith	ok	
+03_fib_recursion	verifier_reject	recursion: fib calls itself, and the verifier refuses BPF-to-BPF recursion ("recursive call from fib_inner() to fib_inner()"). Inherent to eBPF, not kernel-specific. The verdict on this one is that it fails at the wrong LAYER -- a partition or validation check could name it -- rather than that it is a wrong program. Detecting it statically is a named follow-up, not done here.
+04_class_with_ivars	ok	
+100_path_eq	ok	
+101_ppid	ok	
+102_parent_path_eq	ok	
+103_emit_parent_path	ok	
+104_emit_connect	ok	
+105_emit_dns	ok	
+106_sock_owner_correlate	ok	
+107_emit_l7	ok	
+108_http_l7	ok	
+109_ssl_http_l7	ok	
+10_polymorphic	clang_fail	signed division (`@b * @h / 2`): the BPF ISA has no signed division before v4, and the CLI pins -mcpu=v1. Measured to be fine at -mcpu=v4. This is legal Ruby; the workaround in the DSL is divu. A real ISA constraint, loud, but diagnosed by clang rather than by us.
+110_offcpu_l7	ok	
+111_cgroup_id	ok	
+111_dns_latency	ok	
+112_caps_args	ok	
+113_scalar_args	ok	
+114_tcp_cc_reno	ok	
+115_path_starts_with	ok	
+116_path_contains	ok	
+117_emit_tcp_payload	ok	
+118_emit_tcp_stream	ok	
+119_redis_l7	ok	
+11_max_if	ok	
+120_go_tls_write	ok	
+121_go_uret	ok	
+122_go_tls_native	ok	
+123_path_unlink_deny	ok	
+124_bprm_exec_path	ok	
+125_mmap_file_path	ok	
+126_runtime_param	ok	
+129_common_filter	ok	
+12_spnl_emit	ok	
+130_common_filter_all	ok	
+133_kfield_str	ok	
+134_kfield_str_eq	ok	
+135_kfield_str_wrong_shape	clang_fail	negative fixture: kfield_str_eq written without its compare literal, so the field path silently loses its last hop and ends on `struct dentry *`. The static shape check refuses it and names this Ruby call. If this ever turns `ok`, that check has been weakened and reading a struct pointer as a string is back.
+137_sock_accessors	ok	
+139_iter_task_field	ok	
+13_locals	ok	
+140_cpumap_redirect	ok	
+141_sock_ops	ok	
+146_pkt_chain	ok	
+147_dsl_class_xdp	ok	
+148_dsl_module_xdp	ok	
+14_calls	ok	
+150_cap_ns_filetype	ok	
+153_attach_multi_expand	ok	
+154_attach_multi_multi	ok	
+155_attach_multi_auto	ok	
+15_times_loop	ok	
+161_attach_multi_params	ok	
+16_closure	ok	
+17_kprobe	ok	
+18_tp_args	ok	
+19_emit_str	ok	
+20_top_ivar	ok	
+21_sched	ok	
+22_emit_pair	ok	
+23_indirect_float	ok	
+24_xdp_counter	ok	
+25_xdp_len	ok	
+26_xdp_proto_count	ok	
+27_xdp_drop_icmp	ok	
+30_tc_port_filter	ok	
+31_tc_blocklist	ok	
+32_path_counter	ok	
+33_sk_reuseport	ok	
+34_sk_msg	ok	
+35_xdp_ipv6	ok	
+36_emit_n_tuple	ok	
+37_c_keyword_collision	ok	
+38_uprobe_basic	ok	
+39_usdt_basic	ok	
+40_histogram	ok	
+41_latency_hist	ok	
+42_keyed_hist	ok	
+43_linear_hist	ok	
+44_reactor_block_params	ok	
+45_reactor_usdt_params	ok	
+46_comm_builtins	ok	
+47_reactor_pid	ok	
+48_stack_trace	ok	
+49_reactor_all_params	ok	
+50_reactor_named_tp	ok	
+51_perf_event	ok	
+52_off_cpu	ok	
+53_scx_simple	ok	
+54_qdisc_blackhole	verifier_reject	the kernel kfunc filter, not us: bpf_qdisc_init_prologue is refused with -EACCES. Measured: hand-written C calling it DIRECTLY from the SEC("struct_ops/init") entry is refused identically, bpf_qdisc_reset_destroy_epilogue is refused the same way, and the same qdisc with both kfuncs dropped loads fine. May differ on another kernel.
+55_qdisc_fifo	ok	
+56_kfield	ok	
+57_cidr_blocklist	ok	
+58_lsm_fmod	ok	
+59_task_storage	ok	
+60_map_in_map	ok	
+61_cgroup_connect4	ok	
+62_iter_task	ok	
+63_queue_stack	ok	
+64_xsk_dev_redirect	ok	
+65_raw_tp	ok	
+66_niche_progs	ok	
+67_memleak	ok	
+68_deadlock	ok	
+69_execsnoop	ok	
+70_runqlat	ok	
+71_tcplife	ok	
+72_tcpconnect	ok	
+73_irq	ok	
+74_kfield_dotted	ok	
+75_slabratetop	ok	
+76_field_exists	ok	
+77_fib_lookup	ok	
+79_skb_rewrite	ok	
+81_nat_rewrite	ok	
+83_nat_port	ok	
+84_arena	ok	
+85_l4_lb	ok	
+86_arena_hash	ok	
+87_arena_hash_del	ok	
+88_arena_config	ok	
+89_arena_list	ok	
+90_l4_lb_pool	ok	
+91_ip_options	ok	
+92_fib6	ok	
+93_sk_lookup	ok	
+94_router	ok	
+95_sk_assign	ok	
+97_kprobe_conditional_emit	ok	
+98_bool_sig	ok	
+99_emit_path	ok	

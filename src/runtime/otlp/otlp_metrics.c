@@ -355,6 +355,80 @@ long otlp_metrics_series_build(uint8_t *buf, size_t cap,
     return (long)st.bytes_written;
 }
 
+/* ---- a monotonic Sum on its own, for a counter that comes from a record channel ----
+ *
+ * otlp_metrics_series_build always emits a Sum and an ExponentialHistogram as a
+ * pair, because the rate and the latency of an instrumented method always come
+ * as a pair. A record channel's counter has no value to distribute -- a
+ * connection is a point event, with no duration -- so this emits the Sum alone
+ * rather than fabricating a latency to go with it. The data points share
+ * enc_series_calls; the buckets of otlp_series_t simply stay unused. */
+typedef struct { sdp_ctx_t *dp; const char *name; const char *unit; } sumonly_ctx_t;
+
+static bool enc_sum_metric(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    sumonly_ctx_t *c = (sumonly_ctx_t *)(*arg);
+    opentelemetry_proto_metrics_v1_Metric m = opentelemetry_proto_metrics_v1_Metric_init_zero;
+    m.name.funcs.encode = otlp_enc_string;
+    m.name.arg = (void *)c->name;
+    if (c->unit && c->unit[0]) { m.unit.funcs.encode = otlp_enc_string; m.unit.arg = (void *)c->unit; }
+    m.which_data = opentelemetry_proto_metrics_v1_Metric_sum_tag;
+    m.data.sum.data_points.funcs.encode = enc_series_calls;
+    m.data.sum.data_points.arg = c->dp;
+    m.data.sum.aggregation_temporality =
+        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
+    m.data.sum.is_monotonic = true;
+    if (!pb_encode_tag_for_field(st, fld)) return false;
+    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m);
+}
+
+long otlp_metrics_sum_build(uint8_t *buf, size_t cap,
+                            const char *service_name, const char *service_version,
+                            const char *scope_name,
+                            const char *name, const char *unit,
+                            uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                            const otlp_series_t *series, size_t nseries) {
+    sdp_ctx_t dpctx = { series, nseries, time_unix_nano, start_time_unix_nano };
+    sumonly_ctx_t mctx = { &dpctx, name, unit };
+    otlp_resource_t rctx = { service_name, service_version };
+
+    opentelemetry_proto_resource_v1_Resource res =
+        opentelemetry_proto_resource_v1_Resource_init_zero;
+    res.attributes.funcs.encode = otlp_enc_resource_attrs;
+    res.attributes.arg = &rctx;
+
+    opentelemetry_proto_common_v1_InstrumentationScope scope =
+        opentelemetry_proto_common_v1_InstrumentationScope_init_zero;
+    scope.name.funcs.encode = otlp_enc_string;
+    scope.name.arg = (void *)(scope_name ? scope_name : "spinel-ebpf");
+
+    opentelemetry_proto_metrics_v1_ScopeMetrics sm =
+        opentelemetry_proto_metrics_v1_ScopeMetrics_init_zero;
+    sm.has_scope = true;
+    sm.scope = scope;
+    sm.metrics.funcs.encode = enc_sum_metric;
+    sm.metrics.arg = &mctx;
+    otlp_one_sub_t sm_sub = { opentelemetry_proto_metrics_v1_ScopeMetrics_fields, &sm };
+
+    opentelemetry_proto_metrics_v1_ResourceMetrics rm =
+        opentelemetry_proto_metrics_v1_ResourceMetrics_init_zero;
+    rm.has_resource = true;
+    rm.resource = res;
+    rm.scope_metrics.funcs.encode = otlp_enc_one_sub;
+    rm.scope_metrics.arg = &sm_sub;
+    otlp_one_sub_t rm_sub = { opentelemetry_proto_metrics_v1_ResourceMetrics_fields, &rm };
+
+    opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest req =
+        opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_init_zero;
+    req.resource_metrics.funcs.encode = otlp_enc_one_sub;
+    req.resource_metrics.arg = &rm_sub;
+
+    pb_ostream_t st = pb_ostream_from_buffer(buf, cap);
+    if (!pb_encode(&st,
+            opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_fields, &req))
+        return -1;
+    return (long)st.bytes_written;
+}
+
 /* ---- explicit-bounds Histogram, as used by http.server.request.duration ---- */
 
 /* repeated double explicit_bounds, unpacked -- accepted by both protoc and nanopb. */

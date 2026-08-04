@@ -11,6 +11,34 @@
 #include <bpf/bpf_core_read.h>
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
+/* === per-unit ringbuf lost-sample counter ===
+ * A bpf_ringbuf_reserve() that returns NULL (the ring filled faster than
+ * userspace drained it) would otherwise drop the record silently -- invisible to
+ * the drain-layer channel balance report, which can only count what came out.
+ * Every emit else-branch bumps this; the runtime reads it at exit and prints the
+ * 4th balance-report failure ("dropped by the kernel -- ring full").
+ *
+ * One PERCPU_ARRAY slot for the whole unit, not one per channel. Per-channel
+ * attribution would need a codegen-assigned slot table shared with the glue
+ * generator (two generators agreeing on indices) -- a unit-wide total answers the
+ * question that matters (were records dropped by ring-full, and about how many)
+ * with one map and no cross-generator contract. per-CPU so the bump needs no
+ * atomic; the runtime sums the slots. Inspektor Gadget keeps a per-CPU lost
+ * counter the same way. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u64));
+    __uint(max_entries, 1);
+} u_110_offcpu_l7_lost SEC(".maps");
+
+static __always_inline void spnl_lost_inc(void)
+{
+    __u32 _z = 0;
+    __u64 *_l = bpf_map_lookup_elem(&u_110_offcpu_l7_lost, &_z);
+    if (_l) *_l += 1;
+}
+
 /* === per-unit off-CPU L7 correlation === */
 static __always_inline int spnl_is_http_req(const unsigned char *h) {
     if (h[0]=='G'&&h[1]=='E'&&h[2]=='T'&&h[3]==' ') return 1;
@@ -214,7 +242,7 @@ static __noinline __s64 kprobe__tcp_sendmsg_inner(struct pt_regs *ctx, __s64 sk,
                     __builtin_memcpy(_oe1->req, _ow1->req, sizeof(_oe1->req));
                     __builtin_memcpy(_oe1->resp, _oresp1, sizeof(_oe1->resp));
                     bpf_ringbuf_submit(_oe1, 0);
-                }
+                } else spnl_lost_inc();   /* ring full -> account the dropped record */
                 bpf_map_delete_elem(&u_110_offcpu_l7_offcpu_win, &_ot1);
             }
         }

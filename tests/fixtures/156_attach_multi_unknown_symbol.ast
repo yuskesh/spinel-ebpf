@@ -1,0 +1,80 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/156_attach_multi_unknown_symbol.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name FileOps
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 ArrayNode
+N 13 StringNode
+S 13 content vfs_read
+I 13 fzl 1
+N 14 StringNode
+S 14 content vfs_write
+I 14 fzl 1
+A 12 elements 13,14
+A 10 arguments 11,12
+R 9 arguments 10
+N 15 BlockNode
+N 16 StatementsNode
+N 17 IfNode
+N 18 CallNode
+S 18 name attached_symbol_eq
+R 18 receiver -1
+N 19 ArgumentsNode
+N 20 StringNode
+S 20 content vfs_open
+I 20 fzl 1
+A 19 arguments 20
+R 18 arguments 19
+R 18 block -1
+S 18 call_operator .
+R 17 predicate 18
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @n
+N 23 CallNode
+S 23 name +
+N 24 InstanceVariableReadNode
+S 24 name @n
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 1
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+A 21 body 22
+R 17 statements 21
+R 17 subsequent -1
+A 16 body 17
+R 15 body 16
+R 9 block 15
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

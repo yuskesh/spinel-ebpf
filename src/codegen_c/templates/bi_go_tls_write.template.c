@@ -22,7 +22,7 @@
                 __builtin_memcpy(_he@E@->req, _greq@E@, sizeof(_he@E@->req));
                 __builtin_memset(_he@E@->resp, 0, sizeof(_he@E@->resp));
                 bpf_ringbuf_submit(_he@E@, 0);
-            }
+            } else spnl_lost_inc();   /* ring full -> account the dropped record */
         }
     }
 }

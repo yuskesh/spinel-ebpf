@@ -57,7 +57,7 @@ static void jw_res_kv(jw_t *w, int *first, const char *k, const char *v) {
     jw_raw(w, ",\"value\":{\"stringValue\":"); jw_jstr(w, v); jw_raw(w, "}}");
 }
 /* "resource":{"attributes":[...]}, matching the protobuf encoder exactly.
- * service.name (+ service.version) + service.instance.id + telemetry.sdk.{name,language,version}。 */
+ * service.name (+ service.version) + service.instance.id + telemetry.sdk.{name,language,version}. */
 static void jw_resource(jw_t *w, const char *name, const char *ver) {
     jw_raw(w, "\"resource\":{\"attributes\":[");
     int first = 1;
@@ -67,6 +67,14 @@ static void jw_resource(jw_t *w, const char *name, const char *ver) {
     jw_res_kv(w, &first, "telemetry.sdk.name", "spinel-ebpf");
     jw_res_kv(w, &first, "telemetry.sdk.language", "ruby");
     jw_res_kv(w, &first, "telemetry.sdk.version", "0");
+    /* OTEL_RESOURCE_ATTRIBUTES. The comment above says this writer matches
+     * otlp_enc_resource_attrs, and it is the same shared parser and the same
+     * last-position rule that keep that true -- the JSON path silently lacking a
+     * resource attribute the protobuf path carries is exactly the divergence
+     * this function was written to avoid. */
+    otlp_kv_t ra[OTLP_ENV_RESOURCE_ATTRS_MAX];
+    int nra = otlp_env_kv_list("OTEL_RESOURCE_ATTRIBUTES", ra, OTLP_ENV_RESOURCE_ATTRS_MAX);
+    for (int i = 0; i < nra; i++) jw_res_kv(w, &first, ra[i].key, ra[i].val);
     jw_raw(w, "]}");
 }
 static void jw_scope(jw_t *w, const char *scope) {
@@ -239,6 +247,39 @@ static void jw_labels(jw_t *w, const otlp_kv_t *labels, int nlabels) {
     jw_raw(w, "]");
 }
 static void jw_series_attrs(jw_t *w, const otlp_series_t *s) { jw_labels(w, s->labels, s->nlabels); }
+
+/* A Sum on its own, the counterpart of otlp_metrics_sum_build on the protobuf
+ * side. It lives in both encoders so there is no hole where a counter can be
+ * declared but not sent over http/json. */
+long otlp_json_metrics_sum_build(char *buf, size_t cap,
+                                 const char *svc, const char *ver, const char *scope,
+                                 const char *name, const char *unit,
+                                 uint64_t t, uint64_t start,
+                                 const otlp_series_t *series, size_t n) {
+    jw_t w = { buf, cap, 0, 1 };
+    jw_raw(&w, "{\"resourceMetrics\":[{");
+    jw_resource(&w, svc, ver);
+    jw_raw(&w, ",\"scopeMetrics\":[{");
+    jw_scope(&w, scope);
+    jw_raw(&w, ",\"metrics\":[");
+    jw_raw(&w, "{\"name\":"); jw_jstr(&w, name);
+    if (unit && unit[0]) { jw_raw(&w, ",\"unit\":"); jw_jstr(&w, unit); }
+    jw_raw(&w, ",\"sum\":{\"dataPoints\":[");
+    int first = 1;
+    for (size_t i = 0; i < n; i++) {
+        const otlp_series_t *s = &series[i];
+        if (s->count == 0) continue;
+        if (!first) jw_ch(&w, ','); first = 0;
+        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+        jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)s->count);
+        jw_ch(&w, ','); jw_series_attrs(&w, s);
+        jw_ch(&w, '}');
+    }
+    jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
+    jw_raw(&w, "]}]}]}");
+    return w.ok ? (long)w.n : -1;
+}
 
 long otlp_json_metrics_series_build(char *buf, size_t cap,
                                     const char *svc, const char *ver, const char *scope,

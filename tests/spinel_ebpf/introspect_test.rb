@@ -271,4 +271,56 @@ class IntrospectTest < Minitest::Test
     warn_section = r[/\nwarnings:\n.*/m]
     refute_match(/@intent/, warn_section)
   end
+
+  # --- describe must say what a probe's metrics COST -------------------------
+
+  METRIC_SRC = <<~RUBY
+    def kprobe__tcp_sendmsg(sk, msg, size)
+      http_req_start(sk, msg)
+      0
+    end
+    def kretprobe__tcp_recvmsg(ret)
+      http_emit(ret)
+      0
+    end
+    on_emit :http do |ev|
+      send_otlp(to_span(ev), @ep)
+    end
+    consume_records(300)
+  RUBY
+
+  def test_describe_shows_the_metric_and_its_series_bound
+    out = I.report(METRIC_SRC, "http_metric.rb")
+    assert_match(/metric: spnl\.http\.client\.request\.duration/, out)
+    assert_match(/series <= 180/, out, "describe does not state the bound on the number of series")
+  end
+
+  def test_describe_names_the_coarsening_a_label_performs
+    # Printing "bound 10" without printing "anything outside the set becomes
+    # _OTHER" leaves the reader to discover the coarsening on a dashboard.
+    out = I.report(METRIC_SRC, "http_metric.rb")
+    assert_match(/label http\.request\.method/, out)
+    assert_match(/declared set \(9\) \+ "_OTHER"/, out)
+    assert_match(/the span still carries the exact value/, out)
+  end
+
+  def test_describe_says_how_to_push_the_metric
+    out = I.report(METRIC_SRC, "http_metric.rb")
+    assert_match(/spnl_otlp_record_metrics_push\(endpoint\)/, out)
+  end
+
+  def test_a_probe_touching_no_metric_channel_gets_no_metric_lines
+    src = <<~RUBY
+      def kprobe__udp_sendmsg(sk, msg, len)
+        emit_dns(msg)
+        0
+      end
+      on_emit :dns do |ev|
+        send_otlp(to_span(ev), @ep)
+      end
+      consume_records(300)
+    RUBY
+    out = I.report(src, "dns_probe.rb")
+    refute_match(/metric: /, out, "a channel with no metric is being made to talk about metrics")
+  end
 end

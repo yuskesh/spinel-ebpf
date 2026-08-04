@@ -20,18 +20,105 @@
  * derivation, so a long value cannot truncate differently on the two sides
  * (each capacity is that derivation's own bound, not a shared default).
  *
+ * The spnl_valmap_<id>() lookups are the type-driven half: a CODE -- a
+ * value from a closed set whose members have names -- has no domain logic to
+ * keep in C, only a table, so the table is the declaration and this is its
+ * generated form. They sit OUTSIDE the impl guard because both the accessor
+ * and the span builder call them, which is what makes `ev.tcp_state` and
+ * spnl.conn.tcp_state one function's output rather than two switches.
+ *
  * Prerequisite: __u16/__u32/__u64 must already be visible (host side that means
  * <bpf/libbpf.h> or <linux/types.h>), because the record header field has type
  * `struct spnl_event_hdr` from include/spnl/types.h. */
+#ifndef SPNL_RECORD_MIRROR_BOUNDS_H
+#define SPNL_RECORD_MIRROR_BOUNDS_H
+
+/* bounds set "otel_duration_s", in s -- OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read */
+#define SPNL_BOUNDS_OTEL_DURATION_S_N 15
+#define SPNL_BOUNDS_OTEL_DURATION_S_INIT { 0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 }
+#endif /* SPNL_RECORD_MIRROR_BOUNDS_H */
+
+#ifndef SPNL_RECORD_MIRROR_MACROS_ONLY
 #ifndef SPNL_RECORD_MIRROR_GEN_H
 #define SPNL_RECORD_MIRROR_GEN_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "spnl/types.h"
 
+/* ===================== declared value maps =====================
+ * A CODE -- a value from a closed set whose members have names -- is the one
+ * derivation whose implementation IS its declaration, so these lookups are
+ * generated from src/codegen_c/record_schema.h rather than written in the
+ * runtime. They live outside SPNL_REC_CONSUME_IMPL because BOTH ends call
+ * them: the typed consumer's accessor (`ev.tcp_state`) and the span builder
+ * that fills the attribute -- one function, so the two cannot drift. */
+
+/* --- value map "tcp_state" ---
+ * authority: the kernel's own TCP state enum (include/net/tcp_states.h; the
+ * same values are frozen into the uapi enum BPF_TCP_* in
+ * include/uapi/linux/bpf.h). Both are in vmlinux BTF, so the declaration
+ * below is checked against the running kernel rather than trusted
+ * the state a sock was in, spelled as the kernel spells it (without the TCP_
+ * prefix, which is the enum's namespace and not part of the name of the
+ * state)
+ * An unnamed value renders as shown in the default branch.
+ * Architecture-invariant: a map that cannot say so does not compile
+ * (check_valmap() in tools/gen_record_mirror.c).
+ */
+static inline void spnl_valmap_tcp_state(long v, char *out, int cap) {
+    const char *name = 0;
+    switch (v) {
+    case 1L: name = "ESTABLISHED"; break;
+    case 2L: name = "SYN_SENT"; break;
+    case 3L: name = "SYN_RECV"; break;
+    case 4L: name = "FIN_WAIT1"; break;
+    case 5L: name = "FIN_WAIT2"; break;
+    case 6L: name = "TIME_WAIT"; break;
+    case 7L: name = "CLOSE"; break;
+    case 8L: name = "CLOSE_WAIT"; break;
+    case 9L: name = "LAST_ACK"; break;
+    case 10L: name = "LISTEN"; break;
+    case 11L: name = "CLOSING"; break;
+    case 12L: name = "NEW_SYN_RECV"; break;
+    case 13L: name = "BOUND_INACTIVE"; break;
+    default: break;
+    }
+    if (!out || cap <= 0) return;
+    if (name) snprintf(out, (size_t)cap, "%s", name);
+    else      snprintf(out, (size_t)cap, "unnamed(%ld)", v);
+}
+
+/* --- value map "conn_direction" ---
+ * authority: this project's reading of the pre-ESTABLISHED TCP state. The
+ * names are this project's (semconv has no connection-direction key); only
+ * the two keys come from the kernel enum, and those are checked against its
+ * BTF
+ * "active" = we initiated, "passive" = we accepted, "other" = a transition
+ * into ESTABLISHED from neither (and, on a probe that emits every transition,
+ * any transition at all -- which is what spnl.conn.tcp_state is for)
+ * An unnamed value renders as shown in the default branch.
+ * Architecture-invariant: a map that cannot say so does not compile
+ * (check_valmap() in tools/gen_record_mirror.c).
+ */
+static inline void spnl_valmap_conn_direction(long v, char *out, int cap) {
+    const char *name = 0;
+    switch (v) {
+    case 2L: name = "active"; break;
+    case 3L: name = "passive"; break;
+    default: break;
+    }
+    if (!out || cap <= 0) return;
+    if (name) snprintf(out, (size_t)cap, "%s", name);
+    else      snprintf(out, (size_t)cap, "%s", "other");
+}
+
+
+extern void spnl_recmetric_observe(int metric, const char *const *label_values,
+                                   int nlabels, int has_value, double value);
 /* ===================== channel "dns" =====================
  * record struct: <unit>_dns_event   ringbuf map: <unit>_dns_events (256 * 1024)
  * 6 fields, 120 bytes on the wire. */
@@ -240,6 +327,7 @@ static inline int spnl_rec_conn_unpack(const void *data, size_t size, spnl_rec_c
 #define SPNL_EGRESS_CONN_ATTR_NETWORK_TYPE            "network.type"   /* semconv <- family (AF_INET -> "ipv4", AF_INET6 -> "ipv6") */
 #define SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US        "net.peer.srtt_us"   /* spinel <- srtt_us >> 3 (spnl_conn_srtt_us -- the same function as the property ev.srtt_us) */
 #define SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION     "spnl.conn.direction"   /* spinel <- oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other) */
+#define SPNL_EGRESS_CONN_ATTR_SPNL_CONN_TCP_STATE     "spnl.conn.tcp_state"   /* spinel <- oldstate -> value map `tcp_state` (the kernel's enum, by name) */
 #define SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME "process.executable.name"   /* semconv <- comm[16] */
 
 /* --- typed consumer for channel "conn" ---
@@ -260,11 +348,13 @@ static inline int spnl_rec_conn_unpack(const void *data, size_t size, spnl_rec_c
  * are the same function's output at the same width. */
 #define SPNL_REC_DERIVED_CONN_PEER_CAP           64
 #define SPNL_REC_DERIVED_CONN_DIRECTION_CAP      16
+#define SPNL_REC_DERIVED_CONN_TCP_STATE_CAP      24
 
 #ifdef SPNL_REC_CONSUME_IMPL
 const spnl_rec_conn_t *spnl_rec_conn_at(int i);
 void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap);   /* peer <- family + daddr / daddr6_hi,daddr6_lo + dport */
-void spnl_conn_direction(const spnl_rec_conn_t *r, char *out, int cap);   /* direction <- oldstate */
+/* direction <- oldstate via the generated value map spnl_valmap_conn_direction() */
+/* tcp_state <- oldstate via the generated value map spnl_valmap_tcp_state() */
 long spnl_conn_srtt_us(const spnl_rec_conn_t *r);   /* srtt_us <- srtt_us (the kernel's 1/8 us scale) */
 
 long spnl_rec_conn_pid(int i) {
@@ -294,12 +384,37 @@ const char *spnl_rec_conn_direction(int i) {
     const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
     static char buf[SPNL_REC_DERIVED_CONN_DIRECTION_CAP];
     if (!r) return "";
-    spnl_conn_direction(r, buf, (int)sizeof buf);   /* derived: direction */
+    spnl_valmap_conn_direction((long)r->oldstate, buf, (int)sizeof buf);   /* derived: direction */
+    return buf;
+}
+const char *spnl_rec_conn_tcp_state(int i) {
+    const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
+    static char buf[SPNL_REC_DERIVED_CONN_TCP_STATE_CAP];
+    if (!r) return "";
+    spnl_valmap_tcp_state((long)r->oldstate, buf, (int)sizeof buf);   /* derived: tcp_state */
     return buf;
 }
 long spnl_rec_conn_srtt_us(int i) {
     const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
     return r ? (long)spnl_conn_srtt_us(r) : 0;   /* derived: srtt_us */
+}
+
+/* --- metric intake for channel "conn" ---
+ * Called once per drained record, on the one path every record of this channel
+ * takes (the ringbuf callback), so the concise push and the typed consumer feed
+ * the same aggregate. Every label value below is produced by CALLING the
+ * declared derivation the span attribute calls, so the metric cannot describe a
+ * different request from the span built out of the same bytes; projecting a
+ * value onto its declared set is the runtime's job, in one place. */
+static inline void spnl_recmetric_observe_conn(const spnl_rec_conn_t *r) {
+    if (!r) return;
+    {   /* spnl.conn.count */
+        char lb0[16];
+        const char *lv[1];
+        spnl_valmap_conn_direction((long)r->oldstate, lb0, (int)sizeof lb0);
+        lv[0] = lb0;
+        spnl_recmetric_observe(0, lv, 1, 0, 0.0);
+    }
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 
@@ -584,6 +699,28 @@ long spnl_rec_http_status(int i) {
     const spnl_rec_http_t *r = spnl_rec_http_at(i);
     return r ? (long)spnl_http_status(r->resp) : 0;   /* derived: status */
 }
+
+/* --- metric intake for channel "http" ---
+ * Called once per drained record, on the one path every record of this channel
+ * takes (the ringbuf callback), so the concise push and the typed consumer feed
+ * the same aggregate. Every label value below is produced by CALLING the
+ * declared derivation the span attribute calls, so the metric cannot describe a
+ * different request from the span built out of the same bytes; projecting a
+ * value onto its declared set is the runtime's job, in one place. */
+static inline void spnl_recmetric_observe_http(const spnl_rec_http_t *r) {
+    if (!r) return;
+    {   /* spnl.http.client.request.duration */
+        char lb0[65];
+        char lb1[24];
+        const char *lv[2];
+        spnl_http_method(r->req, lb0, (int)sizeof lb0);
+        lv[0] = lb0;
+        snprintf(lb1, sizeof lb1, "%ld", spnl_http_status(r->resp));
+        lv[1] = lb1;
+        double v = (double)(r->duration_ns) / 1e9;
+        spnl_recmetric_observe(1, lv, 2, 1, v);
+    }
+}
 #endif /* SPNL_REC_CONSUME_IMPL */
 
 /* ===================== channel "redis" =====================
@@ -778,6 +915,7 @@ static inline int spnl_rec_offcpu_unpack(const void *data, size_t size, spnl_rec
 #define SPNL_EGRESS_OFFCPU_ATTR_SPNL_OFFCPU_NS            "spnl.offcpu_ns"   /* spinel <- min(offcpu_ns, duration_ns) */
 #define SPNL_EGRESS_OFFCPU_ATTR_SPNL_ONCPU_NS             "spnl.oncpu_ns"   /* spinel <- duration_ns - offcpu_ns */
 #define SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND            "spnl.wait.kind"   /* spinel <- wait_stack -> kallsyms scan (io / lock / sleep / net / other / none / unknown) */
+#define SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_STACK           "spnl.wait.stack"   /* spinel <- wait_stack -> the same frames spnl.wait.kind classifies, symbolised (";"-joined, innermost first, at most SPNL_STACK_FRAMES of them) */
 #define SPNL_EGRESS_OFFCPU_ATTR_PROCESS_EXECUTABLE_NAME   "process.executable.name"   /* semconv <- comm[16] */
 
 /* --- typed consumer for channel "offcpu" ---
@@ -799,6 +937,7 @@ static inline int spnl_rec_offcpu_unpack(const void *data, size_t size, spnl_rec
 #define SPNL_REC_DERIVED_OFFCPU_METHOD_CAP       65
 #define SPNL_REC_DERIVED_OFFCPU_PATH_CAP         65
 #define SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP    16
+#define SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP 448
 
 #ifdef SPNL_REC_CONSUME_IMPL
 const spnl_rec_offcpu_t *spnl_rec_offcpu_at(int i);
@@ -808,6 +947,7 @@ long spnl_http_status(const unsigned char *src);   /* status <- resp */
 long spnl_offcpu_offcpu_ns(const spnl_rec_offcpu_t *r);   /* offcpu_ns <- offcpu_ns clamped to duration_ns */
 long spnl_offcpu_oncpu_ns(const spnl_rec_offcpu_t *r);   /* oncpu_ns <- duration_ns - min(offcpu_ns, duration_ns) */
 void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap);   /* wait_kind <- wait_stack -> kallsyms scan of the captured frames */
+void spnl_offcpu_wait_stack(const spnl_rec_offcpu_t *r, char *out, int cap);   /* wait_stack_trace <- wait_stack -> the same frames wait_kind classifies, symbolised */
 
 long spnl_rec_offcpu_pid(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
@@ -858,6 +998,13 @@ const char *spnl_rec_offcpu_wait_kind(int i) {
     spnl_offcpu_wait_kind(r, buf, (int)sizeof buf);   /* derived: wait_kind */
     return buf;
 }
+const char *spnl_rec_offcpu_wait_stack_trace(int i) {
+    const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
+    static char buf[SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP];
+    if (!r) return "";
+    spnl_offcpu_wait_stack(r, buf, (int)sizeof buf);   /* derived: wait_stack_trace */
+    return buf;
+}
 #endif /* SPNL_REC_CONSUME_IMPL */
 
 /* ===================== channel "l7stream" =====================
@@ -906,4 +1053,74 @@ static inline int spnl_rec_l7stream_unpack(const void *data, size_t size, spnl_r
     return 0;
 }
 
+/* ========================== metrics ==========================
+ * Declared in record_schema.h; the bounds below are COMPUTED from those
+ * declarations, so "how many time series can this binary ever produce" is a
+ * compile-time constant rather than something a backend discovers.
+ *
+ * A label's bound comes from one of exactly two places: a permitted set declared
+ * on the label (and enforced when the metric is emitted -- anything outside it is
+ * emitted as the fallback), or a code_to_name value map whose unnamed rendering is
+ * a literal, i.e. already closed. Nothing else compiles. */
+
+typedef struct {
+    const char        *key;        /* attribute key, verbatim */
+    const char *const *values;     /* permitted set, or NULL when the property is closed */
+    int                nvalues;
+    const char        *fallback;   /* what a value outside the set is emitted as */
+    int                bound;      /* distinct values this label can ever take */
+} spnl_metric_label_t;
+
+typedef struct {
+    const char                *channel;
+    const char                *id;
+    const char                *name;       /* OTel metric name */
+    const char                *unit;
+    int                        is_hist;    /* 0 = monotonic Sum, 1 = explicit-bounds Histogram */
+    const double              *bounds;
+    int                        nbounds;
+    const spnl_metric_label_t *labels;
+    int                        nlabels;
+    int                        series_bound;
+} spnl_metric_desc_t;
+
+#define SPNL_RECMETRIC_MAX_LABELS         2
+#define SPNL_RECMETRIC_MAX_BOUNDS         15
+#define SPNL_RECMETRIC_LABEL_VAL_MAX      16
+#define SPNL_RECMETRIC_COUNT              2
+#define SPNL_RECMETRIC_MAX_SERIES         256
+/* The sum of every declared metric's series bound. The runtime sizes its
+ * accumulator by SPNL_RECMETRIC_MAX_SERIES and this is proof it fits. */
+#define SPNL_RECMETRIC_TOTAL_SERIES_BOUND 183
+#define SPNL_RECMETRIC_CONN_COUNT 0
+#define SPNL_RECMETRIC_HTTP_DURATION 1
+
+#ifdef SPNL_RECMETRIC_IMPL
+static const double spnl_bounds_otel_duration_s[SPNL_BOUNDS_OTEL_DURATION_S_N] = SPNL_BOUNDS_OTEL_DURATION_S_INIT;
+static const spnl_metric_label_t spnl_ml_conn_count[1] = {
+    { "spnl.conn.direction", (const char *const *)0, 0, (const char *)0, 3 },
+};
+
+static const char *const spnl_mlv_http_duration_0[9] = {
+    "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT",
+    "TRACE",
+};
+
+static const char *const spnl_mlv_http_duration_1[17] = {
+    "200", "201", "202", "204", "301", "302", "304", "400",
+    "401", "403", "404", "409", "429", "500", "502", "503",
+    "504",
+};
+static const spnl_metric_label_t spnl_ml_http_duration[2] = {
+    { "http.request.method", spnl_mlv_http_duration_0, 9, "_OTHER", 10 },
+    { "http.response.status_code", spnl_mlv_http_duration_1, 17, "_OTHER", 18 },
+};
+
+static const spnl_metric_desc_t spnl_recmetrics[2] = {
+    { "conn", "count", "spnl.conn.count", "{connection}", 0, (const double *)0, 0, spnl_ml_conn_count, 1, 3 },
+    { "http", "duration", "spnl.http.client.request.duration", "s", 1, spnl_bounds_otel_duration_s, 15, spnl_ml_http_duration, 2, 180 },
+};
+#endif /* SPNL_RECMETRIC_IMPL */
+
 #endif /* SPNL_RECORD_MIRROR_GEN_H */
+#endif /* SPNL_RECORD_MIRROR_MACROS_ONLY */

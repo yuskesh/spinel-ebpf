@@ -1,0 +1,65 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/135_kfield_str_wrong_shape.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @hits
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name kprobe__vfs_read
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name file
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name kfield_str_eq
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name file
+N 12 StringNode
+S 12 content file
+I 12 fzl 1
+N 13 StringNode
+S 13 content f_path.dentry
+I 13 fzl 1
+N 14 StringNode
+S 14 content d_name.name
+I 14 fzl 1
+A 10 arguments 11,12,13,14
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @hits
+N 17 CallNode
+S 17 name +
+N 18 InstanceVariableReadNode
+S 18 name @hits
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+A 15 body 16
+R 8 statements 15
+R 8 subsequent -1
+A 7 body 8
+R 4 body 7
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

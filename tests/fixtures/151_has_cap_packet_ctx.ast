@@ -1,0 +1,64 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/151_has_cap_packet_ctx.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @suspicious
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name xdp__probe
+R 4 parameters -1
+N 5 StatementsNode
+N 6 IfNode
+N 7 CallNode
+S 7 name ==
+N 8 CallNode
+S 8 name has_cap
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 ConstantPathNode
+N 11 ConstantReadNode
+S 11 name CAP
+R 10 parent 11
+S 10 name SYS_ADMIN
+A 9 arguments 10
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+R 7 receiver 8
+N 12 ArgumentsNode
+N 13 IntegerNode
+I 13 value 1
+A 12 arguments 13
+R 7 arguments 12
+R 7 block -1
+S 7 call_operator .
+R 6 predicate 7
+N 14 StatementsNode
+N 15 InstanceVariableWriteNode
+S 15 name @suspicious
+N 16 CallNode
+S 16 name +
+N 17 InstanceVariableReadNode
+S 17 name @suspicious
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 1
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+A 14 body 15
+R 6 statements 14
+R 6 subsequent -1
+N 20 ConstantReadNode
+S 20 name XDP_PASS
+A 5 body 6,20
+R 4 body 5
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

@@ -18,8 +18,22 @@ class CapabilitiesTest < Minitest::Test
   GEN = SpinelEbpf::CodegenBpf
   I   = SpinelEbpf::Introspect
 
-  # The authoritative set of all builtins (BUILTIN_NAMES + DYNPTR_BUILTINS).
-  ALL_BUILTINS = (GEN::BUILTIN_NAMES + GEN::DYNPTR_BUILTINS).uniq.freeze
+  # The authoritative set of all builtins is **what the affordance advertises**
+  # (Capabilities itself).
+  #
+  # It used to be `GEN::BUILTIN_NAMES + GEN::DYNPTR_BUILTINS`, i.e. the list held by
+  # the retired Ruby oracle codegen. That pinned the "exhaustive partition"
+  # governance to a **dead implementation**: eighteen builtins that the production
+  # C codegen does not have were still required to be classified, so taking them
+  # out honestly was the thing that made this test fail.
+  #
+  # Authority moved to the affordance. The delta against the Ruby oracle is kept as
+  # a fact by test_withdrawn_is_exactly_the_retired_oracle_delta -- history stays
+  # connected, it just stops being the authority. Whether what is advertised
+  # actually works is measured against the production codegen by
+  # tools/affordance_gate.rb; this test runs in Ruby alone and cannot see that far.
+  ALL_BUILTINS = CAP.all_builtins.freeze
+  RETIRED_ORACLE_BUILTINS = (GEN::BUILTIN_NAMES + GEN::DYNPTR_BUILTINS).uniq.freeze
 
   # ---------- exhaustive partition (the core governance rule) ----------
 
@@ -36,6 +50,26 @@ class CapabilitiesTest < Minitest::Test
     assert_empty dups, "builtin listed in more than one domain: #{dups.keys.inspect}"
     assert_equal ALL_BUILTINS.length, classified.length
     assert_equal ALL_BUILTINS.length, CAP.all_builtins.length
+  end
+
+  # The delta against the retired Ruby oracle is exactly the set that was taken out.
+  #
+  # Both directions matter, not just one: in the oracle but not in the affordance
+  # means WITHDRAWN; in the affordance but not in the oracle means a builtin the C
+  # codegen added, which is allowed to grow. If the first set drifts, something was
+  # either removed or reinstated without saying so.
+  def test_withdrawn_is_exactly_the_retired_oracle_delta
+    lost = (RETIRED_ORACLE_BUILTINS - ALL_BUILTINS).sort
+    assert_equal CAP::WITHDRAWN.keys.sort, lost,
+                 "a builtin in the Ruby oracle but not in the affordance must be listed as " \
+                 "WITHDRAWN (nothing disappears quietly, nothing comes back quietly)"
+    assert_empty(CAP::WITHDRAWN.keys & ALL_BUILTINS,
+                 "a name is both withdrawn and advertised (it has to be one or the other)")
+    CAP::WITHDRAWN.each do |name, rec|
+      assert rec[:why].is_a?(String) && rec[:why].length > 20, "#{name}: needs a reason it was taken out"
+      assert rec[:ctx].is_a?(Symbol), "#{name}: needs the ctx a gate builds its minimal probe from"
+      assert rec[:arity].is_a?(Integer), "#{name}: needs the arity it had"
+    end
   end
 
   def test_domains_are_the_four_layer1_plus_core
@@ -58,8 +92,16 @@ class CapabilitiesTest < Minitest::Test
   # name the same allowlist. Both refer to the same constant
   # (Capabilities::DPATH_OK_SECS).
   def test_dpath_gate_is_centralized_and_consistent
+    # The three hooks this started from stay at the head of the list, so the code
+    # generated for them is unchanged.
     assert_equal %w[lsm/file_open fmod_ret/security_file_open fmod_ret/security_file_permission],
-                 CAP::DPATH_OK_SECS
+                 CAP::DPATH_OK_SECS.first(3)
+    # The allowlist widened by measurement, and it is now literally the keys of
+    # DPATH_HOOKS (SEC -> which argument supplies the path).
+    assert_equal CAP::DPATH_HOOKS.keys, CAP::DPATH_OK_SECS
+    assert_includes CAP::DPATH_OK_SECS, "lsm/path_unlink"
+    assert_includes CAP::DPATH_OK_SECS, "lsm/bprm_check_security"
+    assert_includes CAP::DPATH_OK_SECS, "lsm/mmap_file"
     # The codegen oracle refers to the registry (the same object).
     assert_same CAP::DPATH_OK_SECS, GEN::MethodEmitter::DPATH_OK_SECS
     # All four d_path builtins are gated and share the same allowlist.
@@ -70,6 +112,51 @@ class CapabilitiesTest < Minitest::Test
       assert_equal CAP::DPATH_OK_SECS, g[:valid_secs]
     end
     assert_nil CAP.gate_for("hist_observe"), "gate_for must be nil for an ungated builtin"
+  end
+
+  # The allowlist became a table of "SEC -> which argument carries the path". Pin
+  # both that the table is well formed and that a hook measured to fail is never in
+  # it -- nothing gets added by guessing.
+  def test_dpath_hooks_table_is_well_formed_and_measured
+    CAP::DPATH_HOOKS.each do |sec, spec|
+      assert_includes %i[file path binprm], spec[:form], "#{sec}: unknown path-supplying form"
+      assert_includes [true, false], spec[:guard], "#{sec}: guard must be true/false"
+      refute_empty spec[:measured].to_s, "#{sec}: needs to say which measurement found it LOAD_OK"
+      assert_match(%r{\A(lsm|fmod_ret|fentry|fexit)/}, sec, "#{sec}: malformed SEC")
+    end
+    # The three original hooks are file-form with no guard, which is what keeps the
+    # code generated for them byte-identical to what it was.
+    %w[lsm/file_open fmod_ret/security_file_open fmod_ret/security_file_permission].each do |sec|
+      assert_equal :file, CAP::DPATH_HOOKS[sec][:form]
+      refute CAP::DPATH_HOOKS[sec][:guard], "adding a guard to #{sec} would change its output"
+    end
+    # lsm/mmap_file's argument is file__nullable in BTF. Its guard is not
+    # defensiveness, it is what makes the program load at all.
+    assert CAP::DPATH_HOOKS["lsm/mmap_file"][:guard]
+    assert_equal :path,   CAP::DPATH_HOOKS["lsm/path_unlink"][:form]
+    assert_equal :binprm, CAP::DPATH_HOOKS["lsm/bprm_check_security"][:form]
+    # The measured-rejected side does not intersect the allowlist.
+    refute_empty CAP::DPATH_MEASURED_REJECTED
+    CAP::DPATH_MEASURED_REJECTED.each do |sec, why|
+      refute_includes CAP::DPATH_OK_SECS, sec, "#{sec} was measured REJECTED"
+      refute_empty why.to_s, "#{sec}: keep the reason it failed (the verifier's own wording)"
+    end
+  end
+
+  # The gate lives in two places -- the production C codegen and the Ruby registry.
+  # Widening one alone gives "compiles under C, dies under the Ruby fallback", so
+  # parse the table out of the C source and compare.
+  def test_c_codegen_gate_table_matches_the_registry
+    src = File.read(File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__))
+    table = src[/static const CcDpathHook CC_DPATH_OK\[\] = \{(.*?)\n\};/m, 1]
+    refute_nil table, "the C-side CC_DPATH_OK table is not there (did its shape change?)"
+    c_hooks = table.scan(/\{\s*"([^"]+)",\s*CC_DP_(FILE|PATH|BINPRM),\s*([01])\s*,/)
+                   .to_h { |sec, form, guard| [sec, { form: form.downcase.to_sym, guard: guard == "1" }] }
+    assert_equal CAP::DPATH_HOOKS.keys, c_hooks.keys, "the gate's hook set differs between C and Ruby"
+    c_hooks.each do |sec, spec|
+      assert_equal CAP::DPATH_HOOKS[sec][:form],  spec[:form],  "#{sec}: the path-supplying form differs between C and Ruby"
+      assert_equal CAP::DPATH_HOOKS[sec][:guard], spec[:guard], "#{sec}: the NULL guard differs between C and Ruby"
+    end
   end
 
   def test_gated_builtins_are_all_enforcement_domain
@@ -131,7 +218,12 @@ class CapabilitiesTest < Minitest::Test
     r = CAP.catalog_report
     %i[observability enforcement net l7 core].each { |d| assert_match(/#{d}/, r) }
     assert_match(/context gates/, r)
-    assert_match(%r{emit_path.*lsm/file_open}, r)
+    # Builtins that share an allowlist print as one group, and the hooks inside it
+    # are grouped by which argument carries the path -- six builtins across thirty
+    # hooks listed flat is unreadable.
+    assert_match(%r{emit_path.*path_eq.*\n.*lsm/file_open}, r)
+    assert_match(%r{argument is a struct path \*.*lsm/path_unlink}, r)
+    assert_match(%r{tried and rejected.*\n.*lsm/file_permission}, r)
     assert_match(/--probe file\s+-> enforcement/, r)
   end
 
@@ -175,23 +267,58 @@ class CapabilitiesTest < Minitest::Test
                  doc["summary"]["opaque_builtins"]
   end
 
-  # (completeness) attach_kinds is 1:1 with codegen's ATTACH_PATTERNS and covers the main kinds.
-  def test_attach_kinds_match_codegen_patterns
+  # (completeness) every attach kind fills in its how-to-write-it fields, and the
+  # main kinds are present.
+  #
+  # The authority is **the affordance itself** (ATTACH_KINDS), not the retired Ruby
+  # oracle's ATTACH_PATTERNS. This is the same shape the builtin side turned out to
+  # have: the test used to demand that every kind in the oracle also be advertised,
+  # which meant **taking the four measured-dead kinds out honestly made it fail**.
+  # That is the structural reason a silent unported attach could survive for a year.
+  # History stays connected -- the test below pins the delta against
+  # WITHDRAWN_ATTACH.
+  def test_attach_kinds_are_well_formed
     json_kinds = CAP::ATTACH_KINDS.map { |a| a[:kind] }
-    codegen_kinds = GEN::ATTACH_PATTERNS.map { |_re, kind| kind }.uniq
-    assert_equal codegen_kinds.sort, json_kinds.sort,
-                 "attach_kinds has drifted from codegen's ATTACH_PATTERNS"
     assert_equal json_kinds.length, json_kinds.uniq.length, "duplicate attach kind"
-    # Cover the main kinds -- the affordance is what shows an author which attach points exist.
+    # Cover the main kinds -- the affordance is what shows an author which attach
+    # points exist. timer is not among them: it was withdrawn (WITHDRAWN_ATTACH).
     %i[kprobe kretprobe tracepoint fentry fexit lsm fmod_ret uprobe uretprobe usdt
        xdp tc_ingress tc_egress sk_reuseport sk_msg sock_ops tcp_cc sched_ext qdisc
-       cgroup_connect4 iter_task raw_tp perf_event timer].each do |k|
+       cgroup_connect4 iter_task raw_tp perf_event].each do |k|
       assert_includes json_kinds, k, "main attach kind #{k} is missing from the affordance"
     end
-    # Each entry fills in the how-to-write-it fields.
     CAP::ATTACH_KINDS.each do |a|
       assert a[:method_prefix], "#{a[:kind]} has no method_prefix"
       assert a[:args_convention], "#{a[:kind]} has no args_convention"
+      assert a[:sec], "#{a[:kind]} has no sec (the affordance gate uses it as the expected value)"
+    end
+  end
+
+  # The delta against the retired Ruby oracle is exactly WITHDRAWN_ATTACH. History
+  # is not the authority, but it stays on the record -- and it can only move one
+  # way: in the oracle and not advertised means withdrawn; the reverse does not
+  # exist.
+  def test_withdrawn_attach_is_exactly_the_retired_oracle_delta
+    oracle = GEN::ATTACH_PATTERNS.map { |_re, kind| kind }.uniq
+    advertised = CAP::ATTACH_KINDS.map { |a| a[:kind] }
+    assert_equal CAP::WITHDRAWN_ATTACH.keys.sort, (oracle - advertised).sort,
+                 "WITHDRAWN_ATTACH is not the set that is in the Ruby oracle and not in the affordance"
+    assert_empty advertised - oracle,
+                 "an attach kind is advertised that the oracle never had (if it is genuinely new, update this test)"
+    assert_empty advertised & CAP::WITHDRAWN_ATTACH.keys,
+                 "the same kind is both advertised and withdrawn"
+  end
+
+  # A withdrawn attach kind says **why** and **what to write instead**. Removing it
+  # silently is not allowed -- the same contract WITHDRAWN (builtins) carries.
+  def test_withdrawn_attach_entries_carry_reason_and_alternative
+    refute_empty CAP::WITHDRAWN_ATTACH,
+                 "an empty standing negative control leaves the gate unable to detect the regression"
+    CAP::WITHDRAWN_ATTACH.each do |kind, w|
+      assert w[:method_prefix], "#{kind}: no method_prefix"
+      assert w[:probe], "#{kind}: no probe (a gate cannot write the minimal program without one)"
+      assert w[:why] && w[:why].length > 40, "#{kind}: why is too short"
+      assert w[:instead], "#{kind}: no instead (a withdrawal with no alternative is a dead end)"
     end
   end
 
@@ -250,9 +377,17 @@ class CapabilitiesTest < Minitest::Test
       assert CAP.builtin_entry(b)[:gated], "#{b} should be gated"
     end
     # Attach-kind gates show up in valid_contexts too, so they are machine-readable.
-    assert_equal %w[xdp], CAP.context_strings("xdp_match_health")
+    assert_equal %w[iter_task], CAP.context_strings("iter_task")
     assert_equal %w[tcp_cc], CAP.context_strings("tcp_sock_snd_cwnd")
-    assert_equal %w[sk_reuseport], CAP.context_strings("reuseport_hash")
+    assert_equal %w[cgroup_connect4 cgroup_bind4], CAP.context_strings("sock_addr_ip4")
+    # The packet-context gates show up there as well. The codegen had been dying on
+    # these outside a packet program for a long time while the affordance still said
+    # `gated: false` -- an understated constraint, drift in the opposite direction
+    # from advertising something that does not exist.
+    assert_equal %w[xdp tc_ingress tc_egress], CAP.context_strings("fib_lookup")
+    assert_equal %w[tc_ingress tc_egress], CAP.context_strings("l4_offset")
+    assert_equal %w[tc_ingress], CAP.context_strings("sk_assign_tcp")
+    assert CAP.builtin_entry("l4_offset")[:gated]
     # An ungated builtin has valid_contexts=nil plus a best-effort note.
     assert_nil CAP.context_strings("hist_observe")
     refute CAP.builtin_entry("hist_observe")[:gated]
@@ -496,7 +631,7 @@ class CapabilitiesTest < Minitest::Test
     assert_equal 'path_eq(file, "/usr/bin/curl")',         CAP.example_for("path_eq")
     assert_equal 'parent_path_eq("/usr/bin/curl")',        CAP.example_for("parent_path_eq")
     assert_equal 'kfield(sk, "sock", "sk_sndbuf")',        CAP.example_for("kfield")
-    assert_equal 'payload_starts("GET ")',                 CAP.example_for("payload_starts")
+    assert_equal 'path_starts_with(file, "/etc/secret/")',  CAP.example_for("path_starts_with")
     # An override always names a real, non-opaque builtin (drift guard).
     CAP::EXAMPLE_OVERRIDES.each_key do |b|
       assert_includes ALL_BUILTINS, b, "override #{b} is not an existing builtin"
@@ -654,6 +789,63 @@ class CapabilitiesTest < Minitest::Test
     end
   end
 
+  # --- metrics, and the cardinality facts the surface must carry -------------
+
+  def test_metrics_are_published_with_their_series_bound
+    ms = CAP.record_metrics
+    refute_empty ms, "not one metric is published"
+    ms.each do |m|
+      assert_includes %w[counter histogram], m[:kind]
+      refute_empty m[:name].to_s
+      refute_empty m[:unit].to_s
+      assert_operator m[:series_bound].to_i, :>, 0,
+                      "#{m[:name]}: no bound on the number of series means the cost is unreadable"
+    end
+  end
+
+  def test_every_metric_label_says_where_its_bound_comes_from
+    # "bound 3" on its own does not say whether the 3 is the result of a **declared
+    # coarsening** (values outside the set fold into a fallback, and only the span
+    # keeps the exact one) or of a set that was closed to begin with. Without that,
+    # the first sign of coarsening is `_OTHER` appearing on a dashboard.
+    CAP.record_metrics.each do |m|
+      Array(m[:labels]).each do |l|
+        assert_includes %w[declared_set value_map], l[:bound_from],
+                        "#{m[:name]} / #{l[:key]}: the bound does not say where it comes from"
+        assert_operator l[:bound].to_i, :>, 0
+        if l[:bound_from] == "declared_set"
+          refute_empty l[:fallback].to_s, "#{l[:key]}: nothing outside the set has anywhere to go"
+          assert_equal Array(l[:values]).length + 1, l[:bound]
+        end
+      end
+    end
+  end
+
+  def test_capabilities_json_carries_the_cardinality_ceiling
+    j = JSON.parse(CAP.affordance_json, symbolize_names: true)
+    assert_operator j[:summary][:record_metric_count], :>, 0
+    assert_equal CAP.record_metrics.sum { |m| m[:series_bound].to_i },
+                 j[:summary][:record_metric_series_bound]
+    refute_empty Array(j[:record_bounds_sets]), "the histogram bucket boundaries are not published"
+  end
+
+  def test_metric_report_shows_the_bound_and_the_coarsening
+    r = CAP.record_channels_report
+    assert_includes r, "metrics:"
+    assert_includes r, "series <="
+    assert_match(/the span keeps the exact value/, r,
+                 "the human-readable surface does not say that a coarsening is happening")
+  end
+
+  def test_metric_value_and_labels_are_consumer_properties
+    CAP.record_metrics.each do |m|
+      props = Array(CAP.record_properties(m[:channel])).map { |p| p[:name].to_s }
+      Array(m[:labels]).each { |l| assert_includes props, l[:from].to_s }
+      next if m[:value_from].to_s.empty?
+      assert_includes props, m[:value_from].to_s
+    end
+  end
+
   def test_record_producers_are_registered_builtins
     prods = CAP.record_producers
     assert_equal %w[dns_emit emit_connect emit_dns emit_l7 emit_tcp_payload emit_tcp_stream
@@ -796,7 +988,10 @@ class CapabilitiesTest < Minitest::Test
     TYPED_CHANNELS.each do |id|
       body = src[/cc_rec_#{id}_fields\[\]\s*=\s*\{(.*?)\n\};/m, 1]
       refute_nil body, "cannot read cc_rec_#{id}_fields from record_schema.h"
-      declared_fields = body.scan(/\{\s*"([^"]+)",.*?,\s*(?:"(?:[^"\\]|\\.)*"|NULL)\s*,\s*(NULL|"int"|"str")\s*\}/m)
+      # `{ name, ctype, count, size, align, note, expose[, kfilter] }` -- the
+      # trailing kfilter column is optional, so the row shape here is "note,
+      # expose, and possibly one more literal".
+      declared_fields = body.scan(/\{\s*"([^"]+)",.*?,\s*(?:"(?:[^"\\]|\\.)*"|NULL)\s*,\s*(NULL|"int"|"str")\s*(?:,\s*(?:NULL|"[^"]*")\s*)?\}/m)
                             .reject { |_n, e| e == "NULL" }.map { |n, e| [n, e.delete('"')] }
       dbody = src[/cc_rec_#{id}_derived\[\]\s*=\s*\{(.*?)\n\};/m, 1]
       declared_derived = dbody ? dbody.scan(/\{\s*"([^"]+)",\s*"([^"]+)",/).map { |n, e| [n, e] } : []
@@ -842,6 +1037,15 @@ class CapabilitiesTest < Minitest::Test
                   "record_to_str" => /^void %s\(const spnl_rec_[a-z0-9]+_t \*/,
                   "record_to_int" => /^long %s\(const spnl_rec_[a-z0-9]+_t \*/ }.freeze
 
+  # The fifth form, code_to_name, is **different in kind** from the four above: what
+  # its impl column names is not a runtime function but a declared value map, and
+  # the lookup is generated. So the thing to look in is the generated header rather
+  # than the agent -- and the check also has to establish that the runtime does NOT
+  # carry one of its own, because two tables mean the declared one and the one
+  # actually consulted can be different tables, which is precisely the failure this
+  # layer exists to remove.
+  DERIV_GENERATED = { "code_to_name" => "static inline void spnl_valmap_%s(long v, char *out, int cap)" }.freeze
+
   def test_runtime_provides_what_the_generated_consumer_requires
     agent = File.read(OTLP_AGENT_SRC)
     src   = File.read(SCHEMA_TABLE_SRC)
@@ -857,6 +1061,14 @@ class CapabilitiesTest < Minitest::Test
       dbody = src[/cc_rec_#{id}_derived\[\]\s*=\s*\{(.*?)\n\};/m, 1]
       next unless dbody
       dbody.scan(/\{\s*"[^"]+",\s*"[^"]+",\s*"[^"]+",\s*"([^"]+)",\s*"([^"]+)"/).each do |impl, form|
+        if (gen = DERIV_GENERATED[form])
+          hdr = File.read(MIRROR_GEN_SRC)
+          assert_includes hdr, format(gen, impl),
+                          "the lookup for value map #{impl} (#{form}) is not in the generated header"
+          refute_match(/^\s*(static\s+)?\w[\w \*]*\bspnl_valmap_#{Regexp.escape(impl)}\s*\(/, agent,
+                       "the runtime carries a hand-written copy of value map #{impl} (two tables)")
+          next
+        end
         pat = DERIV_PROTO.fetch(form) { flunk "unknown impl_form #{form} (the generator should have died)" }
         assert_match(Regexp.new(format(pat.source, Regexp.escape(impl))), agent,
                      "derivation #{impl} (#{form}) has no implementation in the runtime, or its signature differs")
@@ -911,7 +1123,17 @@ class CapabilitiesTest < Minitest::Test
     peer    = agent[/^void spnl_conn_peer\(.*?\n\}\n/m]
     refute_nil builder, "cannot read conn_fill_span()"
     refute_nil peer,    "cannot read spnl_conn_peer()"
-    assert_includes builder, "spnl_conn_direction(", "the span does not go through the impl behind ev.direction"
+    # The mapping behind `direction` went from a hand-written switch to a **declared
+    # value map**. The invariant worth holding is unchanged (the span builder goes
+    # through the same implementation as ev.direction), but the implementation's
+    # name is derived from the declaration -- a test that hard-codes it would end up
+    # demanding the old implementation the moment the declaration moves.
+    dir_prop = SpinelEbpf::Capabilities.record_properties("conn").find { |p| p[:name] == "direction" }
+    refute_nil dir_prop, "conn has no ev.direction"
+    assert_equal "conn_direction", dir_prop[:value_map],
+                 "ev.direction does not come from a value map"
+    assert_includes builder, "spnl_valmap_#{dir_prop[:value_map]}(",
+                    "the span does not go through ev.direction's impl (the generated value map)"
     assert_includes peer,    "conn_peer_addr(",      "ev.peer formats the address on its own"
     assert_includes builder, "conn_peer_addr(",      "the span formats the address on its own"
     assert_equal 1, agent.scan(/inet_ntop\(AF_INET6/).length,
@@ -947,9 +1169,9 @@ class CapabilitiesTest < Minitest::Test
         [id, name, impl, "SPNL_REC_DERIVED_#{id.upcase}_#{name.upcase}_CAP"]
       }
     }
-    assert_equal 8, derived.length,
-                 "the number of str derivations changed (expected: qname/peer/direction/http.method/http.path/" \
-                 "offcpu.method/offcpu.path/offcpu.wait_kind)"
+    assert_equal 10, derived.length,
+                 "the number of str derivations changed (expected: qname/peer/direction/conn.tcp_state/" \
+                 "http.method/http.path/offcpu.method/offcpu.path/offcpu.wait_kind/offcpu.wait_stack_trace)"
     caps = {}
     derived.each do |id, name, _impl, macro|
       m = hdr[/^#define #{macro}\s+(\d+)$/, 1]
@@ -1098,6 +1320,58 @@ class CapabilitiesTest < Minitest::Test
     end
   end
 
+  # **The frames and the kind are two readings of ONE fetch.**
+  #
+  # This pins the structure that keeps the failure removed for values from being
+  # rebuilt for stacks. Write a second frame walk next to the classifier and the two
+  # readings can disagree **about which stack they read** -- the lookup is against a
+  # live BPF map, so reading it twice gives two moments. Hence:
+  #   - fetching the frames (_oc_frames) is one function in the whole agent,
+  #   - classification (_oc_classify) and rendering (_oc_render) both take its output,
+  #   - the span builder and the child "wait" span both go through the declared
+  #     derivation,
+  #   - the depth limit (SPNL_STACK_FRAMES) is read from one place only (two places
+  #     and ev and the span can carry a different number of frames -- the depth
+  #     version of the output-capacity problem).
+  def test_offcpu_wait_stack_shares_one_frame_fetch
+    agent = File.read(OTLP_AGENT_SRC)
+    bare  = agent.gsub(%r{/\*.*?\*/}m, "")
+    assert_equal 1, bare.scan(/^static int _oc_frames\(/).length,
+                 "the frame fetch is not one function (kind and frames could read different stacks)"
+    kind = bare[/^static const char \*_oc_wait_kind\(.*?\n\}\n/m]
+    refute_nil kind, "cannot read _oc_wait_kind()"
+    assert_includes kind, "_oc_frames(", "the classifier does not go through the shared frame fetch"
+    stack = bare[/^void spnl_offcpu_wait_stack\(const spnl_rec_offcpu_t \*r.*?\n\}\n/m]
+    refute_nil stack, "spnl_offcpu_wait_stack() does not have the C signature it declares"
+    assert_includes stack, "_oc_frames(", "the rendering side does not go through the shared frame fetch"
+    assert_includes stack, "_oc_render(", "the rendering does not go through the shared renderer"
+    # The depth limit is read in exactly one place (inside _oc_render).
+    assert_equal 1, bare.scan(/getenv\("SPNL_STACK_FRAMES"\)/).length,
+                 "SPNL_STACK_FRAMES is read in more than one place (ev and the span could differ in depth)"
+    # The parent span (shared builder) and the child wait span both go through the
+    # declared derivation.
+    builder = bare[/^static int offcpu_fill_span\(.*?\n\}\n/m]
+    assert_includes builder, "spnl_offcpu_wait_stack(", "the span builder does not go through the derivation"
+    push = bare[/^int spnl_otlp_offcpu_span_push_obj\(.*?\n\}\n/m]
+    assert_includes push, "spnl_offcpu_wait_stack(",
+                    "the child wait span builds its frames by a different route than the parent"
+    # The declaration side: it is derived, and the raw stack id stays unexposed.
+    props = CAP.record_properties("offcpu")
+    p = props.find { |x| x[:name] == "wait_stack_trace" }
+    refute_nil p, "ev.wait_stack_trace is missing"
+    assert_equal "derived", p[:kind]
+    assert_nil props.find { |x| x[:name] == "wait_stack" },
+               "the stack id (an index into a map) became public"
+    # egress: the attribute is declared as a sibling of spnl.wait.kind, and its
+    # condition says it is opt-in.
+    attrs = CAP.record_channels.find { |c| c[:id] == "offcpu" }[:egress][:attributes]
+    st = attrs.find { |a| a[:key] == "spnl.wait.stack" }
+    refute_nil st, "spnl.wait.stack is not in the egress declaration"
+    assert_match(/SPNL_STACK_FRAMES/, st[:condition],
+                 "the condition does not say it is opt-in (so it reads as emitted by default)")
+    refute_nil attrs.find { |a| a[:key] == "spnl.wait.kind" }, "its sibling spnl.wait.kind is gone"
+  end
+
   # UNITS ARE PART OF "output of the same function" TOO. On the wire srtt is the
   # kernel's 1/8-microsecond value while the span carries microseconds, so exposing
   # the field raw would make `ev.srtt_us` alone differ from the span attribute.
@@ -1167,6 +1441,37 @@ class CapabilitiesTest < Minitest::Test
     assert_nil doc["builtins"].find { |b| b["name"] == "hist_observe" }["record_channel"]
   end
 
+  # Surface sugar is published as a **machine-readable equivalence claim**. While it
+  # lived only in the Ruby-subset prose, `pkt.l4.proto` was advertised for a year
+  # although the production codegen did not have it (measured) -- prose does not
+  # define anything for a checker to check.
+  def test_affordance_json_carries_surface_sugar_claims
+    require "json"
+    doc = JSON.parse(CAP.affordance_json)
+    sugar = doc["surface_sugar"]
+    refute_nil sugar, "surface_sugar is missing from the affordance"
+    assert_equal CAP.surface_sugar.size, sugar.size
+
+    chain = sugar.find { |s| s["sugar"] == "pkt.l4.proto" }
+    refute_nil chain, "the pkt.* chain is not listed -- the very surface measured dead"
+    assert_equal "pkt_l4_proto", chain["flat"]
+    assert_equal "identical", chain["equiv"], "the claim for the chain form is byte-identical output"
+
+    # "a spelling that has an equivalent" is the invariant over every entry, which
+    # is the shape a gate can act on.
+    sugar.each do |s|
+      refute_nil s["sugar"]; refute_nil s["flat"]
+      assert_includes %w[identical compiles], s["equiv"], "#{s['id']}: equiv is unclear"
+    end
+
+    # A withdrawn spelling is published too -- nothing disappears silently, the same
+    # convention the withdrawn builtins and attach kinds follow.
+    wd = doc["withdrawn_sugar"]
+    refute_nil wd, "withdrawn_sugar is missing from the affordance"
+    assert wd.key?("pkt.byte_at(0)"), "the withdrawal of pkt.byte_at is not readable"
+    refute_nil wd["pkt.byte_at(0)"]["instead"]
+  end
+
   # The `to_span` resolution rule is published MACHINE-READABLY, the same way the
   # emit_path context gate is. If a model cannot read "why it failed and how to
   # write it instead" out of the affordance, a loud error is no better than a syntax
@@ -1192,6 +1497,71 @@ class CapabilitiesTest < Minitest::Test
     r = CAP.catalog_report
     assert_match(/userspace consumer DSL/, r)
     assert_match(/typed channels .*: dns, conn, l7, http/, r)
+  end
+
+  # ---------- the map vocabulary ----------
+
+  # What this project ships to an author is the affordance. With not one word about
+  # maps in it, a model could not read that writing `@x += 1` brings a map into
+  # being, or that a ring buffer drops records silently when it overflows -- which
+  # is how the affordance stood until this section existed. Pin that it is in the
+  # JSON.
+  def test_affordance_json_carries_the_map_vocabulary
+    a = JSON.parse(CAP.affordance_json)
+    maps = a.fetch("maps")
+    refute_empty maps
+    assert_equal maps.size, a["summary"]["map_count"]
+    assert_equal maps.map { |m| m["type"] }.uniq.size, a["summary"]["map_type_count"]
+    # One entry = "which surface creates which map, in what shape"
+    hist = maps.find { |m| m["id"] == "hist" }
+    assert_equal "bpf_hist", hist["map"]
+    assert_equal "ARRAY", hist["type"]
+    assert_equal "64", hist["max_entries"]
+    assert_includes hist["created_by"], "hist_observe"
+    # Capacity alone is not enough to judge by; what happens when it fills up is the
+    # substance
+    maps.each { |m| refute_nil m["when_full"], "#{m['id']}: does not say what happens when full" }
+    # The ring buffer's "drops silently" is written with the measurement behind it
+    rb = maps.find { |m| m["id"] == "dns_events" }
+    assert_equal "RINGBUF", rb["type"]
+    assert_match(/lost/, rb["when_full"])
+    # per-CPU is unreadable unless it also says "userspace sums them"
+    lost = maps.find { |m| m["id"] == "ringbuf_lost" }
+    assert_equal true, lost["per_cpu"]
+    assert_match(/per-CPU/, lost["note"])
+    refute_empty a.fetch("withdrawn_maps")
+  end
+
+  # The four forms that never appear in `SEC(".maps")` -- struct_ops, .rodata,
+  # private(A) and the libbpf headers -- are listed too. Leaving them out would ship
+  # the same misreading a text scanner makes first: "no declaration means no map".
+  def test_affordance_covers_maps_that_are_not_declared_as_maps
+    forms = CAP::MAPS.group_by { |m| m[:declared_as] }
+    %i[maps struct_ops rodata data_section libbpf_header].each do |f|
+      refute_nil forms[f], "no entry with declared_as: #{f}"
+    end
+    assert_equal %w[param filter_by], forms[:rodata].first[:created_by]
+    # Writing one usdt handler adds three maps (nothing declares them in the emitted C)
+    assert_equal 3, forms[:libbpf_header].size
+    forms[:libbpf_header].each { |m| assert_equal %w[usdt], m[:created_by] }
+  end
+
+  # "the set of builtins this probe uses -> the maps that come into being" is
+  # queryable, which is the interface describe needs.
+  def test_maps_created_by_resolves_surfaces_to_maps
+    ids = CAP.maps_created_by(%w[emit_dns]).map { |m| m[:id] }
+    assert_includes ids, :dns_events
+    assert_includes ids, :ringbuf_lost, "an emit builtin also creates the lost counter"
+    assert_empty CAP.maps_created_by(%w[pid])
+  end
+
+  # (human-readable) The catalog has a maps section.
+  def test_catalog_report_shows_maps
+    r = CAP.catalog_report
+    assert_match(/maps \(what writing a surface creates/, r)
+    assert_match(/bpf_hist\s+ARRAY\s+max_entries=64/, r)
+    assert_match(/\[struct_ops\]/, r)
+    assert_match(/when full: /, r)
   end
 
   # (human-readable) The catalog has a record channel section (byte layout + egress).

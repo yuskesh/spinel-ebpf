@@ -1,0 +1,79 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/139_iter_task_field.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @ntasks
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @pid_sum
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name iter__task__scan
+R 6 parameters -1
+N 7 StatementsNode
+N 8 LocalVariableWriteNode
+S 8 name t
+N 9 CallNode
+S 9 name iter_task
+R 9 receiver -1
+R 9 arguments -1
+R 9 block -1
+S 9 call_operator .
+I 9 vcall 1
+R 8 value 9
+N 10 InstanceVariableWriteNode
+S 10 name @ntasks
+N 11 CallNode
+S 11 name +
+N 12 InstanceVariableReadNode
+S 12 name @ntasks
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 value 11
+N 15 InstanceVariableWriteNode
+S 15 name @pid_sum
+N 16 CallNode
+S 16 name +
+N 17 InstanceVariableReadNode
+S 17 name @pid_sum
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 CallNode
+S 19 name kfield
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 LocalVariableReadNode
+S 21 name t
+N 22 StringNode
+S 22 content task_struct
+I 22 fzl 1
+N 23 StringNode
+S 23 content pid
+I 23 fzl 1
+A 20 arguments 21,22,23
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 value 16
+N 24 IntegerNode
+I 24 value 0
+A 7 body 8,10,15,24
+R 6 body 7
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

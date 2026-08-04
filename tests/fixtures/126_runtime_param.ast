@@ -1,0 +1,151 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/126_runtime_param.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name param
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value target_pid
+N 5 KeywordHashNode
+N 6 AssocNode
+N 7 SymbolNode
+S 7 value default
+R 6 key 7
+N 8 IntegerNode
+I 8 value 0
+R 6 value 8
+A 5 elements 6
+A 3 arguments 4,5
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 9 CallNode
+S 9 name param
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value min_dfd
+A 10 arguments 11
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+N 12 DefNode
+S 12 name spnl_emit
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name x
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+R 12 body -1
+R 12 receiver -1
+N 15 DefNode
+S 15 name tracepoint__syscalls__sys_enter_openat
+N 16 ParametersNode
+N 17 RequiredParameterNode
+S 17 name dfd
+A 16 requireds 17
+A 16 optionals 
+A 16 keywords 
+A 16 posts 
+R 15 parameters 16
+N 18 StatementsNode
+N 19 IfNode
+N 20 AndNode
+N 21 ParenthesesNode
+N 22 StatementsNode
+N 23 OrNode
+N 24 CallNode
+S 24 name ==
+N 25 CallNode
+S 25 name target_pid
+R 25 receiver -1
+R 25 arguments -1
+R 25 block -1
+S 25 call_operator .
+I 25 vcall 1
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 0
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+R 23 left 24
+N 28 CallNode
+S 28 name ==
+N 29 CallNode
+S 29 name pid
+R 29 receiver -1
+R 29 arguments -1
+R 29 block -1
+S 29 call_operator .
+I 29 vcall 1
+R 28 receiver 29
+N 30 ArgumentsNode
+N 31 CallNode
+S 31 name target_pid
+R 31 receiver -1
+R 31 arguments -1
+R 31 block -1
+S 31 call_operator .
+I 31 vcall 1
+A 30 arguments 31
+R 28 arguments 30
+R 28 block -1
+S 28 call_operator .
+R 23 right 28
+A 22 body 23
+R 21 body 22
+R 20 left 21
+N 32 CallNode
+S 32 name >=
+N 33 LocalVariableReadNode
+S 33 name dfd
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 CallNode
+S 35 name min_dfd
+R 35 receiver -1
+R 35 arguments -1
+R 35 block -1
+S 35 call_operator .
+I 35 vcall 1
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+R 20 right 32
+R 19 predicate 20
+N 36 StatementsNode
+N 37 InstanceVariableOperatorWriteNode
+S 37 name @opens
+S 37 binary_operator +
+N 38 IntegerNode
+I 38 value 1
+R 37 value 38
+N 39 CallNode
+S 39 name spnl_emit
+R 39 receiver -1
+N 40 ArgumentsNode
+N 41 LocalVariableReadNode
+S 41 name dfd
+A 40 arguments 41
+R 39 arguments 40
+R 39 block -1
+S 39 call_operator .
+A 36 body 37,39
+R 19 statements 36
+R 19 subsequent -1
+N 42 IntegerNode
+I 42 value 0
+A 18 body 19,42
+R 15 body 18
+R 15 receiver -1
+A 1 body 2,9,12,15
+R 0 statements 1

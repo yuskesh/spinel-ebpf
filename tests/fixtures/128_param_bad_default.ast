@@ -1,0 +1,87 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/128_param_bad_default.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name param
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value min_size
+N 5 KeywordHashNode
+N 6 AssocNode
+N 7 SymbolNode
+S 7 value default
+R 6 key 7
+N 8 StringNode
+S 8 content large
+I 8 fzl 1
+R 6 value 8
+A 5 elements 6
+A 3 arguments 4,5
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 9 DefNode
+S 9 name spnl_emit
+N 10 ParametersNode
+N 11 RequiredParameterNode
+S 11 name x
+A 10 requireds 11
+A 10 optionals 
+A 10 keywords 
+A 10 posts 
+R 9 parameters 10
+R 9 body -1
+R 9 receiver -1
+N 12 DefNode
+S 12 name tracepoint__syscalls__sys_enter_openat
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name dfd
+A 13 requireds 14
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 15 StatementsNode
+N 16 IfNode
+N 17 CallNode
+S 17 name >=
+N 18 LocalVariableReadNode
+S 18 name dfd
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 CallNode
+S 20 name min_size
+R 20 receiver -1
+R 20 arguments -1
+R 20 block -1
+S 20 call_operator .
+I 20 vcall 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 predicate 17
+N 21 StatementsNode
+N 22 CallNode
+S 22 name spnl_emit
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 LocalVariableReadNode
+S 24 name dfd
+A 23 arguments 24
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+A 21 body 22
+R 16 statements 21
+R 16 subsequent -1
+N 25 IntegerNode
+I 25 value 0
+A 15 body 16,25
+R 12 body 15
+R 12 receiver -1
+A 1 body 2,9,12
+R 0 statements 1

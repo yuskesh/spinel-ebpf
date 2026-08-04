@@ -128,6 +128,11 @@ unsigned long spnl_channel_in_count(int i);
  *                            the prose so the prose stays free to improve. */
 void          spnl_channel_report(FILE *fp);
 void          spnl_channel_report_arm(void);
+/* Bind a <unit>_lost PERCPU_ARRAY counter fd (see the .c). The loader calls this
+ * for every such map; the balance report sums them at exit to name the records
+ * the kernel dropped on a full ringbuf -- the one silent drop the drain-layer
+ * counters cannot see. */
+void          spnl_lost_bind(int fd);
 
 /* dump a per-unit log2 histogram (BPF_MAP_TYPE_ARRAY of 64 __u64 slots)
  * to `fp` in bcc-compatible ASCII format. `label` is printed as the value

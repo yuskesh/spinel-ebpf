@@ -238,6 +238,55 @@ static void w_chan(int fd, const char *name)
     do { w_str(fd, " "); n++; } while (n < 24);
 }
 
+/* ---- ringbuf lost-sample accounting ---------------------------------------
+ * The channel balance above counts records that came OUT of a ringbuf. It
+ * cannot see the ones the kernel dropped: a bpf_ringbuf_reserve() that returns
+ * NULL (ring full) discards the event before any userspace code runs, so the
+ * drain layer never sees it. The codegen now bumps a per-CPU counter map
+ * (<unit>_lost) in every emit else-branch; the loader binds that map's fd via
+ * spnl_lost_bind(), and the report sums it at exit.
+ *
+ * Bound (not read) at load: the read is deferred to report time so the count is
+ * final. It is a single bpf() syscall into a pre-allocated buffer plus a sum --
+ * async-signal-safe, which matters because these probes usually end on SIGTERM
+ * (`timeout N`) / SIGINT and the report can run from that handler (same reason
+ * the report uses write(2), not stdio -- see the note above). */
+#define SPNL_LOST_MAX 8
+static int    g_spnl_lost_fds[SPNL_LOST_MAX];
+static int    g_spnl_lost_nfds = 0;
+static int    g_spnl_lost_ncpu = 0;
+static __u64 *g_spnl_lost_buf  = NULL;   /* ncpu slots, pre-allocated at bind */
+
+/* Register a <unit>_lost PERCPU_ARRAY fd. Called by the loader for every such
+ * map (usually one per program). Allocates the per-CPU read buffer once, in
+ * normal context, so report time never allocates. */
+void spnl_lost_bind(int fd)
+{
+    if (fd < 0 || g_spnl_lost_nfds >= SPNL_LOST_MAX) return;
+    if (!g_spnl_lost_buf) {
+        int n = libbpf_num_possible_cpus();
+        if (n <= 0) n = 1;
+        g_spnl_lost_buf = calloc((size_t)n, sizeof(__u64));
+        if (!g_spnl_lost_buf) return;   /* leave nfds/ncpu at 0: report stays silent */
+        g_spnl_lost_ncpu = n;
+    }
+    g_spnl_lost_fds[g_spnl_lost_nfds++] = fd;
+}
+
+/* Sum every bound lost counter across all CPUs. 0 when nothing was dropped, or
+ * when no lost map was bound (a probe with no ringbuf emit). */
+static unsigned long spnl_lost_total(void)
+{
+    if (!g_spnl_lost_buf || g_spnl_lost_ncpu <= 0) return 0;
+    unsigned long total = 0;
+    __u32 key = 0;
+    for (int i = 0; i < g_spnl_lost_nfds; i++) {
+        if (bpf_map_lookup_elem(g_spnl_lost_fds[i], &key, g_spnl_lost_buf) != 0) continue;
+        for (int c = 0; c < g_spnl_lost_ncpu; c++) total += g_spnl_lost_buf[c];
+    }
+    return total;
+}
+
 /* A stable projection of the same numbers, for a machine to read.
  *
  * Deliberately separate from the prose above. The prose exists to be improved
@@ -257,6 +306,13 @@ static void spnl_channel_report_kv_fd(int fd)
         w_str(fd, " out=");           w_num(fd, s->out);
         w_str(fd, " dropped=");       w_num(fd, dropped);
         w_str(fd, " filtered=");      w_num(fd, s->filtered);
+        w_str(fd, "\n");
+    }
+    /* Unit-wide kernel-side ringbuf-full drops. Emitted whenever a lost map is
+     * bound so a tool can read a 0, distinguishing "measured, none" from "not
+     * measured". */
+    if (g_spnl_lost_nfds > 0) {
+        w_str(fd, "spnl.lost total=");   w_num(fd, spnl_lost_total());
         w_str(fd, "\n");
     }
 }
@@ -335,6 +391,31 @@ static void spnl_channel_report_fd(int fd)
                 w_str(fd, "\n");
             }
         }
+    }
+
+    /* The fourth failure the balance report can name. Distinct from every
+     * per-channel line above: those count what the drain layer saw, this counts
+     * what the kernel threw away before the drain layer existed -- a
+     * bpf_ringbuf_reserve() that returned NULL because the ring was full. And
+     * distinct from a per-channel `dropped <reason>`, which is userspace
+     * choosing to discard a record it did receive; this one was never received.
+     * Unit-wide (all channels combined) because the counter is one per unit, not
+     * per ring; the advice is the same regardless of which ring overflowed. */
+    unsigned long lost = spnl_lost_total();
+    if (lost) {
+        w_chan(fd, "");
+        w_str(fd, "** ");  w_num(fd, lost);
+        w_str(fd, " dropped by the kernel (ringbuf full) **\n");
+        w_chan(fd, "");
+        w_str(fd, "  a bpf_ringbuf_reserve() returned NULL: the probe produced\n");
+        w_chan(fd, "");
+        w_str(fd, "  records faster than userspace drained them, so the kernel\n");
+        w_chan(fd, "");
+        w_str(fd, "  discarded these before any consumer ran. raise the channel's\n");
+        w_chan(fd, "");
+        w_str(fd, "  ringbuf size (default 256KB) in its declaration, or drain more\n");
+        w_chan(fd, "");
+        w_str(fd, "  often / filter earlier. count is unit-wide (all channels).\n");
     }
 }
 

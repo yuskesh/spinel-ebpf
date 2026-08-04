@@ -1,0 +1,120 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/134_kfield_str_eq.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @hits
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name kprobe__vfs_read
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name file
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name kfield_str_eq
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 LocalVariableReadNode
+S 11 name file
+N 12 StringNode
+S 12 content file
+I 12 fzl 1
+N 13 StringNode
+S 13 content f_path.dentry
+I 13 fzl 1
+N 14 StringNode
+S 14 content d_name.name
+I 14 fzl 1
+N 15 StringNode
+S 15 content spnl_target.txt
+I 15 fzl 1
+A 10 arguments 11,12,13,14,15
+R 9 arguments 10
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 16 StatementsNode
+N 17 InstanceVariableWriteNode
+S 17 name @hits
+N 18 CallNode
+S 18 name +
+N 19 InstanceVariableReadNode
+S 19 name @hits
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 1
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+A 16 body 17
+R 8 statements 16
+R 8 subsequent -1
+A 7 body 8
+R 4 body 7
+R 4 receiver -1
+N 22 DefNode
+S 22 name fmod_ret__security_file_open
+N 23 ParametersNode
+N 24 RequiredParameterNode
+S 24 name file
+N 25 RequiredParameterNode
+S 25 name ret
+A 23 requireds 24,25
+A 23 optionals 
+A 23 keywords 
+A 23 posts 
+R 22 parameters 23
+N 26 StatementsNode
+N 27 IfNode
+N 28 CallNode
+S 28 name kfield_str_eq
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 LocalVariableReadNode
+S 30 name file
+N 31 StringNode
+S 31 content file
+I 31 fzl 1
+N 32 StringNode
+S 32 content f_path.dentry
+I 32 fzl 1
+N 33 StringNode
+S 33 content d_name.name
+I 33 fzl 1
+N 34 StringNode
+S 34 content spnl_secret.txt
+I 34 fzl 1
+A 29 arguments 30,31,32,33,34
+R 28 arguments 29
+R 28 block -1
+S 28 call_operator .
+R 27 predicate 28
+N 35 StatementsNode
+N 36 IntegerNode
+I 36 value -1
+A 35 body 36
+R 27 statements 35
+N 37 ElseNode
+N 38 StatementsNode
+N 39 LocalVariableReadNode
+S 39 name ret
+A 38 body 39
+R 37 statements 38
+R 27 subsequent 37
+A 26 body 27
+R 22 body 26
+R 22 receiver -1
+A 1 body 2,4,22
+R 0 statements 1

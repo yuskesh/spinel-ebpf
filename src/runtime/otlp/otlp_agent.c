@@ -37,11 +37,13 @@
 _Static_assert(SPNL_REC_DERIVED_DNS_QNAME_CAP      <= SPNL_ATTR_VAL_CAP, "ev.qname does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_CONN_PEER_CAP      <= SPNL_ATTR_VAL_CAP, "ev.peer does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_CONN_DIRECTION_CAP <= SPNL_ATTR_VAL_CAP, "ev.direction does not fit in an attribute value");
+_Static_assert(SPNL_REC_DERIVED_CONN_TCP_STATE_CAP <= SPNL_ATTR_VAL_CAP, "ev.tcp_state does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_HTTP_METHOD_CAP    <= SPNL_ATTR_VAL_CAP, "ev.method does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_HTTP_PATH_CAP      <= SPNL_ATTR_VAL_CAP, "ev.path does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_METHOD_CAP  <= SPNL_ATTR_VAL_CAP, "offcpu ev.method does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_PATH_CAP    <= SPNL_ATTR_VAL_CAP, "offcpu ev.path does not fit in an attribute value");
 _Static_assert(SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP <= SPNL_ATTR_VAL_CAP, "ev.wait_kind does not fit in an attribute value");
+_Static_assert(SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP <= SPNL_ATTR_VAL_CAP, "ev.wait_stack_trace does not fit in an attribute value");
 /* The off-CPU and HTTP channels share the *same* derivation for method and path.
  * Each declaring its own bound is right -- a cap belongs to a derivation, it is not
  * a shared constant -- but handing one shared function two different widths brings
@@ -201,7 +203,7 @@ static int64_t otlp_ktime_to_unix_off(void) {
  * each push loop reuses the same buffers. */
 #define OTLP_BATCH_HARD_MAX 128   /* the fixed storage ceiling; the env var clamps to it */
 #define OTLP_BATCH_ATTR_CAP 20    /* most attributes on one span; a connection span
-                                     peaks at 15: 6 base, comm, 6 from Kubernetes, 2 peer */
+                                     peaks at 16: 7 base, comm, 6 from Kubernetes, 2 peer */
 #define OTLP_BATCH_NAME_CAP 320   /* longest span name; the longest in practice is an audit name at 300 */
 
 typedef struct {
@@ -292,7 +294,7 @@ static int otlp_batch_flush_final(otlp_span_batch_t *b) {
 
 struct ev_collector { otlp_span_event_t *ev; size_t n; size_t cap; };
 
-/* emit4 record: spnl_event_hdr + __s64 a,b,c,d (a=kind, b=idx, c=ktime_ns, d=tid)。 */
+/* emit4 record: spnl_event_hdr + __s64 a,b,c,d (a=kind, b=idx, c=ktime_ns, d=tid). */
 static int trace_rb_cb(void *ctx, void *data, size_t size) {
     struct ev_collector *c = (struct ev_collector *)ctx;
     const size_t H = sizeof(struct spnl_event_hdr);
@@ -555,6 +557,11 @@ static int conn_rb_cb(void *ctx, void *data, size_t size) {
     struct conn_collector *c = (struct conn_collector *)ctx;
     if (c->n >= c->cap) return 0;
     if (spnl_rec_conn_unpack(data, size, &c->recs[c->n]) != 0) return 0;
+    /* The declared metrics are fed HERE -- the one point every record of this
+     * channel passes through, whichever drain asked for it -- so the concise push
+     * and a typed consumer produce the same aggregate, and a consumer that
+     * filters spans still counts every record it saw. */
+    spnl_recmetric_observe_conn(&c->recs[c->n]);
     c->n++;
     return 0;
 }
@@ -598,15 +605,19 @@ void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap) {
     snprintf(out, (size_t)cap, "%s:%u", addr, r->dport);
 }
 
-/* `ev.direction` is the spnl.conn.direction attribute itself, read from the state
- * the socket was in just before it reached ESTABLISHED: from SYN_SENT we dialled
- * out (active), from SYN_RECV we accepted (passive), and anything else is other. */
-void spnl_conn_direction(const spnl_rec_conn_t *r, char *out, int cap) {
-    const char *dir;
-    if (!r || cap <= 0) { if (out && cap > 0) out[0] = '\0'; return; }
-    dir = (r->oldstate == 2) ? "active" : (r->oldstate == 3) ? "passive" : "other";
-    snprintf(out, (size_t)cap, "%s", dir);
-}
+/* `ev.direction` (the spnl.conn.direction attribute) and `ev.tcp_state` (the
+ * spnl.conn.tcp_state attribute) have *no implementation here*. Both are
+ * derivations that do nothing but put a name on a value from a closed set: there
+ * is no domain logic in them, only a table. So the table itself is the
+ * declaration -- a CcValueMap in record_schema.h -- and the lookup is generated
+ * (spnl_valmap_conn_direction / spnl_valmap_tcp_state).
+ *
+ * As a hand-written switch it read `(oldstate == 2) ? "active" : (3) ? "passive"
+ * : "other"`, with 2 and 3 left as bare numbers. Once the table is a declaration
+ * those same two numbers can be checked against BTF for actually being values of
+ * the kernel's TCP state enum. What happens to a table nobody checks is visible
+ * on the codegen side, where the TCP_STATE_* constants are still three short of
+ * the kernel's and nobody had noticed. */
 
 /* `ev.srtt_us` is the net.peer.srtt_us attribute itself. The kernel's
  * tcp_sock->srtt_us is in eighths of a microsecond, so the real value is that
@@ -625,7 +636,7 @@ long spnl_conn_srtt_us(const spnl_rec_conn_t *r) {
 
 /* Build the span its egress declaration describes from one record. Both the
  * one-call push and the explicit to_span go through this, as they do for the other
- * channels. attrs holds 20 entries -- 7 of its own, and room for the enrichers --
+ * channels. attrs holds 20 entries -- 8 of its own, and room for the enrichers --
  * and namebuf receives the span name. Returns 1: a connection record always
  * becomes a span. */
 static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed,
@@ -636,9 +647,14 @@ static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed
      * nothing would actually break, but the rule is kept without exceptions. That
      * shared width comes from direction's own declared cap. */
     char peer[INET6_ADDRSTRLEN] = {0}, dir[SPNL_REC_DERIVED_CONN_DIRECTION_CAP] = {0};
+    char tst[SPNL_REC_DERIVED_CONN_TCP_STATE_CAP] = {0};
     int is6 = (rr->family == 10 /* AF_INET6 */);
     conn_peer_addr(rr, peer, sizeof peer);        /* the address half of ev.peer */
-    spnl_conn_direction(rr, dir, (int)sizeof dir);/* ev.direction, the very same function */
+    /* Both are the generated value map: the same function, at the same width,
+     * that the accessors behind `ev.direction` and `ev.tcp_state` call. There is
+     * no room for the span and Ruby to hold different switches. */
+    spnl_valmap_conn_direction((long)rr->oldstate, dir, (int)sizeof dir);
+    spnl_valmap_tcp_state((long)rr->oldstate, tst, (int)sizeof tst);
     uint64_t t = (uint64_t)((int64_t)rr->hdr.timestamp + off);
 
     memset(s, 0, sizeof *s);
@@ -659,6 +675,12 @@ static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US);     snprintf(attrs[n].val,sizeof attrs[n].val,"%lld",(long long)spnl_conn_srtt_us(rr)); n++;
     /* active/passive. semconv has no connection-direction key -> custom. */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION);  snprintf(attrs[n].val,sizeof attrs[n].val,"%s",dir); n++;
+    /* Direction is a reading of "who opened this", and it folds everything that
+     * is not SYN_SENT or SYN_RECV into "other". In a probe that also emits
+     * transitions other than ESTABLISHED that is most of them, so the name of the
+     * state itself is kept as a separate attribute -- the output of the same
+     * function as ev.tcp_state. */
+    snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_SPNL_CONN_TCP_STATE);  snprintf(attrs[n].val,sizeof attrs[n].val,"%s",tst); n++;
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
     /* Connections are the one signal both enrichers apply to: Kubernetes for the
      * originating pod and its workload, peer for the destination. They run in
@@ -714,8 +736,6 @@ int spnl_rec_conn_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     struct conn_collector coll = { g_rec_conn, 0, OTLP_MAX_LOGS };
     g_rec_conn_n = 0;
     if (otlp_drain_ms(obj, map_name, conn_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
-    /* Typed consumers drain here, and they are as entitled to the
-       diagnosis as any other path: a consumer that never sees a
     g_rec_conn_n = (int)coll.n;
     /* Typed consumers drain here, and they are as entitled to the
        diagnosis as any other path: a consumer that never sees a
@@ -889,8 +909,6 @@ int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int tim
     struct dns_collector coll = { g_rec_dns, 0, OTLP_MAX_LOGS };
     g_rec_dns_n = 0;
     if (otlp_drain_ms(obj, map_name, dns_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
-    /* Typed consumers drain here, and they are as entitled to the
-       diagnosis as any other path: a consumer that never sees a
     g_rec_dns_n = (int)coll.n;
     /* Typed consumers drain here, and they are as entitled to the
        diagnosis as any other path: a consumer that never sees a
@@ -1047,8 +1065,6 @@ int spnl_rec_l7_drain_obj(struct bpf_object *obj, const char *map_name, int time
     struct l7_collector coll = { g_rec_l7, 0, OTLP_MAX_LOGS };
     g_rec_l7_n = 0;
     if (otlp_drain_ms(obj, map_name, l7_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
-    /* Typed consumers drain here, and they are as entitled to the
-       diagnosis as any other path: a consumer that never sees a
     g_rec_l7_n = (int)coll.n;
     /* Typed consumers drain here, and they are as entitled to the
        diagnosis as any other path: a consumer that never sees a
@@ -1085,6 +1101,11 @@ static int http_rb_cb(void *ctx, void *data, size_t size) {
     struct http_collector *c = (struct http_collector *)ctx;
     if (c->n >= c->cap) return 0;
     if (spnl_rec_http_unpack(data, size, &c->recs[c->n]) != 0) return 0;
+    /* The declared metrics are fed HERE -- the one point every record of this
+     * channel passes through, whichever drain asked for it -- so the concise push
+     * and a typed consumer produce the same aggregate, and a consumer that
+     * filters spans still counts every record it saw. */
+    spnl_recmetric_observe_http(&c->recs[c->n]);
     c->n++;
     return 0;
 }
@@ -1237,8 +1258,6 @@ int spnl_rec_http_drain_obj(struct bpf_object *obj, const char *map_name, int ti
     struct http_collector coll = { g_rec_http, 0, OTLP_MAX_LOGS };
     g_rec_http_n = 0;
     if (otlp_drain_ms(obj, map_name, http_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
-    /* Typed consumers drain here, and they are as entitled to the
-       diagnosis as any other path: a consumer that never sees a
     g_rec_http_n = (int)coll.n;
     /* Typed consumers drain here, and they are as entitled to the
        diagnosis as any other path: a consumer that never sees a
@@ -1477,21 +1496,51 @@ static const char *_oc_sym_of(uint64_t pc) {
     while (lo <= hi) { int m = (lo + hi) / 2; if (_oc_syms[m].a <= pc) { r = m; lo = m + 1; } else hi = m - 1; }
     return r >= 0 ? _oc_syms[r].n : "?";
 }
-/* classify a wait by scanning the stack frames for a known blocking signature. */
-static const char *_oc_wait_kind(struct bpf_object *obj, const char *stacks_map, int32_t sid) {
-    if (sid < 0) return "none";
-    /* the classification needs the stack map of the object this record was
+
+/* --- ONE fetch of the wait's frames, TWO readings --------------------------
+ *
+ * The frames used to exist only inside _oc_wait_kind(), which walked them and
+ * threw them away, so the span could say WHAT the request waited on and never
+ * WHERE. Adding a second walk beside the first would have re-created, for
+ * stacks, the very failure that was removed for values: two readings of the same
+ * bytes that are free to disagree -- here about which stack they even read (the
+ * map lookup is a live BPF map, so two lookups are two moments).
+ *
+ * So the fetch is factored out and both readings take its output:
+ *   _oc_frames()    fetches once           -> n frames in pcs[]
+ *   _oc_classify()  reads them as a KIND   -> spnl.wait.kind   / ev.wait_kind
+ *   _oc_render()    reads them as a STRING -> spnl.wait.stack  / ev.wait_stack_trace
+ * A kind of "io" is therefore always explained by a frame that is present in
+ * the rendered string -- provided the string is deep enough to reach it, which
+ * is the one thing SPNL_STACK_FRAMES can cut short (and why the depth is
+ * declared rather than assumed).
+ *
+ * Return: >0 = frames, 0 = the wait has no stack (sid < 0), -1 = could not read.
+ * That triple is exactly the three answers _oc_wait_kind gave before ("other"/
+ * "none"/"unknown" respectively), moved from the classifier to the fetch. */
+#define OC_MAX_PCS 127
+static int _oc_frames(struct bpf_object *obj, const char *stacks_map, int32_t sid, uint64_t *pcs) {
+    if (sid < 0) return 0;
+    /* the frames live in the stack map of the object this record was
      * drained from. Without one (a caller that has no object -- e.g. the host
      * oracle in tests/runtime/record_span_parity_test.c) the honest answer is
-     * "unknown", the same word an unreadable map already produced. */
-    if (!obj || !stacks_map || !stacks_map[0]) return "unknown";
+     * "could not read", which is the same answer an unreadable map produces. */
+    if (!obj || !stacks_map || !stacks_map[0]) return -1;
     _oc_load_kallsyms();
-    if (!_oc_nsyms) return "unknown";
+    if (!_oc_nsyms) return -1;
     int mfd = bpf_object__find_map_fd_by_name(obj, stacks_map);
-    if (mfd < 0) return "unknown";
-    static uint64_t pcs[127];
-    if (bpf_map_lookup_elem(mfd, &sid, pcs) != 0) return "unknown";
-    for (int i = 0; i < 127 && pcs[i]; i++) {
+    if (mfd < 0) return -1;
+    if (bpf_map_lookup_elem(mfd, &sid, pcs) != 0) return -1;
+    int n = 0;
+    while (n < OC_MAX_PCS && pcs[n]) n++;
+    return n;
+}
+
+/* classify a wait by scanning the stack frames for a known blocking signature. */
+static const char *_oc_classify(const uint64_t *pcs, int n) {
+    if (n < 0) return "unknown";
+    if (n == 0) return "none";
+    for (int i = 0; i < n; i++) {
         const char *s = _oc_sym_of(pcs[i]);
         if (strstr(s, "io_schedule") || strstr(s, "folio_wait") || strstr(s, "wait_on_page") ||
             strstr(s, "jbd2") || strstr(s, "blk_") || strstr(s, "submit_bio")) return "io";
@@ -1501,6 +1550,78 @@ static const char *_oc_wait_kind(struct bpf_object *obj, const char *stacks_map,
         if (strstr(s, "sk_wait") || strstr(s, "tcp_recv") || strstr(s, "inet_")) return "net";
     }
     return "other";
+}
+
+/* How deep a rendered stack may go. ONE knob for BOTH readings (the span
+ * attribute and ev.wait_stack_trace), because a consumer that filters on the
+ * frames must see the same string the span will carry -- the same lesson that
+ * put derivations behind one function, applied to a depth instead of a capacity.
+ *
+ * Default 0 = no stack anywhere. A stack is the one thing on this span whose
+ * size is not bounded by the record, and it rides on TWO spans per record
+ * inside batches of up to SPNL_OTLP_BATCH_MAX, so it is off until the operator
+ * asks. env is the right dial for it for the same reason every other layer-2
+ * switch is env (SPNL_K8S_* / SPNL_OTLP_BATCH_MAX): the span's contents belong
+ * to the egress declaration, not to the Ruby program, and the one-shot injection
+ * paths -- kubectl debug, a probe image -- carry env and cannot rewrite an argv.
+ *
+ * Clamped, not refused, matching otlp_batch_max(): the bound is a property of
+ * the declared cap (8 frames is what 448 bytes holds), so asking for 40 is
+ * asking for "as deep as you go". */
+#define OC_STACK_FRAMES_MAX 8
+static int _oc_stack_frames(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    const char *e = getenv("SPNL_STACK_FRAMES");
+    long v = (e && e[0]) ? strtol(e, NULL, 10) : 0;
+    if (v < 0) v = 0;
+    if (v > OC_STACK_FRAMES_MAX) v = OC_STACK_FRAMES_MAX;
+    cached = (int)v;
+    return cached;
+}
+
+/* Render frames innermost-first, ";"-joined, names only.
+ *
+ * Innermost first because that is the order _oc_classify scans and stops in:
+ * the kind is the leftmost matching frame, so the value explains its sibling
+ * attribute by being read left to right. (Folded stack output is the other way
+ * round -- a flame graph is drawn from the root -- so this is deliberately not
+ * paste-compatible with it.) Names without offsets because the depth that
+ * reaches a meaningful frame is worth more here than the byte within it, and
+ * 448 bytes buys 8 names or 6 name+offsets.
+ *
+ * Truncation cannot happen at the declared cap (8 x 55 + 7 + NUL = 448); the
+ * guard drops the LAST WHOLE frame rather than half a symbol if a caller ever
+ * passes a smaller buffer. */
+static void _oc_render(const uint64_t *pcs, int n, char *out, int cap) {
+    if (!out || cap <= 0) return;
+    out[0] = '\0';
+    int want = _oc_stack_frames();
+    if (want <= 0 || n <= 0) return;
+    if (n > want) n = want;
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        const char *s = _oc_sym_of(pcs[i]);
+        int w = snprintf(out + o, (size_t)cap - o, "%s%s", o ? ";" : "", s);
+        if (w < 0 || (size_t)w >= (size_t)cap - o) { out[o] = '\0'; break; }
+        o += (size_t)w;
+    }
+}
+
+/* The declared cap and the declared depth are the SAME statement (record_schema.h:
+ * "8 frames x 55 characters + 7 separators + NUL"). Written as one expression the
+ * compiler checks, so raising OC_STACK_FRAMES_MAX or widening a symbol without
+ * moving the cap does not compile -- rather than quietly starting to truncate a
+ * derivation whose whole contract is that it never does. */
+_Static_assert(OC_STACK_FRAMES_MAX * (int)sizeof(((struct _oc_sym *)0)->n)
+                   <= SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP,
+               "SPNL_STACK_FRAMES frames of kallsyms names no longer fit the declared "
+               "ev.wait_stack_trace cap -- move the cap in record_schema.h, or the depth here");
+
+static const char *_oc_wait_kind(struct bpf_object *obj, const char *stacks_map, int32_t sid) {
+    uint64_t pcs[OC_MAX_PCS];
+    int n = _oc_frames(obj, stacks_map, sid, pcs);
+    return _oc_classify(pcs, n);
 }
 
 /* --- the off-CPU record's three own derivations ---------------------------
@@ -1566,6 +1687,22 @@ void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap) {
              _oc_wait_kind(g_offcpu_obj, g_offcpu_stacks[0] ? g_offcpu_stacks : NULL, r->wait_stack));
 }
 
+/* `ev.wait_stack_trace` is the spnl.wait.stack attribute itself. It is only a
+ * different reading of the SAME _oc_frames() output that wait_kind reads, so "the
+ * kind says io but the frames show no trace of io" cannot arise -- except where
+ * the depth did not reach that far, which is what SPNL_STACK_FRAMES governs.
+ * With SPNL_STACK_FRAMES unset the value is the empty string, meaning "there was
+ * a wait but its location was not recorded" -- not "nothing waited", which is
+ * what wait_kind == "none" says. */
+void spnl_offcpu_wait_stack(const spnl_rec_offcpu_t *r, char *out, int cap) {
+    if (!out || cap <= 0) return;
+    out[0] = '\0';
+    if (!r) return;
+    uint64_t pcs[OC_MAX_PCS];
+    int n = _oc_frames(g_offcpu_obj, g_offcpu_stacks[0] ? g_offcpu_stacks : NULL, r->wait_stack, pcs);
+    _oc_render(pcs, n, out, cap);
+}
+
 /* Build the request-window span its egress declaration describes from one record;
  * the shared builder for both forms, as elsewhere. attrs holds 13 entries.
  *
@@ -1590,12 +1727,14 @@ static int offcpu_fill_span(const spnl_rec_offcpu_t *rr, uint64_t now_unix, uint
      * caps agree -- which the assertions at the top of this file enforce. */
     char method[SPNL_REC_DERIVED_OFFCPU_METHOD_CAP] = {0}, path[SPNL_REC_DERIVED_OFFCPU_PATH_CAP] = {0};
     char wk[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP] = {0};
+    static char ws[SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP];   /* 448B: not a stack local */
     spnl_http_method(rr->req, method, (int)sizeof method);
     spnl_http_path(rr->req, path, (int)sizeof path);
     int status = (int)spnl_http_status(rr->resp);
     uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);   /* ev.offcpu_ns, same function */
     uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);    /* ev.oncpu_ns,  same function */
     spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);           /* ev.wait_kind, same function */
+    spnl_offcpu_wait_stack(rr, ws, (int)sizeof ws);          /* ev.wait_stack_trace, same function */
     uint64_t start_unix = now_unix - rr->duration_ns;
 
     memset(s, 0, sizeof *s);
@@ -1614,9 +1753,13 @@ static int offcpu_fill_span(const spnl_rec_offcpu_t *rr, uint64_t now_unix, uint
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_OFFCPU_NS); snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)offcpu); n++;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_ONCPU_NS);  snprintf(attrs[n].val,sizeof attrs[n].val,"%llu",(unsigned long long)oncpu); n++;
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",wk); n++;
+    /* As declared, this rides along only when SPNL_STACK_FRAMES > 0 and the frames
+     * could be read. Not emitting an empty value is what keeps "the location was
+     * not recorded" distinct from "the location is the empty string". */
+    if (ws[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_STACK); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",ws); n++; }
     if (rr->comm[0]) { snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(attrs[n].val,sizeof attrs[n].val,"%s",rr->comm); n++; }
     otlp_enrich_ctx_t ec = { OTLP_SIGNAL_OFFCPU, rr->cgid, NULL };   /* Kubernetes only; peer is for connections */
-    n += otlp_enrich_run(&ec, attrs + n, 13 - n);
+    n += otlp_enrich_run(&ec, attrs + n, 14 - n);
     s->attrs = attrs; s->nattrs = n;
     return 1;
 }
@@ -1661,7 +1804,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
          * each wait happened, so the child is placed at the start of the window.
          * Children that come from other records do carry real timestamps. */
         otlp_generic_span_t parent;
-        otlp_kv_t attrs[13];
+        otlp_kv_t attrs[14];   /* +1 for spnl.wait.stack */
         static char namebuf[96];
         if (!offcpu_fill_span(rr, now_unix, &seed, &parent, attrs, namebuf, sizeof namebuf)) continue;
 
@@ -1685,9 +1828,15 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
             static char cnamebuf[64];
             snprintf(cnamebuf, sizeof cnamebuf, "off-CPU wait (%s)", wk);
             child.name = cnamebuf;
-            otlp_kv_t cattrs[3]; int cn = 0;
+            otlp_kv_t cattrs[4]; int cn = 0;
             snprintf(cattrs[cn].key,sizeof cattrs[cn].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND); snprintf(cattrs[cn].val,sizeof cattrs[cn].val,"%s",wk); cn++;
             snprintf(cattrs[cn].key,sizeof cattrs[cn].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_OFFCPU_NS); snprintf(cattrs[cn].val,sizeof cattrs[cn].val,"%llu",(unsigned long long)offcpu); cn++;
+            /* The child span IS the wait, so the frames are most literally its own.
+             * Same function's output as the parent's, so parent and child cannot
+             * disagree -- the rule that makes the wait child safe to nest at all. */
+            static char cws[SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP];
+            spnl_offcpu_wait_stack(rr, cws, (int)sizeof cws);
+            if (cws[0]) { snprintf(cattrs[cn].key,sizeof cattrs[cn].key,"%s",SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_STACK); snprintf(cattrs[cn].val,sizeof cattrs[cn].val,"%s",cws); cn++; }
             child.attrs = cattrs; child.nattrs = cn;
             otlp_batch_add(&g_span_batch, &child);   /* buffer it; the batch flushes at the end of the cycle */
             sent++;

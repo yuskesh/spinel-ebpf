@@ -1,0 +1,35 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/157_attached_index_outside_multi.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__vfs_read
+R 2 parameters -1
+N 3 StatementsNode
+N 4 InstanceVariableWriteNode
+S 4 name @n
+N 5 CallNode
+S 5 name +
+N 6 InstanceVariableReadNode
+S 6 name @n
+R 5 receiver 6
+N 7 ArgumentsNode
+N 8 CallNode
+S 8 name attached_index
+R 8 receiver -1
+R 8 arguments -1
+R 8 block -1
+S 8 call_operator .
+I 8 vcall 1
+A 7 arguments 8
+R 5 arguments 7
+R 5 block -1
+S 5 call_operator .
+R 4 value 5
+N 9 IntegerNode
+I 9 value 0
+A 3 body 4,9
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

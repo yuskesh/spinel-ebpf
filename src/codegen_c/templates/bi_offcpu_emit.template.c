@@ -23,7 +23,7 @@
                 __builtin_memcpy(_oe@E@->req, _ow@E@->req, sizeof(_oe@E@->req));
                 __builtin_memcpy(_oe@E@->resp, _oresp@E@, sizeof(_oe@E@->resp));
                 bpf_ringbuf_submit(_oe@E@, 0);
-            }
+            } else spnl_lost_inc();   /* ring full -> account the dropped record */
             bpf_map_delete_elem(&@UNIT@_offcpu_win, &_ot@E@);
         }
     }

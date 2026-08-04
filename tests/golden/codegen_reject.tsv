@@ -1,0 +1,37 @@
+# Fixtures the production C codegen REFUSES (exit != 0), and why.
+#
+# A fixture here must have NO tests/golden/*.bpf.c: refusing it and also
+# shipping a golden for it is a contradiction -- 78/80/82/96 each say
+# "codegen must reject this" in their own comments, yet had goldens.
+#
+# The reason column is prose for the reviewer and is NOT compared -- only the
+# SET of refused fixtures is. Message wording is the business of
+# tests/spinel_ebpf/builtin_ctx_gate_test.rb, which asserts the parts an
+# author needs (what, why, which contexts work, where they wrote it).
+#
+# Refresh: ruby tools/golden.rb --update   (and review the diff: a fixture
+# appearing here means the codegen started refusing something it compiled.)
+#
+05_closure_block	unported node: `total += i*i` inside a block (LocalVariableOperatorWriteNode). NOT a regression from the C port -- the Ruby generator refuses it identically; only the `total = total + i` form was ever supported.
+127_param_unused	negative fixture: `param :verbosity` declared, never read. A parameter nothing reads is a switch wired to nothing -- the operator sets SPNL_PARAM_VERBOSITY, the output is identical, and "the filter matched nothing" is indistinguishable from "the filter does not exist".
+128_param_bad_default	negative fixture: `default:` is not an integer literal. It is baked into .rodata at compile time, so it cannot be an expression; substituting 0 would be worse than refusing, since 0 is the value that means "off" for a filter parameter.
+131_filter_verdict_hook	negative fixture: `filter_by` in a unit that also has an XDP handler. The common filter means "skip this event"; on a verdict hook that would have to be spelled `return 0`, which is XDP_ABORTED (or "allow" for lsm and fmod_ret), and on a packet hook bpf_get_current_pid_tgid() reads whichever task happens to be on the CPU. Filtering the kprobe and leaving the XDP handler open would produce exactly the artefact the feature exists to prevent: a probe that looks narrowed and is not.
+132_filter_no_handler	negative fixture: `filter_by` declared in a unit with no attach handler it can cover. Same rule as an unread `param`: setting SPNL_FILTER_PID produces output identical to not setting it, so "the filter matched nothing" is indistinguishable from "the filter does not exist".
+136_kfield_str_arity	negative fixture: kfield_str_eq with no field path -- (ptr, "struct", "literal") leaves nothing to read. Refused at the layer that still knows what the author wrote, with the shape spelled out, including the part that is genuinely easy to get wrong: the LAST string is the literal, not a field.
+138_sock_accessor_arity	negative fixture: a sock_* accessor called with no pointer. These are flat calls that take the struct sock * explicitly, so a missing argument must be loud rather than resolved against some `sk` in scope.
+142_xdp_tail_withdrawn	negative fixture: `xdp_tail__<name>` is a WITHDRAWN attach kind. Before the refusal existed it compiled with exit 0 into a plain SEC("syscall") wrapper -- not an XDP program and not a tail-call target. Neither the PROG_ARRAY nor the `tail_call_to` builtin survived the port to the C generator; the glue half did, and waits for a map nothing emits.
+143_user_ringbuf_withdrawn	negative fixture: `user_ringbuf__<name>` is a WITHDRAWN attach kind. It was to become a SEC-less callback driven by bpf_user_ringbuf_drain; the map, the callback emission and the drain builtin all went missing in the port, so it compiled into a SEC("syscall") program nothing drained.
+144_tcp_slice_withdrawn	negative fixture: `xdp__tcp_slice__<name>` is a WITHDRAWN attach kind. The body is only a marker -- the 470-line state machine and its seven builtins are gone, so the marker became the whole program. The name starts with the IMPLEMENTED prefix `xdp__`, which is why scanning the generator for prefixes called it present: a false negative.
+145_timer_withdrawn	negative fixture: `on :timer, every: N` is a WITHDRAWN attach kind, and the worst shape measured: the C reactor table has no :timer, an unknown kind is SKIPPED, so the body never reached the emitted C at all. Its advertised SEC ("syscall") is also what a silent degradation produces, so an audit comparing SECs alone would have passed it.
+149_pkt_chain_withdrawn	negative fixture: `pkt.byte_at(off)` is the one member of the pkt.* chain that was never a pkt_* reader -- it routed to `pkt_dynptr_byte_at`, which is withdrawn. It is in Capabilities::WITHDRAWN_SUGAR and doubles as the sugar gate's negative control. Before this refusal it died with the generic `CallNode not yet ported`, the same message the fifteen WORKING chain readers produced.
+151_has_cap_packet_ctx	negative fixture: has_cap() in an XDP handler. The gate is about MEANING, not loadability -- the read loads in all 24 program types the generator emits, exactly like the bpf_probe_read_kernel that ungated kfield uses. Measured: with packets arriving from another machine, the XDP program answered TRUE about a CPU burner while the real actor answered FALSE in a kprobe in the same run. Nothing downstream can tell those apart, so the refusal has to be at compile time.
+152_ns_id_unknown_key	negative fixture: ns_id(:mount). The key selects a kernel struct member at compile time, so the accepted set is closed and a typo has to be loud. Returning 0 would read as "this task is in no mount namespace", which is not a thing, and would then compare unequal to every host check.
+156_attach_multi_unknown_symbol	spinel-ebpf: attached_symbol_eq: "vfs_open" is not in this handler's list (declared: vfs_read vfs_write). A name that is not attached can never match, so this is refused rather than compiled to a constant false
+157_attached_index_outside_multi	spinel-ebpf: attached_index is only available inside a multi-symbol handler (`on :kprobe, %w[a b c] do ... end`). In a one-to-one handler the attach point is the method name, so there is nothing to ask
+158_attach_multi_empty_list	spinel-ebpf: on :kprobe, %w[...]: the symbol list is empty -- a handler bound to nothing is a program that loads and never fires, and there is no silent fallback
+159_attach_multi_duplicate	spinel-ebpf: on :kprobe, %w[...]: duplicate symbol: vfs_read
+160_attach_multi_bad_via	spinel-ebpf: on :kprobe, %w[...]: `via:` must be :expand or :multi (omit it to let the generator choose from the list size -- see `spinel-ebpf describe`): kprobe_multi
+78_fib_lookup_kprobe	negative fixture: fib_lookup from a kprobe. The gate was restored after a period without it; before that it emitted `bpf_fib_lookup(ctx, ...)` into a ctx-less kprobe inner and clang said "undeclared identifier 'ctx'".
+80_skb_rewrite_xdp	negative fixture: skb_store_byte from XDP. The gate was restored after a period without it; before that the verifier caught it ("program of this type cannot use helper bpf_skb_store_bytes").
+82_nat_xdp	negative fixture: skb_load_u32 from XDP. The gate was restored after a period without it; same verifier message as 80.
+96_sk_assign_egress	negative fixture: sk_assign_tcp from tc__egress__. The gate was restored after a period without it; before that it compiled AND loaded -- nothing anywhere said the steer could not work, which is why a compile-and-load gate alone is not enough.

@@ -1,0 +1,72 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/160_attach_multi_bad_via.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name FileOps
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 ArrayNode
+N 13 StringNode
+S 13 content vfs_read
+I 13 fzl 1
+N 14 StringNode
+S 14 content vfs_write
+I 14 fzl 1
+A 12 elements 13,14
+N 15 KeywordHashNode
+N 16 AssocNode
+N 17 SymbolNode
+S 17 value via
+R 16 key 17
+N 18 SymbolNode
+S 18 value kprobe_multi
+R 16 value 18
+A 15 elements 16
+A 10 arguments 11,12,15
+R 9 arguments 10
+N 19 BlockNode
+N 20 StatementsNode
+N 21 InstanceVariableWriteNode
+S 21 name @n
+N 22 CallNode
+S 22 name +
+N 23 InstanceVariableReadNode
+S 23 name @n
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 1
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+R 21 value 22
+A 20 body 21
+R 19 body 20
+R 9 block 19
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

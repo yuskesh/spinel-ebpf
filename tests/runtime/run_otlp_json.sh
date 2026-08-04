@@ -16,6 +16,12 @@ OTLP="$REPO_ROOT/src/runtime/otlp"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# OTEL_RESOURCE_ATTRIBUTES has to come out the SAME on the protobuf path and on the
+# JSON path -- that is what jw_resource declares of itself ("matches the protobuf
+# otlp_enc_resource_attrs"). Dropping the operator's labels on the JSON path only is
+# exactly the sort of thing that can happen here, so both are pinned.
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=staging, spnl.tagged = yes ,broken-pair,=novalue"
+
 echo "[json] compiling otlp_json encoder test"
 "$CC" -O2 -Wall -Wextra -Werror -I "$OTLP" \
   tests/runtime/otlp_json_test.c "$OTLP/otlp_json.c" -o "$TMP/jt"
@@ -43,5 +49,20 @@ otlp_assert "$TMP/logs.json" '"intValue":"42"'
 otlp_assert "$TMP/logs.json" '"stringValue":"hello"'
 otlp_assert "$TMP/logs.json" '"eventName":"evt"'
 otlp_assert "$TMP/logs.json" '"severityText":"INFO"'
+
+# The resource attributes ride all three signals (the same treatment the protobuf
+# path gives them), whitespace is trimmed, and malformed pairs are dropped.
+for sig in metrics traces logs; do
+  otlp_assert "$TMP/$sig.json" '"deployment.environment"'
+  otlp_assert "$TMP/$sig.json" '"stringValue":"staging"'
+  otlp_assert "$TMP/$sig.json" '"spnl.tagged"'
+  otlp_assert "$TMP/$sig.json" '"telemetry.sdk.name"'   # our own identity survives
+  if grep -q "broken-pair" "$TMP/$sig.json"; then
+    echo "  UNEXPECTED($sig): a pair with no '=' became an attribute"; OTLP_FAIL=1
+  fi
+  if grep -q "novalue" "$TMP/$sig.json"; then
+    echo "  UNEXPECTED($sig): an empty key became an attribute"; OTLP_FAIL=1
+  fi
+done
 
 otlp_done "OTLP/JSON encoders (metrics/traces/logs, proto3 JSON mapping)"

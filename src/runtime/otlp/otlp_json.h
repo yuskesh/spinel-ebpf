@@ -59,6 +59,14 @@ long otlp_json_metrics_series_build(char *buf, size_t cap,
                                     uint64_t time_unix_nano, uint64_t start_time_unix_nano,
                                     const otlp_series_t *series, size_t nseries);
 
+/* A Sum on its own -- the counter of a record channel. Counterpart of
+ * otlp_metrics_sum_build on the protobuf side. */
+long otlp_json_metrics_sum_build(char *buf, size_t cap,
+                                 const char *svc, const char *ver, const char *scope,
+                                 const char *name, const char *unit,
+                                 uint64_t t, uint64_t start,
+                                 const otlp_series_t *series, size_t n);
+
 /* An explicit-bucket Histogram (http.server.request.duration, say), as JSON. */
 long otlp_json_metrics_hist_build(char *buf, size_t cap,
                                   const char *service_name, const char *service_version,

@@ -1,0 +1,84 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/130_common_filter_all.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name filter_by
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value pid
+N 5 SymbolNode
+S 5 value tid
+N 6 SymbolNode
+S 6 value uid
+N 7 SymbolNode
+S 7 value gid
+N 8 SymbolNode
+S 8 value cgroup_id
+N 9 SymbolNode
+S 9 value comm
+A 3 arguments 4,5,6,7,8,9
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 10 DefNode
+S 10 name spnl_emit
+N 11 ParametersNode
+N 12 RequiredParameterNode
+S 12 name x
+A 11 requireds 12
+A 11 optionals 
+A 11 keywords 
+A 11 posts 
+R 10 parameters 11
+R 10 body -1
+R 10 receiver -1
+N 13 DefNode
+S 13 name kprobe__do_sys_openat2
+N 14 ParametersNode
+N 15 RequiredParameterNode
+S 15 name dfd
+A 14 requireds 15
+A 14 optionals 
+A 14 keywords 
+A 14 posts 
+R 13 parameters 14
+N 16 StatementsNode
+N 17 CallNode
+S 17 name spnl_emit
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 CallNode
+S 19 name +
+N 20 CallNode
+S 20 name uid
+R 20 receiver -1
+R 20 arguments -1
+R 20 block -1
+S 20 call_operator .
+I 20 vcall 1
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 CallNode
+S 22 name gid
+R 22 receiver -1
+R 22 arguments -1
+R 22 block -1
+S 22 call_operator .
+I 22 vcall 1
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+N 23 IntegerNode
+I 23 value 0
+A 16 body 17,23
+R 13 body 16
+R 13 receiver -1
+A 1 body 2,10,13
+R 0 statements 1
