@@ -81,8 +81,8 @@ class ValueMapTest < Minitest::Test
   # not something hand-written in the runtime. Once that breaks there are two
   # tables: "the declared one" and "the one actually consulted".
   def test_lookup_is_generated_not_hand_written
-    gen = File.read(MIRROR_H)
-    agent = File.read(AGENT_C)
+    gen = read_artifact(MIRROR_H)
+    agent = read_artifact(AGENT_C)
     maps.each do |m|
       assert_includes gen, "static inline void spnl_valmap_#{m[:id]}(long v, char *out, int cap)",
                       "#{m[:id]}: the lookup is not in the generated header"
@@ -100,8 +100,8 @@ class ValueMapTest < Minitest::Test
   # of the same function**. Pin that the accessor and the span builder call the
   # same spnl_valmap_*, from both sides.
   def test_accessor_and_span_builder_call_the_same_map
-    gen     = File.read(MIRROR_H)
-    builder = File.read(AGENT_C)[/static int conn_fill_span\(.*?\n\}\n/m]
+    gen     = read_artifact(MIRROR_H)
+    builder = read_artifact(AGENT_C)[/static int conn_fill_span\(.*?\n\}\n/m]
     refute_nil builder, "conn_fill_span() could not be read"
     props = SpinelEbpf::Capabilities.record_properties("conn").select { |p| p[:value_map] }
     refute_empty props, "conn has no type-driven property"
@@ -169,9 +169,37 @@ class ValueMapTest < Minitest::Test
     hits.first
   end
 
+  # The authority for these names is the running kernel's BTF, read through
+  # bpftool. Two different things can stop us from consulting it, and only one of
+  # them is a finding:
+  #
+  #   the authority is unreachable  -- no BTF file, or no bpftool, or the dump
+  #                                    fails. We cannot judge, so we skip.
+  #   the authority answered        -- the dump worked. A name that is then
+  #                                    missing IS a disagreement, and fails.
+  #
+  # Checking only for the BTF file conflated the two: a host that ships BTF but
+  # not bpftool (a stock CI runner is exactly that) reported "the kernel has no
+  # enum containing TCP_ESTABLISHED", which reads as "your declaration is wrong"
+  # when it means "we never asked". A check that cannot run must say so, not
+  # return a verdict.
+  # Generated C carries bytes outside US-ASCII, and a container image that sets no
+  # LANG reads files as US-ASCII -- every scan then dies with "invalid byte
+  # sequence" before it can judge anything. Read the artefacts as UTF-8 and scrub,
+  # so the test measures the contract rather than the locale it happens to run in.
+  def read_artifact(path)
+    File.read(path).dup.force_encoding("UTF-8").scrub
+  end
+
   def skip_without_btf
-    skip "BTF authority check needs a running kernel with #{BTF_PATH} + bpftool " \
+    skip "BTF authority check needs a running kernel with #{BTF_PATH} " \
          "(it does not run on a macOS host -- run it in a Linux container)" unless File.exist?(BTF_PATH)
+    _out, st = Open3.capture2e("bpftool", "version")
+    skip "BTF authority check needs bpftool to read #{BTF_PATH}; it is not installed here" unless st&.success?
+    _dump, dst = Open3.capture2e("bpftool", "btf", "dump", "file", BTF_PATH, "format", "raw")
+    skip "bpftool cannot dump #{BTF_PATH} here (permission, or a kernel without the section)" unless dst.success?
+  rescue Errno::ENOENT
+    skip "BTF authority check needs bpftool to read #{BTF_PATH}; it is not on PATH"
   end
 
   # The heart of this file: is the name we declared the name the running kernel
