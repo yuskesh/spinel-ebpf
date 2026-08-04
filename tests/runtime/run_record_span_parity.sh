@@ -42,7 +42,7 @@ echo "[parity] compiling record/span parity test"
   "$OTLP/otlp_traces.c" "$OTLP/otlp_metrics.c" "$OTLP/otlp_logs.c" \
   "$OTLP/otlp_http.c" "$OTLP/otlp_grpc.c" "$OTLP/otlp_json.c" \
   "$OTLP/otlp_httpspan.c" "$OTLP/otlp_enrich.c" "$OTLP/otlp_k8s.c" \
-  "$OTLP/otlp_peer.c" "$OTLP/otlp_cri.c" \
+  "$OTLP/otlp_peer.c" "$OTLP/otlp_cri.c" "$OTLP/otlp_recmetric.c" \
   "$REPO_ROOT/src/runtime/spnl_runtime.c" \
   "$NANOPB/pb_encode.c" "$NANOPB/pb_common.c" \
   $PB_C \

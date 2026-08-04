@@ -1,0 +1,77 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/124_bprm_exec_path.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @denied
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name lsm__bprm_check_security
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name bprm
+A 5 requireds 6
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 7 StatementsNode
+N 8 CallNode
+S 8 name emit_path
+R 8 receiver -1
+N 9 ArgumentsNode
+N 10 LocalVariableReadNode
+S 10 name bprm
+A 9 arguments 10
+R 8 arguments 9
+R 8 block -1
+S 8 call_operator .
+N 11 IfNode
+N 12 CallNode
+S 12 name path_eq
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name bprm
+N 15 StringNode
+S 15 content /usr/bin/spnl_denied_exec
+I 15 fzl 1
+A 13 arguments 14,15
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+R 11 predicate 12
+N 16 StatementsNode
+N 17 InstanceVariableWriteNode
+S 17 name @denied
+N 18 CallNode
+S 18 name +
+N 19 InstanceVariableReadNode
+S 19 name @denied
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 1
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+N 22 IntegerNode
+I 22 value -1
+A 16 body 17,22
+R 11 statements 16
+N 23 ElseNode
+N 24 StatementsNode
+N 25 IntegerNode
+I 25 value 0
+A 24 body 25
+R 23 statements 24
+R 11 subsequent 23
+A 7 body 8,11
+R 4 body 7
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

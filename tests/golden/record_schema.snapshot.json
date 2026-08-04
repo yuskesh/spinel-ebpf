@@ -84,38 +84,44 @@
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_dns_pid",
-            "cap": null
+            "cap": null,
+            "kfilter": "pid"
           },
           {
             "name": "comm",
             "kind": "field",
             "expose": "str",
             "ffi": "spnl_rec_dns_comm",
-            "cap": null
+            "cap": null,
+            "kfilter": "comm"
           },
           {
             "name": "cgid",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_dns_cgid",
-            "cap": null
+            "cap": null,
+            "kfilter": "cgroup_id"
           },
           {
             "name": "duration_ns",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_dns_duration_ns",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "qname",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_dns_qname",
-            "cap": 256
+            "cap": 256,
+            "kfilter": ""
           }
         ]
-      }
+      },
+      "metrics": []
     },
     "conn": {
       "record_struct": "<unit>_conn_event",
@@ -226,6 +232,7 @@
           "network.type",
           "net.peer.srtt_us",
           "spnl.conn.direction",
+          "spnl.conn.tcp_state",
           "process.executable.name"
         ],
         "enrichers": [
@@ -243,52 +250,87 @@
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_conn_pid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "comm",
             "kind": "field",
             "expose": "str",
             "ffi": "spnl_rec_conn_comm",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "dport",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_conn_dport",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "cgid",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_conn_cgid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "peer",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_conn_peer",
-            "cap": 64
+            "cap": 64,
+            "kfilter": ""
           },
           {
             "name": "direction",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_conn_direction",
-            "cap": 16
+            "cap": 16,
+            "kfilter": ""
+          },
+          {
+            "name": "tcp_state",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_conn_tcp_state",
+            "cap": 24,
+            "kfilter": ""
           },
           {
             "name": "srtt_us",
             "kind": "derived",
             "expose": "int",
             "ffi": "spnl_rec_conn_srtt_us",
-            "cap": 0
+            "cap": 0,
+            "kfilter": ""
           }
         ]
-      }
+      },
+      "metrics": [
+        {
+          "id": "count",
+          "name": "spnl.conn.count",
+          "kind": "counter",
+          "unit": "{connection}",
+          "value_from": "",
+          "bounds": "",
+          "series_bound": 3,
+          "labels": [
+            {
+              "key": "spnl.conn.direction",
+              "from": "direction",
+              "bound": 3,
+              "bound_from": "value_map",
+              "fallback": "other"
+            }
+          ]
+        }
+      ]
     },
     "l7": {
       "record_struct": "<unit>_l7_event",
@@ -398,38 +440,44 @@
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_l7_pid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "comm",
             "kind": "field",
             "expose": "str",
             "ffi": "spnl_rec_l7_comm",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "dport",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_l7_dport",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "duration_ns",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_l7_duration_ns",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "cgid",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_l7_cgid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           }
         ]
-      }
+      },
+      "metrics": []
     },
     "http": {
       "record_struct": "<unit>_http_event",
@@ -559,59 +607,94 @@
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_http_pid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "comm",
             "kind": "field",
             "expose": "str",
             "ffi": "spnl_rec_http_comm",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "dport",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_http_dport",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "duration_ns",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_http_duration_ns",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "cgid",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_http_cgid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "method",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_http_method",
-            "cap": 65
+            "cap": 65,
+            "kfilter": ""
           },
           {
             "name": "path",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_http_path",
-            "cap": 65
+            "cap": 65,
+            "kfilter": ""
           },
           {
             "name": "status",
             "kind": "derived",
             "expose": "int",
             "ffi": "spnl_rec_http_status",
-            "cap": 0
+            "cap": 0,
+            "kfilter": ""
           }
         ]
-      }
+      },
+      "metrics": [
+        {
+          "id": "duration",
+          "name": "spnl.http.client.request.duration",
+          "kind": "histogram",
+          "unit": "s",
+          "value_from": "duration_ns",
+          "bounds": "otel_duration_s",
+          "series_bound": 180,
+          "labels": [
+            {
+              "key": "http.request.method",
+              "from": "method",
+              "bound": 10,
+              "bound_from": "declared_set",
+              "fallback": "_OTHER"
+            },
+            {
+              "key": "http.response.status_code",
+              "from": "status",
+              "bound": 18,
+              "bound_from": "declared_set",
+              "fallback": "_OTHER"
+            }
+          ]
+        }
+      ]
     },
     "redis": {
       "record_struct": "<unit>_redis_event",
@@ -730,7 +813,8 @@
           "cri"
         ]
       },
-      "consumer": null
+      "consumer": null,
+      "metrics": []
     },
     "offcpu": {
       "record_struct": "<unit>_offcpu_event",
@@ -841,6 +925,7 @@
           "spnl.offcpu_ns",
           "spnl.oncpu_ns",
           "spnl.wait.kind",
+          "spnl.wait.stack",
           "process.executable.name"
         ],
         "enrichers": [
@@ -857,73 +942,92 @@
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_pid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "comm",
             "kind": "field",
             "expose": "str",
             "ffi": "spnl_rec_offcpu_comm",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "duration_ns",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_duration_ns",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "cgid",
             "kind": "field",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_cgid",
-            "cap": null
+            "cap": null,
+            "kfilter": ""
           },
           {
             "name": "method",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_offcpu_method",
-            "cap": 65
+            "cap": 65,
+            "kfilter": ""
           },
           {
             "name": "path",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_offcpu_path",
-            "cap": 65
+            "cap": 65,
+            "kfilter": ""
           },
           {
             "name": "status",
             "kind": "derived",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_status",
-            "cap": 0
+            "cap": 0,
+            "kfilter": ""
           },
           {
             "name": "offcpu_ns",
             "kind": "derived",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_offcpu_ns",
-            "cap": 0
+            "cap": 0,
+            "kfilter": ""
           },
           {
             "name": "oncpu_ns",
             "kind": "derived",
             "expose": "int",
             "ffi": "spnl_rec_offcpu_oncpu_ns",
-            "cap": 0
+            "cap": 0,
+            "kfilter": ""
           },
           {
             "name": "wait_kind",
             "kind": "derived",
             "expose": "str",
             "ffi": "spnl_rec_offcpu_wait_kind",
-            "cap": 16
+            "cap": 16,
+            "kfilter": ""
+          },
+          {
+            "name": "wait_stack_trace",
+            "kind": "derived",
+            "expose": "str",
+            "ffi": "spnl_rec_offcpu_wait_stack_trace",
+            "cap": 448,
+            "kfilter": ""
           }
         ]
-      }
+      },
+      "metrics": []
     },
     "l7stream": {
       "record_struct": "<unit>_l7stream_event",
@@ -969,7 +1073,8 @@
         }
       ],
       "egress": null,
-      "consumer": null
+      "consumer": null,
+      "metrics": []
     }
   }
 }

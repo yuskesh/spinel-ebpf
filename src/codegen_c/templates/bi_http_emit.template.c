@@ -27,7 +27,7 @@
                         __builtin_memcpy(_he@E@->req, _ep@E@->req, sizeof(_he@E@->req));
                         __builtin_memcpy(_he@E@->resp, _resp@E@, sizeof(_he@E@->resp));
                         bpf_ringbuf_submit(_he@E@, 0);
-                    }
+                    } else spnl_lost_inc();   /* ring full -> account the dropped record */
                     bpf_map_delete_elem(&@UNIT@_http_pending, &_esk@E@);
                 }
             }

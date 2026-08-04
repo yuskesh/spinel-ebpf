@@ -191,13 +191,17 @@ module SpinelEbpf
          queue_push queue_pop
          leak_record leak_forget
          task_swap lock_edge
-         lat_start lat_end cpu_id cgroup_id
+         lat_start lat_end cpu_id cgroup_id uid gid
+         attached_index attached_symbol_eq
          depth_inc depth_dec
          field_exists
          flow_get flow_set flow_del
          tcp_syncookie_gen tcp_syncookie_check
          tcp_reply_header tcp_reply_synack tcp_synack_cookie tcp_reply_data payload_starts
-         kfield kptr fib_lookup fib_lookup6 sk_lookup_tcp sk_assign_tcp redirect
+         kfield kptr emit_kfield_str kfield_str_eq fib_lookup fib_lookup6 sk_lookup_tcp sk_assign_tcp redirect
+         has_cap has_cap_permitted has_cap_inheritable cap_effective ns_id in_host_ns file_type
+         sock_sport sock_dport sock_saddr sock_daddr sock_family sock_state sock_protocol
+         sock_saddr6_hi sock_saddr6_lo sock_daddr6_hi sock_daddr6_lo
          skb_load_byte skb_store_byte l3_csum_replace l4_csum_replace
          skb_load_u32 skb_store_u32 l3_csum_replace_ip l4_csum_replace_ip
          skb_load_u16 skb_store_u16 l4_offset
@@ -3482,6 +3486,16 @@ PCFN
     #   a BPF_MAP_TYPE_SOCKMAP or BPF_MAP_TYPE_SOCKHASH map fd (deferred to
     #   see the fast-path response demo for the real thing).
     ATTACH_PATTERNS = [
+      # `on :kprobe, %w[a b c]` synthesizes `kprobe_multi__set<N>`. Listed BEFORE
+      # :kprobe so the longer prefix wins. This table is the retired Ruby oracle's,
+      # but detect_attach is still LIVE for the validator (its single-underscore
+      # typo check asks it "is this already a valid attach name?"), so an attach
+      # form missing here is reported as a typo -- measured, not guessed: without
+      # this row the demo failed with "did you mean `kprobe__multi__set0`?". The
+      # production SEC/wrapper decision is the C codegen's (cc_detect_attach); the
+      # `sec` here is the multi lowering's and is only ever read by name-shape
+      # checks.
+      [/\Akprobe_multi__(.+)\z/,        :kprobe_multi],
       [/\Akprobe__(.+)\z/,              :kprobe],
       [/\Akretprobe__(.+)\z/,           :kretprobe],
       # userspace probes. Target binary path is provided via env
@@ -3697,6 +3711,8 @@ PCFN
         case kind
         when :kprobe, :kretprobe
           return { kind: kind, sec: "#{kind}/#{m[1]}",   ctx_type: "struct pt_regs *" }
+        when :kprobe_multi
+          return { kind: kind, sec: "kprobe.multi", ctx_type: "struct pt_regs *" }
         when :uprobe, :uretprobe
           # SEC name is just "uprobe" / "uretprobe" -- libbpf reads the
           # SEC to set program type; binary path + func offset are supplied
@@ -5775,6 +5791,7 @@ PCFN
         return ppid_call(node)             if name == "ppid"
         return cpu_id_call(node)           if name == "cpu_id"
         return cgroup_id_call(node)        if name == "cgroup_id"
+        return uid_gid_call(node, name)    if name == "uid" || name == "gid"
         return emit_comm_call(node)        if name == "emit_comm"
         return emit_path_call(node)        if name == "emit_path"
         return emit_parent_path_call(node) if name == "emit_parent_path"
@@ -7751,14 +7768,7 @@ PCFN
       PATH_EQ_MAX = 256  # the BPF stack is 512 bytes in total; this cap was measured
 
       def path_eq_call(node)
-        attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
-        sec    = attach && attach[:sec]
-        unless DPATH_OK_SECS.include?(sec)
-          raise UnsupportedNode,
-                "path_eq: bpf_d_path is kernel-gated; measured-OK hooks are " \
-                "def lsm__file_open / fmod_ret__security_file_open / " \
-                "fmod_ret__security_file_permission (got #{sec.inspect})"
-        end
+        spec = dpath_hook!("path_eq")
         args = call_args(node)
         raise UnsupportedNode, "path_eq expects (file, \"/literal/path\"), got #{args.length} args" unless args.length == 2
         lit_node = @ctx.ast.node(args[1])
@@ -7773,7 +7783,8 @@ PCFN
         sz = ((lit.bytesize + 1 + 7) / 8) * 8
         raise UnsupportedNode, "path_eq: path literal too long for the BPF stack (#{sz} > #{PATH_EQ_MAX})" if sz > PATH_EQ_MAX
         fexpr = lower_stmt(args[0])
-        emit_path_eq("&((struct file *)(unsigned long)(#{fexpr}))->f_path", lit)
+        guard, path_expr = dpath_path_expr(spec, fexpr)
+        emit_path_eq(path_expr, lit, guard: guard)
       end
 
       # parent_path_eq("/usr/bin/curl") -- the CALLING process's PARENT exe path
@@ -7784,14 +7795,9 @@ PCFN
       # That distinction matters: a scalar such as ppid uses BPF_CORE_READ, while a
       # path needs a direct dereference.
       def parent_path_eq_call(node)
-        attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
-        sec    = attach && attach[:sec]
-        unless DPATH_OK_SECS.include?(sec)
-          raise UnsupportedNode,
-                "parent_path_eq: bpf_d_path is kernel-gated; measured-OK hooks are " \
-                "def lsm__file_open / fmod_ret__security_file_open / " \
-                "fmod_ret__security_file_permission (got #{sec.inspect})"
-        end
+        # The task chain is walked here, so the path source is fixed and only the
+        # gate matters.
+        dpath_hook!("parent_path_eq")
         args = call_args(node)
         raise UnsupportedNode, "parent_path_eq expects (\"/literal/path\"), got #{args.length} args" unless args.length == 1
         lit_node = @ctx.ast.node(args[0])
@@ -7807,14 +7813,20 @@ PCFN
 
       # Shared by path_eq / parent_path_eq: exact-sized stack buffer + unrolled
       # byte compare, length-first. `path_expr` is a `struct path *`.
-      def emit_path_eq(path_expr, lit)
+      def emit_path_eq(path_expr, lit, guard: nil)
         sz = ((lit.bytesize + 1 + 7) / 8) * 8
         raise UnsupportedNode, "path compare: path literal too long for the BPF stack (#{sz} > #{PATH_EQ_MAX})" if sz > PATH_EQ_MAX
         buf = fresh("pb")
         ret = fresh("pr")
         mat = fresh("pm")
         @lines << "char #{buf}[#{sz}] = {0};"
-        @lines << "__s64 #{ret} = bpf_d_path(#{path_expr}, #{buf}, sizeof(#{buf}));"
+        # An unreadable path (NULL argument) yields -1 => non-match, the same
+        # fail-safe as -ENAMETOOLONG.
+        @lines << if guard
+                    "__s64 #{ret} = #{guard} ? bpf_d_path(#{path_expr}, #{buf}, sizeof(#{buf})) : -1;"
+                  else
+                    "__s64 #{ret} = bpf_d_path(#{path_expr}, #{buf}, sizeof(#{buf}));"
+                  end
         # length first: a mismatched length short-circuits the byte compares away
         @lines << "__s64 #{mat} = (#{ret} == #{lit.bytesize + 1});"
         lit.bytes.each_with_index do |byte, i|
@@ -7859,6 +7871,17 @@ PCFN
       def cgroup_id_call(node)
         expect_no_args(node, "cgroup_id")
         CAst.s64(CAst.call("bpf_get_current_cgroup_id")).to_c
+      end
+
+      # uid() / gid() -- the low and high halves of bpf_get_current_uid_gid().
+      # Added alongside the common filter (`filter_by :uid`) so the filter's
+      # hand-written equivalent (`if uid == target_uid`) is expressible: a
+      # declaration that hides something the language cannot say would be a black
+      # box, not a shorthand.
+      def uid_gid_call(node, name)
+        expect_no_args(node, name)
+        call = CAst.call("bpf_get_current_uid_gid")
+        CAst.s64(CAst.cast("__u32", name == "uid" ? call : CAst.binop(">>", call, CAst.lit(32)))).to_c
       end
 
       # stack_id() / user_stack_id() -- capture a stack trace, return
@@ -8076,28 +8099,66 @@ PCFN
       # bpf_d_path is kernel-gated and the gate is NOT a plain name list: measurement
       # measured lsm/file_open OK but lsm/file_permission REJECTED ("helper call
       # is not allowed in probe"), while fmod_ret/security_file_permission is OK.
-      # So only the hooks actually measured to load are permitted, and only those
-      # whose gated argument is a `struct file *`; there is no silent fallback.
-      # The measured d_path gate allowlist lives in the
-      # capability registry (single source of truth). Byte-identical value --
-      # so the rejection message and the affordance data cannot disagree.
-      # (lsm/file_open + fmod_ret/security_file_open + fmod_ret/security_file_permission)
+      # So only the hooks actually measured to load are permitted; there is no
+      # silent fallback. Measurement later covered the rest of the matrix and
+      # widened this to 32 SECs; since the hooks disagree about WHICH ARGUMENT
+      # carries the path, the registry also says how to build a `struct path *`
+      # out of it (DPATH_HOOKS -> dpath_path_expr below).
+      # The measured d_path gate allowlist lives in the capability registry
+      # (single source of truth), so the rejection message and the affordance
+      # data cannot disagree.
       DPATH_OK_SECS = SpinelEbpf::Capabilities::DPATH_OK_SECS
 
-      def emit_path_call(node)
+      # The gate, plus which of this hook's arguments carries the path. Failing the
+      # gate raises with the reason, the evidence, and the fix (every hook you could
+      # write this in, named). Returns the hook spec.
+      def dpath_hook!(who)
         attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
         sec    = attach && attach[:sec]
-        unless DPATH_OK_SECS.include?(sec)
-          raise UnsupportedNode,
-                "emit_path: bpf_d_path is kernel-gated; measured-OK hooks are " \
-                "def lsm__file_open / fmod_ret__security_file_open / " \
-                "fmod_ret__security_file_permission (got #{sec.inspect})"
+        spec   = SpinelEbpf::Capabilities::DPATH_HOOKS[sec]
+        return spec if spec
+        by_form = SpinelEbpf::Capabilities::DPATH_HOOKS.group_by { |_, v| v[:form] }
+        hooks = %i[file path binprm].map { |f|
+          "\n    #{f} arg: " + (by_form[f] || []).map { |k, _| "def #{k.sub('/', '__')}" }.join(" / ")
+        }.join
+        raise UnsupportedNode,
+              "#{who}: bpf_d_path is kernel-gated (measured: LSM allows it only on " \
+              "sleepable hooks, fmod_ret/fentry only on the kernel's btf_allowlist_d_path; " \
+              "kprobe never). Write it in one of the measured-OK hooks:#{hooks}\n  " \
+              "(got #{sec.inspect})"
+      end
+
+      # The hook's gated argument -> a `struct path *` expression, plus a NULL guard
+      # expression where one is needed. Every hop is a DIRECT DEREFERENCE:
+      # BPF_CORE_READ scalarises, and a scalar cannot be handed to bpf_d_path.
+      def dpath_path_expr(spec, argexpr)
+        case spec[:form]
+        when :path   then [nil, "((struct path *)(unsigned long)(#{argexpr}))"]
+        when :binprm
+          q = fresh("pq")
+          g = fresh("pg")
+          @lines << "struct linux_binprm *#{q} = (struct linux_binprm *)(unsigned long)(#{argexpr});"
+          @lines << "struct file *#{g} = #{q} ? #{q}->file : 0;"
+          [g, "&#{g}->f_path"]
+        else
+          if spec[:guard]   # file__nullable (lsm/mmap_file): the guard is LOAD-required
+            g = fresh("pg")
+            @lines << "struct file *#{g} = (struct file *)(unsigned long)(#{argexpr});"
+            [g, "&#{g}->f_path"]
+          else
+            [nil, "&((struct file *)(unsigned long)(#{argexpr}))->f_path"]
+          end
         end
+      end
+
+      def emit_path_call(node)
+        spec = dpath_hook!("emit_path")
         args = call_args(node)
-        raise UnsupportedNode, "emit_path expects 1 arg (a `struct file *` attach param), got #{args.length}" unless args.length == 1
+        raise UnsupportedNode, "emit_path expects 1 arg (the hook's file/path/binprm attach param), got #{args.length}" unless args.length == 1
         fexpr = lower_stmt(args[0])
         @ctx.uses_str_ringbuf = true
         evar = fresh("pe")
+        guard, path_expr = dpath_path_expr(spec, fexpr)
         @lines << "{"
         @lines << "    struct #{@ctx.unit_name}_str_event *#{evar} = bpf_ringbuf_reserve(&#{@ctx.unit_name}_str_events, sizeof(*#{evar}), 0);"
         @lines << "    if (#{evar}) {"
@@ -8109,7 +8170,12 @@ PCFN
         # buf[0] and returns strlen+1, but leaves the pre-memmove copy in the
         # tail. Zero first so nothing past the NUL is emitted from the slot.
         @lines << "        __builtin_memset(#{evar}->str, 0, sizeof(#{evar}->str));"
-        @lines << "        bpf_d_path(&((struct file *)(unsigned long)(#{fexpr}))->f_path, #{evar}->str, sizeof(#{evar}->str));"
+        # No path (NULL argument) -> emit the empty string, never a stale one.
+        @lines << if guard
+                    "        if (#{guard}) bpf_d_path(#{path_expr}, #{evar}->str, sizeof(#{evar}->str));"
+                  else
+                    "        bpf_d_path(#{path_expr}, #{evar}->str, sizeof(#{evar}->str));"
+                  end
         @lines << "        bpf_ringbuf_submit(#{evar}, 0);"
         @lines << "    }"
         @lines << "}"
@@ -8121,14 +8187,9 @@ PCFN
       # can't feed bpf_d_path). Same kernel gate as emit_path.
       def emit_parent_path_call(node)
         expect_no_args(node, "emit_parent_path")
-        attach = @mi.scope == :top_level ? CodegenBpf.detect_attach(@mi.method_name) : nil
-        sec    = attach && attach[:sec]
-        unless DPATH_OK_SECS.include?(sec)
-          raise UnsupportedNode,
-                "emit_parent_path: bpf_d_path is kernel-gated; measured-OK hooks are " \
-                "def lsm__file_open / fmod_ret__security_file_open / " \
-                "fmod_ret__security_file_permission (got #{sec.inspect})"
-        end
+        # The task chain is walked here, so the path source is fixed and only the
+        # gate matters.
+        dpath_hook!("emit_parent_path")
         @ctx.uses_str_ringbuf = true
         pt = fresh("pt")
         evar = fresh("pe")

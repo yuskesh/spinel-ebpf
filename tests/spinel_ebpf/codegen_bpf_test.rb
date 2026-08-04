@@ -2422,6 +2422,74 @@ end
     assert_equal "lsm/file_open",       GEN.detect_attach("lsm__file_open")[:sec]
   end
 
+  # ---------- the path builtins on security hooks other than open ----------
+
+  # The gate stayed "only hooks that were measured", and got wider. The whole
+  # hook matrix was measured on a 7.1.5 kernel and what failed to load stayed
+  # out -- so the **rejected** side is pinned here too, to keep anyone from
+  # adding to the gate by guessing.
+  def test_gate_holds_only_measured_hooks
+    ok = GEN::MethodEmitter::DPATH_OK_SECS
+    # measured LOAD_OK (a representative sample)
+    %w[lsm/path_unlink lsm/path_rename lsm/mmap_file lsm/bprm_check_security
+       lsm/inode_getattr fmod_ret/security_path_truncate fentry/filp_close].each do |sec|
+      assert_includes ok, sec
+    end
+    # measured REJECTED -- including pairs where the same function loads under
+    # one attach kind and not the other
+    %w[lsm/file_permission lsm/path_chroot fmod_ret/security_mmap_file
+       fmod_ret/security_bprm_check fmod_ret/security_path_unlink].each do |sec|
+      refute_includes ok, sec, "#{sec} was measured REJECTED and must not be in the gate"
+    end
+    # the gate compares against detect_attach's SEC, so the spellings must line up
+    assert_equal "lsm/path_unlink", GEN.detect_attach("lsm__path_unlink")[:sec]
+    assert_equal "lsm/bprm_check_security", GEN.detect_attach("lsm__bprm_check_security")[:sec]
+  end
+
+  # The security_path_* family is handed **an already-`struct path *`** argument,
+  # so no conversion applies (applying the file form's `&file->f_path` makes the
+  # load fail with "R1 is of type path but ...").
+  def test_path_form_hook_passes_the_arg_straight_through
+    c = emit_for("123_path_unlink_deny")
+    inner = c[/lsm__path_unlink_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_match(/bpf_d_path\(\(\(struct path \*\)\(unsigned long\)\(dir\)\), _pb\d+/, inner)
+    refute_match(/struct file \*/, inner, "the file-form conversion must not reach a path-form hook")
+  end
+
+  # The linux_binprm form is two hops (bprm->file->f_path), and it has to be a
+  # **direct deref**: BPF_CORE_READ returns a scalar, which bpf_d_path cannot take.
+  def test_binprm_form_is_direct_deref_two_hops
+    c = emit_for("124_bprm_exec_path")
+    inner = c[/lsm__bprm_check_security_inner\(.*?\n\}/m]
+    refute_nil inner
+    assert_match(/struct linux_binprm \*_pq\d+ = \(struct linux_binprm \*\)\(unsigned long\)\(bprm\);/, inner)
+    assert_match(/struct file \*_pg\d+ = _pq\d+ \? _pq\d+->file : 0;/, inner)
+    assert_match(/bpf_d_path\(&_pg\d+->f_path/, inner)
+    refute_match(/BPF_CORE_READ/, inner)
+  end
+
+  # The NULL guard is fail-safe: an unknown path is a non-match. emit_path's own
+  # answer to NULL is to emit the empty string.
+  def test_guarded_form_fails_safe_to_no_match
+    c = emit_for("124_bprm_exec_path")
+    inner = c[/lsm__bprm_check_security_inner\(.*?\n\}/m]
+    # path_eq: NULL yields -1 => the length compare misses => no match
+    assert_match(/__s64 _pr\d+ = _pg\d+ \? bpf_d_path\(&_pg\d+->f_path, _pb\d+, sizeof\(_pb\d+\)\) : -1;/, inner)
+    # emit_path: NULL means d_path is not called (the slot is already memset, so
+    # the empty string goes out)
+    assert_match(/if \(_pg\d+\) bpf_d_path\(&_pg\d+->f_path, _pe\d+->str/, inner)
+  end
+
+  # The three hooks this started from emit **unchanged output** -- backward
+  # compatible, and their goldens do not move.
+  def test_original_file_hooks_stay_byte_identical_in_shape
+    c = emit_for("100_path_eq")
+    inner = c[/fmod_ret__security_file_open_inner\(.*?\n\}/m]
+    assert_match(/__s64 _pr\d+ = bpf_d_path\(&\(\(struct file \*\)\(unsigned long\)\(file\)\)->f_path, _pb\d+, sizeof\(_pb\d+\)\);/, inner)
+    refute_match(/_pg\d+/, inner, "a non-nullable file argument gets no guard: same output as before")
+  end
+
   # ---------- path_eq (the equivalent of Tetragon's matchBinaries) ----------
 
   def test_path_eq_lowers_to_sized_buf_and_unrolled_compare

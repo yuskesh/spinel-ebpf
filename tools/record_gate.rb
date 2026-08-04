@@ -6,14 +6,14 @@
 #
 # Two checks, both of which used to be human work:
 #
-#   (1) REGEN — src/runtime/otlp/record_mirror_gen.h and
+#   (1) REGEN -- src/runtime/otlp/record_mirror_gen.h and
 #       src/spinel_ebpf/record_schema_gen.json are committed derived artifacts.
 #       Editing src/codegen_c/record_schema.h without re-running
 #       `make -C src/codegen_c mirror` leaves the runtime and the Ruby affordance
 #       surface describing an older contract than the kernel emits. This rebuilds
 #       the generator and diffs its output against what is checked in.
 #
-#   (2) APPEND-ONLY — the Cap'n Proto / SBE rule the project had been applying by
+#   (2) APPEND-ONLY -- the Cap'n Proto / SBE rule the project had been applying by
 #       hand every time a field was added (cgid for cgroup/pod attribution,
 #       duration_ns, start_ktime and hdr_ext): a published field never moves,
 #       never changes type, never disappears; new fields go at the END and read
@@ -23,7 +23,7 @@
 #       breaks somebody: a running probe, an existing consumer program, or a
 #       dashboard query.
 #
-#       The reference is tests/golden/record_schema.snapshot.json — a distilled
+#       The reference is tests/golden/record_schema.snapshot.json -- a distilled
 #       projection of the contract (ids, offsets, widths, exposure, property
 #       names, attribute keys). Prose (`note` / `condition` / `source`) is
 #       deliberately NOT in the snapshot, so documenting a field better is not a
@@ -33,7 +33,7 @@
 #   ruby tools/record_gate.rb --update   # accept the current contract as the new
 #                                        # baseline (review the snapshot diff!)
 #
-# An intentional breaking change is still possible — it just cannot be silent:
+# An intentional breaking change is still possible -- it just cannot be silent:
 # it becomes a reviewable diff in the snapshot, exactly like tests/golden/.
 require "json"
 require "open3"
@@ -120,13 +120,35 @@ module RecordGate
           # `cap` is in the snapshot because it is a contract term, not an
           # implementation detail: it is the width BOTH the accessor and the span
           # builder hand the derivation, so shrinking it starts truncating values
-          # that used to arrive whole — on `ev.<name>` and on the attribute at once.
+          # that used to arrive whole -- on `ev.<name>` and on the attribute at once.
           # nil for a field property (it reads the record's bytes; its width is the
           # field's `bytes`, already snapshotted above).
+          # `kfilter` is in the snapshot for the same reason `expose` is:
+          # it changes what a Ruby program may WRITE. Giving a published property
+          # a kernel equivalent makes `keep_if :<chan>, <prop>: :eq` stop
+          # compiling (the transform points at `filter_by` instead), so adding
+          # one breaks programs that exist -- append-only applies to the refusal
+          # surface, not just the byte layout.
           "properties" => Array(cons["properties"]).map { |p|
             { "name" => p["name"], "kind" => p["kind"], "expose" => p["expose"],
-              "ffi" => p["ffi"], "cap" => p["cap"] }
+              "ffi" => p["ffi"], "cap" => p["cap"], "kfilter" => p["kfilter"].to_s }
           },
+        },
+        # What the channel's records aggregate into. `series_bound` is the
+        # term that matters most here and the reason it is snapshotted at all: it
+        # is the ceiling on how many time series this metric can create, computed
+        # from the label declarations. A change to it is a change in what the
+        # probe COSTS, which is invisible in every other artifact -- the spans stay
+        # correct, the exit code stays 0, and the bill moves. Putting the number in
+        # the baseline makes moving it a reviewed diff.
+        "metrics"          => Array(c["metrics"]).map { |m|
+          { "id" => m["id"], "name" => m["name"], "kind" => m["kind"], "unit" => m["unit"],
+            "value_from" => m["value_from"].to_s, "bounds" => m["bounds"].to_s,
+            "series_bound" => m["series_bound"],
+            "labels" => Array(m["labels"]).map { |l|
+              { "key" => l["key"], "from" => l["from"], "bound" => l["bound"],
+                "bound_from" => l["bound_from"], "fallback" => l["fallback"].to_s }
+            } }
         },
       }
     end
@@ -217,6 +239,35 @@ module RecordGate
         end
       end
 
+      # -- metrics: what the channel costs -------------------------------------
+      om = Array(och["metrics"])
+      nm = Array(nch["metrics"])
+      (om.map { |m| m["id"] } - nm.map { |m| m["id"] }).each do |mid|
+        v << "channel `#{id}`: metric `#{mid}` was removed (dashboards and alerts query it by name)"
+      end
+      om.each do |o|
+        n = nm.find { |x| x["id"] == o["id"] }
+        next unless n
+        %w[name kind unit value_from].each do |k|
+          next if o[k] == n[k]
+          v << "channel `#{id}`: metric `#{o['id']}` #{k} changed #{o[k].inspect} -> #{n[k].inspect} " \
+               "(a renamed or re-typed metric is a broken query, not a new one)"
+        end
+        ol = Array(o["labels"])
+        nl = Array(n["labels"])
+        (ol.map { |l| l["key"] } - nl.map { |l| l["key"] }).each do |lk|
+          v << "channel `#{id}`: metric `#{o['id']}` lost label `#{lk}` " \
+               "(series that were distinguished by it silently merge)"
+        end
+        ol.each do |l|
+          m2 = nl.find { |x| x["key"] == l["key"] }
+          next unless m2
+          next if l["from"] == m2["from"]
+          v << "channel `#{id}`: metric `#{o['id']}` label `#{l['key']}` now reads " \
+               "`#{m2['from']}` instead of `#{l['from']}` (same key, different meaning)"
+        end
+      end
+
       # -- typed consumer: what a Ruby program may write ----------------------
       ocons, ncons = och["consumer"], nch["consumer"]
       if ocons && !ncons
@@ -241,8 +292,17 @@ module RecordGate
                  "#{o[k].inspect} -> #{n[k].inspect}"
           end
           # A derivation's output capacity may grow (nothing that fitted stops
-          # fitting) but never shrink — a narrower cap silently truncates values that
+          # fitting) but never shrink -- a narrower cap silently truncates values that
           # a consumer and a dashboard were both getting whole.
+          # Gaining a kernel equivalent is a NARROWING of what may be
+          # written -- `keep_if :<chan>, <prop>: :eq` was accepted and now is
+          # refused. Losing one only widens (the refusal goes away), so only the
+          # gain is a violation.
+          if o["kfilter"].to_s.empty? && !n["kfilter"].to_s.empty?
+            v << "channel `#{id}`: consumer property `ev.#{o['name']}` gained kfilter " \
+                 "#{n['kfilter'].inspect} -- `keep_if :#{id}, #{o['name']}: :eq` stops compiling " \
+                 "(the transform redirects it to `filter_by :#{n['kfilter']}`)"
+          end
           ocap, ncap = o["cap"], n["cap"]
           next unless ocap.is_a?(Integer) && ncap.is_a?(Integer)
           next unless ncap < ocap
@@ -273,7 +333,7 @@ module RecordGate
     proj = project(JSON.parse(js))
     if update
       File.write(SNAPSHOT, snapshot_text(proj))
-      puts "record gate: wrote #{rel(SNAPSHOT)} (#{proj['channels'].length} channels) — REVIEW THE DIFF"
+      puts "record gate: wrote #{rel(SNAPSHOT)} (#{proj['channels'].length} channels) -- REVIEW THE DIFF"
       return regen.empty? ? 0 : (puts_problems(regen); 1)
     end
 
@@ -286,10 +346,16 @@ module RecordGate
       problems << "#{rel(SNAPSHOT)}: unknown snapshot schema #{old['schema'].inspect}"
     else
       problems.concat(violations(old, proj))
-      if snapshot_text(proj) != File.read(SNAPSHOT) && violations(old, proj).empty?
+      # Compare the PARSED snapshot, not its text. `JSON.pretty_generate` renders an
+      # empty array as "[]" on json >= 2.12 and as "[\n\n]" on older ones, so a text
+      # compare makes this gate unable to be green on the host and in the container at
+      # the same time (measured 2026-08-04: host json 2.12.2, build container json
+      # 2.7.2 -- a snapshot written in the container then failed on the host). The
+      # contract is the structure; how the generator spaced it is not a contract term.
+      if JSON.parse(snapshot_text(proj)) != old && violations(old, proj).empty?
         # additive change (new channel / appended field / new attribute): allowed,
         # but the baseline has to move or the next change compares against stale data.
-        problems << "#{rel(SNAPSHOT)} is out of date (the change is append-only and allowed — " \
+        problems << "#{rel(SNAPSHOT)} is out of date (the change is append-only and allowed -- " \
                     "refresh with `ruby tools/record_gate.rb --update` and commit)"
       end
     end
@@ -297,7 +363,13 @@ module RecordGate
     if problems.empty?
       nch = proj["channels"].length
       nfl = proj["channels"].values.sum { |c| c["fields"].length }
-      puts "record gate: OK — #{nch} channels / #{nfl} fields; artifacts fresh, evolution append-only"
+      mets = proj["channels"].values.flat_map { |c| Array(c["metrics"]) }
+      # Print the cardinality ceiling on every green run. The number a metric
+      # costs is the one property of this contract with no local symptom when it is
+      # wrong, so it gets said out loud even when nothing is wrong.
+      card = mets.empty? ? "" :
+             " / #{mets.length} metrics (<= #{mets.sum { |m| m['series_bound'] }} time series)"
+      puts "record gate: OK -- #{nch} channels / #{nfl} fields#{card}; artifacts fresh, evolution append-only"
       return 0
     end
     puts_problems(problems)

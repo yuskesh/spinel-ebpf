@@ -1,0 +1,83 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/140_cpumap_redirect.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_ABORTED
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name XDP_DROP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name XDP_PASS
+N 7 IntegerNode
+I 7 value 2
+R 6 value 7
+N 8 ConstantWriteNode
+S 8 name XDP_TX
+N 9 IntegerNode
+I 9 value 3
+R 8 value 9
+N 10 ConstantWriteNode
+S 10 name XDP_REDIRECT
+N 11 IntegerNode
+I 11 value 4
+R 10 value 11
+N 12 InstanceVariableWriteNode
+S 12 name @rx
+N 13 IntegerNode
+I 13 value 0
+R 12 value 13
+N 14 DefNode
+S 14 name xdp__fanout
+R 14 parameters -1
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @rx
+N 17 CallNode
+S 17 name +
+N 18 InstanceVariableReadNode
+S 18 name @rx
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+N 21 CallNode
+S 21 name cpumap_redirect
+R 21 receiver -1
+N 22 ArgumentsNode
+N 23 CallNode
+S 23 name %25
+N 24 CallNode
+S 24 name pkt_l4_sport
+R 24 receiver -1
+R 24 arguments -1
+R 24 block -1
+S 24 call_operator .
+I 24 vcall 1
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 4
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+A 22 arguments 23
+R 21 arguments 22
+R 21 block -1
+S 21 call_operator .
+A 15 body 16,21
+R 14 body 15
+R 14 receiver -1
+A 1 body 2,4,6,8,10,12,14
+R 0 statements 1

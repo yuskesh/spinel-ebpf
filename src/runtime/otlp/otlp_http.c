@@ -64,35 +64,12 @@ static void io_close(void *tls_h, int fd) {
     close(fd);
 }
 
-/* Copy [start,end) into dst, trimming surrounding spaces. */
-static void copy_trim(char *dst, size_t cap, const char *s, const char *e) {
-    while (s < e && (*s == ' ' || *s == '\t')) s++;
-    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
-    size_t n = (size_t)(e - s);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, s, n);
-    dst[n] = '\0';
-}
-
+/* The env-supplied headers. The parser for the "k1=v1,k2=v2" grammar itself is
+ * otlp_env_kv_list() in otlp_http.h -- resource attributes use the same grammar,
+ * so, like otlp_service_instance_id, it is a static inline in the header rather
+ * than here (the JSON encoder does not link otlp_http.c). */
 int otlp_env_headers(otlp_kv_t *out, int max) {
-    const char *e = getenv("OTEL_EXPORTER_OTLP_HEADERS");
-    if (!e || !*e || !out || max <= 0) return 0;
-    int n = 0;
-    const char *p = e;
-    while (*p && n < max) {
-        while (*p == ',' || *p == ' ') p++;
-        if (!*p) break;
-        const char *comma = strchr(p, ',');
-        const char *segend = comma ? comma : p + strlen(p);
-        const char *eq = (const char *)memchr(p, '=', (size_t)(segend - p));
-        if (eq) {
-            copy_trim(out[n].key, sizeof out[n].key, p, eq);
-            copy_trim(out[n].val, sizeof out[n].val, eq + 1, segend);
-            if (out[n].key[0]) n++;
-        }
-        p = comma ? comma + 1 : segend;
-    }
-    return n;
+    return otlp_env_kv_list("OTEL_EXPORTER_OTLP_HEADERS", out, max);
 }
 
 int otlp_gzip_if_enabled(const uint8_t *in, size_t inlen,

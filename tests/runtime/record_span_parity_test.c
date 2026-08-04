@@ -219,12 +219,59 @@ static void conn_case(int v6) {
     }
     row_str("direction", "spnl.conn.direction", spnl_rec_conn_direction(0),
             attr_of(a, s.nattrs, SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION));
+    /* Two readings of the same single byte. Both fall under the "output of the same
+     * function" rule. */
+    row_str("tcp_state", "spnl.conn.tcp_state", spnl_rec_conn_tcp_state(0),
+            attr_of(a, s.nattrs, SPNL_EGRESS_CONN_ATTR_SPNL_CONN_TCP_STATE));
+    {   /* The two readings agree with each other (SYN_SENT <-> active, SYN_RECV <->
+         * passive). Now that there is one table, that correspondence follows from the
+         * declaration -- two separate switches could break it. */
+        const char *want = v6 ? "passive" : "active";
+        const char *st   = v6 ? "SYN_RECV" : "SYN_SENT";
+        row("tcp_state", "the same byte as direction", st, spnl_rec_conn_tcp_state(0),
+            strcmp(spnl_rec_conn_tcp_state(0), st) == 0 &&
+            strcmp(spnl_rec_conn_direction(0), want) == 0);
+    }
     row_int("srtt_us", "net.peer.srtt_us", spnl_rec_conn_srtt_us(0),
             attr_of(a, s.nattrs, SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US));
     {   /* The mismatch this guards: the raw field is in 1/8 us. ev is not the raw value. */
         row("srtt_us", "not the raw field", "37", "raw=296 (1/8us)",
             spnl_rec_conn_srtt_us(0) == 37 && r->srtt_us == 296);
     }
+}
+
+/* A value the table has no name for. This is where a design choice sits: unlike the
+ * other derivations there is a real choice of WHAT TO RETURN.
+ *   - return the nearest name  -> a plausible lie, the same class of failure the
+ *                                 kernel-side gates exist to close
+ *   - return nothing           -> the number disappears too (which is what
+ *                                 `direction` does with "other")
+ *   - return it with the number kept  <- this. The state number is recoverable
+ *                                        from the span.
+ * direction is printed alongside as the control: on the same record it can only say
+ * "other". */
+static void conn_case_unnamed(void) {
+    uint64_t seed = 1;
+    otlp_generic_span_t s; otlp_kv_t a[20]; char name[128];
+
+    memset(g_rec_conn, 0, sizeof g_rec_conn[0]);
+    spnl_rec_conn_t *r = &g_rec_conn[0];
+    put_hdr(&r->hdr, 1700000000000000000ULL);
+    snprintf(r->comm, sizeof r->comm, "%s", "curl");
+    r->family = 2; r->daddr = 0x0100007F; r->dport = 8443;
+    r->oldstate = 99;          /* a state number this kernel's enum does not have */
+    g_rec_conn_n = 1;
+
+    if (!conn_fill_span(r, 0, &seed, &s, a, name, sizeof name)) {
+        printf("  FAIL: conn_fill_span returned 0\n"); g_fail = 1; return;
+    }
+    g_ch = "conn?";
+    row_str("tcp_state", "spnl.conn.tcp_state", spnl_rec_conn_tcp_state(0),
+            attr_of(a, s.nattrs, SPNL_EGRESS_CONN_ATTR_SPNL_CONN_TCP_STATE));
+    row("tcp_state", "an unnamed value keeps its number", "unnamed(99)",
+        spnl_rec_conn_tcp_state(0), strcmp(spnl_rec_conn_tcp_state(0), "unnamed(99)") == 0);
+    row("direction", "(control) on the same record direction says", "other",
+        spnl_rec_conn_direction(0), strcmp(spnl_rec_conn_direction(0), "other") == 0);
 }
 
 /* ------------------------------------------------------------------ l7 */
@@ -381,7 +428,7 @@ static const uint64_t OC_NOW = 1700000000000000000ULL;
 
 static void case_offcpu(void) {
     uint64_t seed = 1;
-    otlp_generic_span_t s; otlp_kv_t a[13]; char name[96];
+    otlp_generic_span_t s; otlp_kv_t a[14]; char name[96];   /* +1 for spnl.wait.stack */
 
     memset(g_rec_offcpu, 0, sizeof g_rec_offcpu[0]);
     spnl_rec_offcpu_t *r = &g_rec_offcpu[0];
@@ -445,6 +492,28 @@ static void case_offcpu(void) {
     offcpu_fill_span(r, OC_NOW, &seed, &s, a, name, sizeof name);
     row_str("wait_kind", "(no stack map) spnl.wait.kind", spnl_rec_offcpu_wait_kind(0),
             attr_of(a, s.nattrs, SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_KIND));
+
+    /* The frames are another reading of the same single fetch the kind comes from.
+     * This is a host oracle with no stack map, so **both paths come out empty** --
+     * "could not read it" is expressed by emitting no attribute, and ev returns the
+     * empty string, which is the same answer. The path where frames really are
+     * available needs a live kernel and is exercised end to end elsewhere.
+     *
+     * There is a second invariant that CAN be pinned here: **the opt-in must not
+     * take effect on one side only**. Setting SPNL_STACK_FRAMES leaves both sides
+     * empty as long as there is no stack map -- specifying a depth says how many of
+     * the frames that were read to emit, it does not conjure frames that were not. */
+    row("wait_stack_trace", "(no stack map) spnl.wait.stack", "(empty)",
+        attr_of(a, s.nattrs, SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_STACK) ? "(attribute present)" : "(no attribute)",
+        spnl_rec_offcpu_wait_stack_trace(0)[0] == '\0' &&
+        attr_of(a, s.nattrs, SPNL_EGRESS_OFFCPU_ATTR_SPNL_WAIT_STACK) == NULL);
+    row("wait_stack_trace", "frames and kind come from one fetch", "same _oc_frames()",
+        "same _oc_frames()",
+        /* Two readings of one source: when either says "could not read it", the other
+         * did not read it either. A classification of unknown alongside frames that
+         * were produced is not a representable state. */
+        (strcmp(spnl_rec_offcpu_wait_kind(0), "unknown") != 0) ||
+        (spnl_rec_offcpu_wait_stack_trace(0)[0] == '\0'));
     r->wait_stack = -1;
 
     /* A record where the clamp bites, which is the whole point: offcpu_ns > duration_ns
@@ -545,6 +614,7 @@ int main(int argc, char **argv) {
     hdr("dns");   case_dns();
     hdr("conn (IPv4 / active)"); conn_case(0);
     hdr("conn (IPv6 / passive)"); conn_case(1);
+    hdr("conn (a state the map does not name)"); conn_case_unnamed();
     hdr("l7");    case_l7();
     hdr("http");  case_http();
     hdr("offcpu (clamp / computed value / kallsyms classification)"); case_offcpu();

@@ -1,0 +1,53 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/131_filter_verdict_hook.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name filter_by
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value pid
+A 3 arguments 4
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 5 DefNode
+S 5 name kprobe__do_sys_openat2
+N 6 ParametersNode
+N 7 RequiredParameterNode
+S 7 name dfd
+A 6 requireds 7
+A 6 optionals 
+A 6 keywords 
+A 6 posts 
+R 5 parameters 6
+N 8 StatementsNode
+N 9 InstanceVariableOperatorWriteNode
+S 9 name @opens
+S 9 binary_operator +
+N 10 IntegerNode
+I 10 value 1
+R 9 value 10
+N 11 IntegerNode
+I 11 value 0
+A 8 body 9,11
+R 5 body 8
+R 5 receiver -1
+N 12 DefNode
+S 12 name xdp__main
+R 12 parameters -1
+N 13 StatementsNode
+N 14 InstanceVariableOperatorWriteNode
+S 14 name @rx
+S 14 binary_operator +
+N 15 IntegerNode
+I 15 value 1
+R 14 value 15
+N 16 IntegerNode
+I 16 value 2
+A 13 body 14,16
+R 12 body 13
+R 12 receiver -1
+A 1 body 2,5,12
+R 0 statements 1

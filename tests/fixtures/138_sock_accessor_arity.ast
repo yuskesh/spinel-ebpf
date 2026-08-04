@@ -1,0 +1,30 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/138_sock_accessor_arity.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__tcp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 InstanceVariableWriteNode
+S 6 name @dport
+N 7 CallNode
+S 7 name sock_dport
+R 7 receiver -1
+R 7 arguments -1
+R 7 block -1
+S 7 call_operator .
+I 7 vcall 1
+R 6 value 7
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

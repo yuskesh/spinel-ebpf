@@ -1,0 +1,44 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/132_filter_no_handler.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name filter_by
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value pid
+N 5 SymbolNode
+S 5 value comm
+A 3 arguments 4,5
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 6 DefNode
+S 6 name double
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name x
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 9 StatementsNode
+N 10 CallNode
+S 10 name *
+N 11 LocalVariableReadNode
+S 11 name x
+R 10 receiver 11
+N 12 ArgumentsNode
+N 13 IntegerNode
+I 13 value 2
+A 12 arguments 13
+R 10 arguments 12
+R 10 block -1
+S 10 call_operator .
+A 9 body 10
+R 6 body 9
+R 6 receiver -1
+A 1 body 2,6
+R 0 statements 1

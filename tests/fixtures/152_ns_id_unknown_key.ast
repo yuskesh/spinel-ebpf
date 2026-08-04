@@ -1,0 +1,26 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/152_ns_id_unknown_key.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+R 2 parameters -1
+N 3 StatementsNode
+N 4 InstanceVariableWriteNode
+S 4 name @n
+N 5 CallNode
+S 5 name ns_id
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 SymbolNode
+S 7 value mount
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+R 4 value 5
+A 3 body 4
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

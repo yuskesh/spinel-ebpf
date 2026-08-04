@@ -60,6 +60,7 @@
 # the eBPF IR (cc_is_consumer_fn). MVP named: 1 value per event; don't mix named
 # events with raw on_emit_pair (both use the pair ringbuf).
 require_relative "capabilities"
+require_relative "keep_filter"
 
 module SpinelEbpf
   module Consumer
@@ -121,7 +122,13 @@ module SpinelEbpf
 
     def transform(source)
       rec = record_consumers(source)
-      return transform_record(source, rec) unless rec.empty?
+      # `keep_if` is validated whether or not this program has a typed consumer --
+      # a declaration with nothing to filter is exactly the failure that has to be
+      # loud, and it would otherwise reach spinel as an unknown top-level call and
+      # die with a message about the wrong thing.
+      keeps = SpinelEbpf::KeepFilter.scan_source(source)
+      validate_keeps!(keeps, rec) unless keeps.empty?
+      return transform_record(source, rec, keeps) unless rec.empty?
 
       nm = named(source)
       return transform_named(source, nm) unless nm.empty?
@@ -268,7 +275,130 @@ module SpinelEbpf
       idx ? [line[0...idx], line[idx..]] : [line, ""]
     end
 
-    def transform_record(source, recs)
+    # ---- the declared userspace filter (`keep_if`) ---------------------------
+    #
+    # Every refusal below lives here rather than in keep_filter.rb for one
+    # reason: this is already the code that fails a build for `ev.typo`, and a
+    # program must not learn about one record's properties in two voices.
+    # KeepFilter owns the vocabulary and the lowering; this owns saying no.
+    KF = SpinelEbpf::KeepFilter
+
+    def validate_keeps!(keeps, recs)
+      ids = record_channel_ids
+      seen = {}
+      keeps.each do |d|
+        chan = d[:channel]
+        line = d[:line]
+        unless ids.include?(chan)
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- `#{chan}` is not a typed record channel, " \
+                       "so there is no record to filter. Channels with a typed consumer: " \
+                       "#{ids.join(', ')} (see `spinel-ebpf capabilities --json` -> " \
+                       "consumer_filter). `keep_if` filters the records a `on_emit :<channel> " \
+                       "do |ev|` block receives; it is not a filter on named events."
+        end
+        if (prev = seen[chan])
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- declared twice (also line #{prev}). " \
+                       "One declaration per channel lists every predicate, so that the set of " \
+                       "things a probe drops can be read in one place: " \
+                       "`keep_if :#{chan}, a: :eq, b: :ge`."
+        end
+        seen[chan] = line
+        unless recs.key?(chan)
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- this program has no " \
+                       "`on_emit :#{chan} do |ev| ... end` block, so no #{chan} record is ever " \
+                       "drained and the filter would be wired to nothing. Consume the channel " \
+                       "first#{recs.empty? ? '' : ", or filter one it does consume (#{recs.keys.join(', ')})"}."
+        end
+        unless d[:bad].empty?
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- #{d[:bad].first.inspect} is not a " \
+                       "predicate. Each one is `<property>: :<operator>`, e.g. " \
+                       "`keep_if :#{chan}, #{keep_example(chan)}`. The VALUE comes from the " \
+                       "environment at run time (#{KF::ENV_PREFIX}#{chan.upcase}_<PROPERTY>), not " \
+                       "from the declaration -- one binary, every narrowing."
+        end
+        if d[:preds].empty?
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- expects at least one predicate, e.g. " \
+                       "`keep_if :#{chan}, #{keep_example(chan)}`."
+        end
+        props = record_properties(chan)
+        dup = d[:preds].map { |p| p[:prop] }.tally.find { |_, n| n > 1 }
+        if dup
+          raise Error, "`keep_if :#{chan}` (line #{line}) -- property `#{dup[0]}` listed twice. " \
+                       "Predicates are combined with AND, so two on the same property is either a " \
+                       "typo or a range; a range needs two properties or a derivation."
+        end
+        d[:preds].each { |p| validate_keep_pred!(chan, p, props, line) }
+      end
+    end
+
+    def keep_example(chan)
+      e = KF.example_predicate(chan)
+      e ? "#{e[:prop]}: :#{e[:op]}" : "<property>: :eq"
+    end
+
+    def validate_keep_pred!(chan, pred, props, line)
+      prop = pred[:prop]
+      p = props.find { |x| x[:name].to_s == prop }
+      unless p
+        raise Error, "`keep_if :#{chan}, #{prop}: :#{pred[:op]}` (line #{line}) -- the `#{chan}` " \
+                     "record has no property `#{prop}`. Available: " \
+                     "#{props.map { |x| "#{x[:name]} (#{x[:expose]})" }.join(', ')} " \
+                     "(the same set `ev.<name>` reads; see `spinel-ebpf capabilities --json` -> " \
+                     "channels[#{chan}].consumer)."
+      end
+      op = KF.op(pred[:op])
+      allowed = KF.ops_for(p[:expose])
+      unless op
+        raise Error, "`keep_if :#{chan}, #{prop}: :#{pred[:op]}` (line #{line}) -- unknown operator " \
+                     "`:#{pred[:op]}`. Operators: #{KF::OPS.map { |o| ":#{o.name}" }.join(' ')}; " \
+                     "`ev.#{prop}` is a #{p[:expose]}, so it accepts " \
+                     "#{allowed.map { |o| ":#{o.name}" }.join(' ')}."
+      end
+      unless op.types.include?(p[:expose].to_s)
+        raise Error, "`keep_if :#{chan}, #{prop}: :#{op.name}` (line #{line}) -- `:#{op.name}` does " \
+                     "not apply to a #{p[:expose]} property (it is #{op.types.join('/')}-only). " \
+                     "`ev.#{prop}` is a #{p[:expose]}, so it accepts " \
+                     "#{allowed.map { |o| ":#{o.name}" }.join(' ')}."
+      end
+      # --- the line between this filter and the in-kernel one ----------------
+      # `:eq` on a property the kernel filter also selects on is the one predicate
+      # both surfaces express. Keeping both spellings would leave an AI to choose,
+      # and the cheap-looking one -- the one written next to the code it affects --
+      # is the expensive one: the record is created, carried through the ringbuf
+      # and drained before being thrown away. So the redundant spelling is refused
+      # and the replacement is named. Every other operator stays here, because the
+      # in-kernel filter is equality-AND only and cannot express them.
+      kk = KF.kernel_key(chan, prop)
+      return unless kk && op.name == "eq"
+      env = SpinelEbpf::CommonFilter::KEYS_BY_NAME[kk].env_name
+      raise Error, "`keep_if :#{chan}, #{prop}: :eq` (line #{line}) -- the kernel can drop this " \
+                   "record before it exists. `ev.#{prop}` is the value `filter_by :#{kk}` selects " \
+                   "on (#{env}), and filtering there saves the ringbuf, the drain and the send, not " \
+                   "just the send. Declare it at the top level instead:\n" \
+                   "    filter_by :#{kk}\n" \
+                   "This refusal is only for `:eq` -- `:#{(KF.ops_for(p[:expose]).map(&:name) - ['eq']).join('` / `:')}` " \
+                   "have no in-kernel equivalent and belong here. If `filter_by` cannot cover this " \
+                   "unit (it refuses a probe that also has a verdict hook) or you mean to narrow " \
+                   "only the `#{chan}` channel and not every handler, write the guard by hand " \
+                   "inside the block: `next if ev.#{prop} != ...`."
+    end
+
+    # The guard lines for one channel, hoisted to the head of its handler.
+    # `param` is the block parameter, so the accessor is byte-for-byte what
+    # `ev.<prop>` in the body lowers to: the filter and the body read the record
+    # through one generated accessor, and there is no second way to reach it.
+    def keep_guard_lines(chan, decl, param, indent)
+      head = ["#{indent}# --- declared filter (keep_if :#{chan}, " \
+              "#{decl[:preds].map { |p| "#{p[:prop]}: :#{p[:op]}" }.join(', ')}) ---",
+              "#{indent}# AND over the predicates whose environment value is set; unset does not constrain."]
+      head + decl[:preds].flat_map do |pred|
+        p = record_properties(chan).find { |x| x[:name].to_s == pred[:prop] }
+        acc = "#{record_module(chan)}.#{p[:ffi]}(#{param})"
+        KF.guard_lines(chan, pred[:prop], pred[:op], p[:expose], acc, indent: indent)
+      end
+    end
+
+    def transform_record(source, recs, keeps = [])
       # Ambiguity guard: a named producer `emit :dns, v` plus `on_emit :dns`
       # (typed consumer) cannot both be meant. Reject rather than pick one.
       recs.each_key do |chan|
@@ -289,15 +419,30 @@ module SpinelEbpf
       # ambiguous outside them, and that is where we refuse to guess.
       by_param = recs.each_with_object({}) { |(chan, param), h| (h[param] ||= []) << chan }
 
+      keep_by_chan = keeps.to_h { |d| [d[:channel], d] }
+
       out = +""
       blk = nil                        # { chan:, param:, indent: } — enclosing on_emit block
       lineno = 0
       source.each_line do |line|
         lineno += 1
         body = line.chomp
+        # The declaration itself never reaches spinel (an unknown top-level call
+        # is refused by the native codegen). Replaced, not deleted, so every later
+        # line number in an error message still points at the right line.
+        if SpinelEbpf::KeepFilter::DECL_RE.match?(body)
+          out << "# (keep_if lowered into the consumer)\n"
+          next
+        end
         if (m = ON_EMIT_NAMED_RE.match(body)) && recs.key?(m[2])
           blk = { chan: m[2], param: m[3], indent: m[1].length }
           out << "#{m[1]}def __spnl_consume_rec_#{m[2]}(#{m[3]})\n"
+          # Hoisted to the head of the handler BY CONSTRUCTION. This is the
+          # property a hand-written `next unless ...` cannot have: written one
+          # line too late it compiles, runs, and sends everything.
+          if (d = keep_by_chan[m[2]])
+            keep_guard_lines(m[2], d, m[3], "#{m[1]}  ").each { |l| out << l << "\n" }
+          end
           next
         end
         if blk && body =~ /\A\s{#{blk[:indent]}}end\s*\z/

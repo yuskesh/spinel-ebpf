@@ -1,0 +1,119 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/153_attach_multi_expand.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name FileOps
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 ArrayNode
+N 13 StringNode
+S 13 content vfs_read
+I 13 fzl 1
+N 14 StringNode
+S 14 content vfs_write
+I 14 fzl 1
+A 12 elements 13,14
+N 15 KeywordHashNode
+N 16 AssocNode
+N 17 SymbolNode
+S 17 value via
+R 16 key 17
+N 18 SymbolNode
+S 18 value expand
+R 16 value 18
+A 15 elements 16
+A 10 arguments 11,12,15
+R 9 arguments 10
+N 19 BlockNode
+N 20 StatementsNode
+N 21 InstanceVariableWriteNode
+S 21 name @calls
+N 22 CallNode
+S 22 name +
+N 23 InstanceVariableReadNode
+S 23 name @calls
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 1
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+R 21 value 22
+N 26 IfNode
+N 27 CallNode
+S 27 name attached_symbol_eq
+R 27 receiver -1
+N 28 ArgumentsNode
+N 29 StringNode
+S 29 content vfs_read
+I 29 fzl 1
+A 28 arguments 29
+R 27 arguments 28
+R 27 block -1
+S 27 call_operator .
+R 26 predicate 27
+N 30 StatementsNode
+N 31 InstanceVariableWriteNode
+S 31 name @reads
+N 32 CallNode
+S 32 name +
+N 33 InstanceVariableReadNode
+S 33 name @reads
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 IntegerNode
+I 35 value 1
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+R 31 value 32
+A 30 body 31
+R 26 statements 30
+R 26 subsequent -1
+N 36 CallNode
+S 36 name spnl_emit
+R 36 receiver -1
+N 37 ArgumentsNode
+N 38 CallNode
+S 38 name attached_index
+R 38 receiver -1
+R 38 arguments -1
+R 38 block -1
+S 38 call_operator .
+I 38 vcall 1
+A 37 arguments 38
+R 36 arguments 37
+R 36 block -1
+S 36 call_operator .
+A 20 body 21,26,36
+R 19 body 20
+R 9 block 19
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

@@ -3,8 +3,8 @@
  *
  * Takes one method as {method, file, line, calls, buckets[64]} and builds an
  * ExportMetricsServiceRequest:
- *   - spnl_method_calls_total : Sum (monotonic, CUMULATIVE)、N data points
- *   - spnl_method_latency_ns  : ExponentialHistogram (scale=0)、N data points
+ *   - spnl_method_calls_total : Sum (monotonic, CUMULATIVE), N data points
+ *   - spnl_method_latency_ns  : ExponentialHistogram (scale=0), N data points
  * Each data point is attributed with code.function, code.filepath and code.lineno,
  * taken from the compiler's symbol map.
  *
@@ -54,6 +54,17 @@ long otlp_metrics_series_build(uint8_t *buf, size_t cap,
                                const char *name, const char *lat_name, const char *unit,
                                uint64_t time_unix_nano, uint64_t start_time_unix_nano,
                                const otlp_series_t *series, size_t nseries);
+
+/* A monotonic Sum on its own -- for the counter of a record channel, which has
+ * no value to distribute, so unlike series_build there is no accompanying
+ * ExponentialHistogram and the series' buckets are never read. Returns the byte
+ * count on success, -1 on failure. */
+long otlp_metrics_sum_build(uint8_t *buf, size_t cap,
+                            const char *service_name, const char *service_version,
+                            const char *scope_name,
+                            const char *name, const char *unit,
+                            uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                            const otlp_series_t *series, size_t nseries);
 
 /* One series of an explicit-bucket Histogram, such as the semconv metric
  * http.server.request.duration. The bounds are shared by every series, so the

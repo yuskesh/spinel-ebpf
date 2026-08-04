@@ -1,0 +1,76 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/147_dsl_class_xdp.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 ClassNode
+N 5 ConstantReadNode
+S 5 name ProtoCounter
+R 4 constant_path 5
+N 6 ConstantPathNode
+N 7 ConstantReadNode
+S 7 name BPF
+R 6 parent 7
+S 6 name XDP
+R 4 superclass 6
+N 8 StatementsNode
+N 9 DefNode
+S 9 name count
+R 9 parameters -1
+N 10 StatementsNode
+N 11 LocalVariableWriteNode
+S 11 name n
+N 12 CallNode
+S 12 name pkt_l4_proto
+R 12 receiver -1
+R 12 arguments -1
+R 12 block -1
+S 12 call_operator .
+I 12 vcall 1
+R 11 value 12
+N 13 IfNode
+N 14 CallNode
+S 14 name ==
+N 15 LocalVariableReadNode
+S 15 name n
+R 14 receiver 15
+N 16 ArgumentsNode
+N 17 ConstantReadNode
+S 17 name IPPROTO_TCP
+A 16 arguments 17
+R 14 arguments 16
+R 14 block -1
+S 14 call_operator .
+R 13 predicate 14
+N 18 StatementsNode
+N 19 InstanceVariableWriteNode
+S 19 name @tcp
+N 20 CallNode
+S 20 name +
+N 21 InstanceVariableReadNode
+S 21 name @tcp
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 1
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+R 19 value 20
+A 18 body 19
+R 13 statements 18
+R 13 subsequent -1
+N 24 ConstantReadNode
+S 24 name XDP_PASS
+A 10 body 11,13,24
+R 9 body 10
+R 9 receiver -1
+A 8 body 9
+R 4 body 8
+A 1 body 2,4
+R 0 statements 1

@@ -1,0 +1,295 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/146_pkt_chain.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @icmp
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @from_lo
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @syn
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 InstanceVariableWriteNode
+S 8 name @bytes
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 DefNode
+S 10 name xdp__chain_probe
+R 10 parameters -1
+N 11 StatementsNode
+N 12 InstanceVariableWriteNode
+S 12 name @bytes
+N 13 CallNode
+S 13 name +
+N 14 InstanceVariableReadNode
+S 14 name @bytes
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 CallNode
+S 16 name len
+N 17 CallNode
+S 17 name pkt
+R 17 receiver -1
+R 17 arguments -1
+R 17 block -1
+S 17 call_operator .
+I 17 vcall 1
+R 16 receiver 17
+R 16 arguments -1
+R 16 block -1
+S 16 call_operator .
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 18 IfNode
+N 19 CallNode
+S 19 name ==
+N 20 CallNode
+S 20 name proto
+N 21 CallNode
+S 21 name eth
+N 22 CallNode
+S 22 name pkt
+R 22 receiver -1
+R 22 arguments -1
+R 22 block -1
+S 22 call_operator .
+I 22 vcall 1
+R 21 receiver 22
+R 21 arguments -1
+R 21 block -1
+S 21 call_operator .
+R 20 receiver 21
+R 20 arguments -1
+R 20 block -1
+S 20 call_operator .
+R 19 receiver 20
+N 23 ArgumentsNode
+N 24 ConstantReadNode
+S 24 name ETH_P_IP
+A 23 arguments 24
+R 19 arguments 23
+R 19 block -1
+S 19 call_operator .
+R 18 predicate 19
+N 25 StatementsNode
+N 26 IfNode
+N 27 CallNode
+S 27 name ==
+N 28 CallNode
+S 28 name proto
+N 29 CallNode
+S 29 name l4
+N 30 CallNode
+S 30 name pkt
+R 30 receiver -1
+R 30 arguments -1
+R 30 block -1
+S 30 call_operator .
+I 30 vcall 1
+R 29 receiver 30
+R 29 arguments -1
+R 29 block -1
+S 29 call_operator .
+R 28 receiver 29
+R 28 arguments -1
+R 28 block -1
+S 28 call_operator .
+R 27 receiver 28
+N 31 ArgumentsNode
+N 32 ConstantReadNode
+S 32 name IPPROTO_ICMP
+A 31 arguments 32
+R 27 arguments 31
+R 27 block -1
+S 27 call_operator .
+R 26 predicate 27
+N 33 StatementsNode
+N 34 InstanceVariableWriteNode
+S 34 name @icmp
+N 35 CallNode
+S 35 name +
+N 36 InstanceVariableReadNode
+S 36 name @icmp
+R 35 receiver 36
+N 37 ArgumentsNode
+N 38 IntegerNode
+I 38 value 1
+A 37 arguments 38
+R 35 arguments 37
+R 35 block -1
+S 35 call_operator .
+R 34 value 35
+A 33 body 34
+R 26 statements 33
+R 26 subsequent -1
+N 39 IfNode
+N 40 CallNode
+S 40 name ==
+N 41 CallNode
+S 41 name src
+N 42 CallNode
+S 42 name ip4
+N 43 CallNode
+S 43 name pkt
+R 43 receiver -1
+R 43 arguments -1
+R 43 block -1
+S 43 call_operator .
+I 43 vcall 1
+R 42 receiver 43
+R 42 arguments -1
+R 42 block -1
+S 42 call_operator .
+R 41 receiver 42
+R 41 arguments -1
+R 41 block -1
+S 41 call_operator .
+R 40 receiver 41
+N 44 ArgumentsNode
+N 45 IntegerNode
+I 45 value 2130706433
+A 44 arguments 45
+R 40 arguments 44
+R 40 block -1
+S 40 call_operator .
+R 39 predicate 40
+N 46 StatementsNode
+N 47 InstanceVariableWriteNode
+S 47 name @from_lo
+N 48 CallNode
+S 48 name +
+N 49 InstanceVariableReadNode
+S 49 name @from_lo
+R 48 receiver 49
+N 50 ArgumentsNode
+N 51 IntegerNode
+I 51 value 1
+A 50 arguments 51
+R 48 arguments 50
+R 48 block -1
+S 48 call_operator .
+R 47 value 48
+A 46 body 47
+R 39 statements 46
+R 39 subsequent -1
+N 52 IfNode
+N 53 CallNode
+S 53 name ==
+N 54 CallNode
+S 54 name proto
+N 55 CallNode
+S 55 name l4
+N 56 CallNode
+S 56 name pkt
+R 56 receiver -1
+R 56 arguments -1
+R 56 block -1
+S 56 call_operator .
+I 56 vcall 1
+R 55 receiver 56
+R 55 arguments -1
+R 55 block -1
+S 55 call_operator .
+R 54 receiver 55
+R 54 arguments -1
+R 54 block -1
+S 54 call_operator .
+R 53 receiver 54
+N 57 ArgumentsNode
+N 58 ConstantReadNode
+S 58 name IPPROTO_TCP
+A 57 arguments 58
+R 53 arguments 57
+R 53 block -1
+S 53 call_operator .
+R 52 predicate 53
+N 59 StatementsNode
+N 60 IfNode
+N 61 CallNode
+S 61 name !=
+N 62 ParenthesesNode
+N 63 StatementsNode
+N 64 CallNode
+S 64 name &
+N 65 CallNode
+S 65 name flags
+N 66 CallNode
+S 66 name tcp
+N 67 CallNode
+S 67 name pkt
+R 67 receiver -1
+R 67 arguments -1
+R 67 block -1
+S 67 call_operator .
+I 67 vcall 1
+R 66 receiver 67
+R 66 arguments -1
+R 66 block -1
+S 66 call_operator .
+R 65 receiver 66
+R 65 arguments -1
+R 65 block -1
+S 65 call_operator .
+R 64 receiver 65
+N 68 ArgumentsNode
+N 69 ConstantReadNode
+S 69 name TCP_FLAG_SYN
+A 68 arguments 69
+R 64 arguments 68
+R 64 block -1
+S 64 call_operator .
+A 63 body 64
+R 62 body 63
+R 61 receiver 62
+N 70 ArgumentsNode
+N 71 IntegerNode
+I 71 value 0
+A 70 arguments 71
+R 61 arguments 70
+R 61 block -1
+S 61 call_operator .
+R 60 predicate 61
+N 72 StatementsNode
+N 73 InstanceVariableWriteNode
+S 73 name @syn
+N 74 CallNode
+S 74 name +
+N 75 InstanceVariableReadNode
+S 75 name @syn
+R 74 receiver 75
+N 76 ArgumentsNode
+N 77 IntegerNode
+I 77 value 1
+A 76 arguments 77
+R 74 arguments 76
+R 74 block -1
+S 74 call_operator .
+R 73 value 74
+A 72 body 73
+R 60 statements 72
+R 60 subsequent -1
+A 59 body 60
+R 52 statements 59
+R 52 subsequent -1
+A 25 body 26,39,52
+R 18 statements 25
+R 18 subsequent -1
+N 78 ConstantReadNode
+S 78 name XDP_PASS
+A 11 body 12,18,78
+R 10 body 11
+R 10 receiver -1
+A 1 body 2,4,6,8,10
+R 0 statements 1

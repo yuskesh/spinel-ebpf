@@ -1,0 +1,84 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/129_common_filter.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name filter_by
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value pid
+N 5 SymbolNode
+S 5 value comm
+A 3 arguments 4,5
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 6 DefNode
+S 6 name spnl_emit
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name x
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+R 6 body -1
+R 6 receiver -1
+N 9 DefNode
+S 9 name kprobe__do_sys_openat2
+N 10 ParametersNode
+N 11 RequiredParameterNode
+S 11 name dfd
+A 10 requireds 11
+A 10 optionals 
+A 10 keywords 
+A 10 posts 
+R 9 parameters 10
+N 12 StatementsNode
+N 13 InstanceVariableOperatorWriteNode
+S 13 name @opens
+S 13 binary_operator +
+N 14 IntegerNode
+I 14 value 1
+R 13 value 14
+N 15 CallNode
+S 15 name spnl_emit
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 LocalVariableReadNode
+S 17 name dfd
+A 16 arguments 17
+R 15 arguments 16
+R 15 block -1
+S 15 call_operator .
+N 18 IntegerNode
+I 18 value 0
+A 12 body 13,15,18
+R 9 body 12
+R 9 receiver -1
+N 19 DefNode
+S 19 name tracepoint__syscalls__sys_enter_execve
+N 20 ParametersNode
+N 21 RequiredParameterNode
+S 21 name filename
+A 20 requireds 21
+A 20 optionals 
+A 20 keywords 
+A 20 posts 
+R 19 parameters 20
+N 22 StatementsNode
+N 23 InstanceVariableOperatorWriteNode
+S 23 name @execs
+S 23 binary_operator +
+N 24 IntegerNode
+I 24 value 1
+R 23 value 24
+N 25 IntegerNode
+I 25 value 0
+A 22 body 23,25
+R 19 body 22
+R 19 receiver -1
+A 1 body 2,6,9,19
+R 0 statements 1

@@ -74,19 +74,30 @@ A non-exhaustive tour of the surface the codegen supports:
   SOCK_OPS, sk_reuseport, sk_msg/sk_skb, cgroup hooks, BPF iterators, and
   `struct_ops` (sched_ext schedulers, BPF qdiscs, TCP congestion control).
 - **Packet access**: typed header accessors (`pkt.ip4.src`, `pkt.tcp.flags`,
-  IPv6, dynptr byte access), skb read/write + checksum fixup (NAT), FIB lookup,
-  socket lookup, redirect.
+  IPv6), skb read/write + checksum fixup (NAT), FIB lookup, socket lookup,
+  redirect.
 - **Maps & data**: per-unit hash/array maps from instance variables, LPM-trie
-  CIDR maps, ring buffers (`spnl_emit*`), user ring buffers, stack traces,
-  log2 / linear / keyed histograms, QUEUE/STACK, map-in-map, task storage, and
-  `bpf_arena` shared memory with hash/list data structures.
+  CIDR maps, ring buffers (`spnl_emit*`), stack traces, log2 / linear / keyed
+  histograms, QUEUE/STACK, map-in-map, task storage, and `bpf_arena` shared
+  memory with hash/list data structures. `spinel-ebpf capabilities` prints the
+  whole map vocabulary, including each map's capacity and what happens when it
+  fills up.
 - **Control flow**: `if/elsif/else`, bounded `n.times` (open-coded or `bpf_loop`),
   local variables, BPF-to-BPF calls, closures with captures, boolean
   short-circuiting, bitwise ops.
+- **Reading kernel state**: `kfield` / `kptr` for scalars, `kfield_str` and
+  `kfield_str_eq` for string fields, named `sock_*` accessors that return every
+  value in host order, full-path predicates (`path_eq`, `path_starts_with`,
+  `path_contains`), and predicates over the current task's capabilities,
+  namespaces and a file's type.
 - **A DSL**: class-based attach (`class C < BPF::XDP`), `module + include`, a
-  reactor (`on :xdp`, `on :kprobe, "fn"`, `on :timer, every: 5.seconds`,
-  `on :perf_event, hz: 99`), and module-style constants (`XDP::PASS`,
-  `IP::Proto::TCP`).
+  reactor (`on :xdp`, `on :kprobe, "fn"`, `on :perf_event, hz: 99`), one
+  definition attached to several symbols (`on :kprobe, %w[vfs_read vfs_write]`),
+  and module-style constants (`XDP::PASS`, `IP::Proto::TCP`).
+- **Declarative narrowing**: `param :target_pid, default: 0` becomes a read-only
+  constant patched in before load, so an unused filter is folded away entirely;
+  `filter_by` injects one filter into every handler in the unit, and `keep_if`
+  drops records in userspace after the drain and before the send.
 - **Typed consumers**: `on_emit :<channel> do |ev| … end` receives a record
   handle whose properties are generated from one declaration, so a misspelled
   field is a compile error rather than a silent zero. `to_span(ev)` turns a

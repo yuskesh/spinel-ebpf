@@ -45,6 +45,7 @@
 require "set"
 require_relative "capabilities"
 require_relative "codegen_bpf"
+require_relative "param"
 
 module SpinelEbpf
   module Validate
@@ -275,6 +276,11 @@ module SpinelEbpf
     # from the unknown check rather than rejecting a legitimate chain.
     def scan_ebpf_calls(ast, result)
       known = method_name_set(result)
+      # A declared `param :x` is read as a bare name, which prism gives us as a
+      # receiver-less CallNode -- indistinguishable from a typo unless we know the
+      # declarations. Read from the same AST the codegen reads, so "known here"
+      # and "lowerable there" cannot drift.
+      known.merge(SpinelEbpf::Param.declarations(ast).map(&:name))
       used = Hash.new { |h, k| h[k] = [] }
       candidates = []          # [{ nid:, name:, method: }] receiver-less unknowns
       receiver_ids = Set.new   # node ids that are the receiver of another call

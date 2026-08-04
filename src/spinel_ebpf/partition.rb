@@ -265,6 +265,9 @@ module SpinelEbpf
       # nil for flat-form (def perf_event__<name>) — glue.c uses $SPNL_PERF_HZ
       # (default 49). Integer for reactor form.
       :dsl_perf_event_hz,
+      # Array[String] for the multi-symbol form `on :kprobe, %w[a b c]`; nil for
+      # every 1-to-1 form.
+      :dsl_multi_syms,
       keyword_init: true,
     ) do
       def qualified_name
@@ -485,6 +488,7 @@ module SpinelEbpf
 
         if event_loop
           reactor_react_counter = 0
+          reactor_multi_counter = 0   # `on :kprobe, %w[...]` sets
           on_calls.each do |cn|
             args_id = cn.refs.fetch("arguments", -1)
             next if args_id < 0
@@ -493,6 +497,34 @@ module SpinelEbpf
             sym = ast.node(arg_ids[0])
             next unless sym && sym.type == "SymbolNode"
             kind = sym.attrs.fetch("value", "")
+
+            # `on :kprobe, %w[a b c]` -- one body, many symbols. The list sits
+            # where the 1-to-1 form puts a single string, so the shape is decided
+            # before the target collection below.
+            #
+            # WHICH LOWERING (expand into N programs vs one kprobe_multi link) IS
+            # NOT DECIDED HERE. It is decided once, in the C codegen, and read back
+            # out of the emitted .bpf.c by build_binary -- a threshold that lived in
+            # two languages would be a threshold that drifts. Partition only has to
+            # know that this handler exists and is eBPF-eligible.
+            if (multi_syms = multi_symbol_list(ast, arg_ids))
+              n = reactor_multi_counter
+              reactor_multi_counter += 1
+              block_id = cn.refs.fetch("block", -1)
+              next if block_id < 0
+              handler_body_id = ast.ref(block_id, "body", default: -1)
+              next if handler_body_id < 0
+              out << MethodInfo.new(
+                scope: :top_level, class_name: nil,
+                method_name: "kprobe_multi__set#{n}",
+                body_id: handler_body_id,
+                flags: MethodFlags.default, tag: nil,
+                dsl_ast_def_id: block_id, dsl_orig_name: "on_#{kind}",
+                dsl_multi_syms: multi_syms,
+              )
+              next
+            end
+
             info = event_loop_kind!(kind)
 
             # collect target arguments (StringNode) for arity 1/2
@@ -638,6 +670,22 @@ module SpinelEbpf
         end
       end
       out
+    end
+
+    # The multi-symbol form's argument shape. Returns the symbol list, or nil when
+    # this `on` is one of the 1-to-1 forms. Only the SHAPE is decided here; every
+    # diagnostic about the contents (empty list, non-literal element, duplicate,
+    # bad `via:`) is raised by the C codegen, which is the one place that has to be
+    # right -- partition and the codegen both walk this AST, and two copies of the
+    # same rule is two things to keep in step.
+    def multi_symbol_list(ast, arg_ids)
+      return nil unless arg_ids.length >= 2
+      node = ast.node(arg_ids[1])
+      return nil unless node && node.type == "ArrayNode"
+      ast.array(arg_ids[1], "elements", default: []).filter_map do |eid|
+        el = ast.node(eid)
+        el && el.type == "StringNode" ? el.attrs.fetch("content", "") : nil
+      end.reject(&:empty?)
     end
 
     # parse a `every: N.<unit>` keyword from the `on :timer` args.

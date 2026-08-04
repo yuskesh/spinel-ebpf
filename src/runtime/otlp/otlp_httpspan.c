@@ -8,6 +8,13 @@
 #include "otlp_grpc.h"     /* otlp_transport_send + OTLP_GRPC_PATH_TRACES/METRICS */
 #include "otlp_metrics.h"  /* otlp_hseries_t + otlp_metrics_hist_build */
 #include "otlp_http.h"     /* otlp_kv_t */
+/* The bucket boundaries below are declared in src/codegen_c/record_schema.h, in
+ * the bounds set `otel_duration_s`, and this translation unit reads that
+ * declaration rather than keeping a copy. Macros only: this file deliberately
+ * has no libbpf dependency, and the rest of the generated mirror needs kernel
+ * types. */
+#define SPNL_RECORD_MIRROR_MACROS_ONLY 1
+#include "record_mirror_gen.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,11 +90,14 @@ static void addr_to_str(const struct sockaddr_storage *ss, char *out, size_t out
 /* ---- the http.server.request.duration accumulator, in seconds ---- */
 
 #define HTTP_DUR_MAX_SERIES 64
-#define HTTP_DUR_NBOUNDS    15
-/* The same bucket boundaries the OpenTelemetry eBPF instrumentation uses, so the
- * two are directly comparable. bucket_counts has one more entry than boundaries. */
-static const double g_http_dur_bounds[HTTP_DUR_NBOUNDS] =
-    { 0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 };
+#define HTTP_DUR_NBOUNDS    SPNL_BOUNDS_OTEL_DURATION_S_N
+/* The same bucket boundaries the OpenTelemetry eBPF instrumentation uses (its
+ * pkg/export/bucket.go), so the two are directly comparable. bucket_counts has
+ * one more entry than boundaries. The numbers themselves now come from the
+ * bounds set `otel_duration_s` in the record schema. They are the same fifteen
+ * that used to be written out here, but with a single owner there is no longer a
+ * way to change one copy and quietly make the two histograms incomparable. */
+static const double g_http_dur_bounds[HTTP_DUR_NBOUNDS] = SPNL_BOUNDS_OTEL_DURATION_S_INIT;
 
 typedef struct {
     char     method[16];

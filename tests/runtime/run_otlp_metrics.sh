@@ -33,6 +33,8 @@ echo "[metrics] compiling metrics encoder test"
   -lz \
   -o "$TMP/otlp_metrics"
 
+# The operator's own labels. The values are checked against the wire below.
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=staging, spnl.tagged = yes ,broken-pair,=novalue"
 echo "[metrics] building sample OTLP -> $TMP/out.pb"
 "$TMP/otlp_metrics" "$TMP/out.pb"
 
@@ -74,5 +76,27 @@ assert 'string_value: "fib"'
 assert 'string_value: "add"'
 assert 'key: "code.lineno"'
 assert 'int_value: 19'
+
+# OTEL_RESOURCE_ATTRIBUTES is OTel's standard way to label this producer. It used to
+# be unsupported here (only OTEL_SERVICE_NAME was), which was the gap that Tetragon
+# covers with its `tags`; opening the standard door rather than inventing a private
+# vocabulary is what this pins. The protobuf resource encoder
+# (otlp_enc_resource_attrs) is exercised by THIS test, which is why the check lives
+# here -- run_otlp_send.sh hand-builds its payload and never reaches the resource
+# encoder, and run_otlp_extras.sh is SKIPPED WHOLE when grpcio is missing (both
+# measured, so neither would be a check that quietly stops running).
+# Two malformed pairs are mixed in on purpose: one with no '=' and one with an
+# empty key.
+assert 'key: "deployment.environment"'
+assert 'string_value: "staging"'
+assert 'key: "spnl.tagged"'
+assert 'string_value: "yes"'          # surrounding whitespace is trimmed
+assert 'key: "telemetry.sdk.name"'    # our own identity survives (labels are appended)
+if grep -q "broken-pair" "$TMP/decoded.txt"; then
+  echo "  UNEXPECTED: a pair with no '=' became an attribute"; OTLP_FAIL=1
+else echo "  ok: the pair with no '=' was dropped"; fi
+if grep -q "novalue" "$TMP/decoded.txt"; then
+  echo "  UNEXPECTED: an empty key became an attribute"; OTLP_FAIL=1
+else echo "  ok: the empty key was dropped"; fi
 
 otlp_done "per-method RED -> OTLP Sum + ExponentialHistogram"

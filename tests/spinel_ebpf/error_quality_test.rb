@@ -91,6 +91,13 @@ class ErrorQualityTest < Minitest::Test
       hook = sec.sub("/", "__")   # lsm/file_open -> lsm__file_open
       assert_includes msg, hook, "gate error should name #{sec} (#{hook})"
     end
+    # The permitted set grew from three hooks to more than thirty, so the message
+    # groups them by **which argument carries the path** instead of listing them
+    # flat -- that grouping is the axis a reader actually chooses along.
+    ["file arg", "path arg", "binprm arg"].each { |g| assert_includes msg, g }
+    # And it gives the reason the hook at hand is not in the set, not just the set.
+    assert_includes msg, "sleepable"
+    assert_includes msg, "btf_allowlist_d_path"
   end
 
   # ---------- #3: wrong arity -- name the builtin and the arity it expects ----------

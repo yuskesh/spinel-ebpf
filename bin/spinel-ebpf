@@ -32,6 +32,10 @@ require "spinel_ebpf/plugin"
 require "spinel_ebpf/consumer"
 require "spinel_ebpf/introspect"
 require "spinel_ebpf/capabilities"
+require "spinel_ebpf/portability"
+require "spinel_ebpf/param"
+require "spinel_ebpf/common_filter"
+require "spinel_ebpf/keep_filter"
 require "spinel_ebpf/instrument"
 
 VERSION = "0.0.1"
@@ -164,6 +168,22 @@ end
 def run_spinel_to_c(input_rb, build_dir, ast, ir, extern_methods: nil)
   base = File.basename(input_rb, ".rb")
   c_out = File.join(build_dir, "#{base}.c")
+  # `param :x, default: N` is a declaration the eBPF codegen reads out of the
+  # .ast; spinel's native codegen has no such notion and refuses the call
+  # ("unsupported call: CallNode `param`"). So the NATIVE pass -- and only it --
+  # gets a copy with the declarations commented out line-for-line. Stripping
+  # earlier (the way `use_plugin` is stripped) would take the declaration out of
+  # the .ast too, which is precisely where it has to survive.
+  #
+  # `filter_by` is on the same terms, so both are neutralised in one pass rather
+  # than two temp copies.
+  src0 = File.read(input_rb, encoding: "UTF-8")
+  if SpinelEbpf::Param.present?(src0) || SpinelEbpf::CommonFilter.present?(src0)
+    src1 = SpinelEbpf::CommonFilter.strip_declarations(SpinelEbpf::Param.strip_declarations(src0))
+    stripped = File.join(Dir.mktmpdir("spnl-param"), "#{base}.rb")
+    File.write(stripped, src1)
+    input_rb = stripped
+  end
   if (cs = c_spinel)
     # The C compiler emits native C directly from the .rb (-c). Its native
     # codegen already tolerates eBPF-only builtins / unresolved receiver forms,
@@ -190,6 +210,7 @@ def cmd_compile(argv)
     native_only: false, ebpf_mixed: false, output_dir: "build",
     build: false,  # full build (.bpf.c -> .bpf.o -> skeleton -> link) into binary
     ebpf_dispatch: false,  # transparent native -> eBPF dispatch via SPINEL_EXTERN_METHODS
+    enforcement: "enforce", # enforce (default) | monitor (dry-run, deny neutralized)
   }
   parser = OptionParser.new do |op|
     op.banner = "Usage: spinel-ebpf compile <file.rb> [options]"
@@ -268,6 +289,30 @@ def cmd_compile(argv)
       abort "error: --int-overflow expects raise|wrap|promote (got #{m.inspect})" unless %w[raise wrap promote].include?(m)
       opts[:int_overflow] = m
     }
+    op.on("--enforcement MODE",
+          "enforce (default) | monitor. A monitor build runs each handler for its " \
+          "side effects (map updates / emit / counters) but neutralizes the deny " \
+          "verdict to allow for lsm / fmod_ret / cgroup connect4|bind4 -- the deny is " \
+          "not emitted at all. Being ahead-of-time, a monitor binary cannot deny; " \
+          "there is no runtime mode byte to flip.") { |m|
+      abort "error: --enforcement expects enforce|monitor (got #{m.inspect})" unless %w[enforce monitor].include?(m)
+      opts[:enforcement] = m
+    }
+    op.on("--emit-sources DIR",
+          "Write a shippable source bundle to DIR (native C + the generated skeleton " \
+          "+ glue + a Makefile). The destination needs neither clang nor bpftool; " \
+          "this is the counterpart of upstream spinel's `-c`.") { |d|
+      opts[:emit_sources] = d
+    }
+    # --- flags that mean here what they mean in upstream spinel, so that opting
+    # --- into eBPF never costs you one of spinel's own capabilities.
+    op.on("--cc CMD", "As in spinel: the C compiler that builds the native side (default " \
+                      "clang; the eBPF side still needs clang for -target bpf)") { |c| opts[:cc] = c }
+    op.on("-O LEVEL", "As in spinel: optimization level (default 2)") { |l| opts[:opt_level] = l }
+    op.on("-g", "As in spinel: emit debug information") { opts[:debug] = true }
+    op.on("--link ARG", "As in spinel: an extra link input (object / archive / -lLIB, repeatable)") { |a|
+      (opts[:extra_links] ||= []) << a
+    }
     op.on("-o DIR", "--output DIR",
           "Output directory (default: build/)") { |d| opts[:output_dir] = d }
     op.on("-v", "--verbose", "Verbose output") { opts[:verbose] = true }
@@ -344,10 +389,10 @@ def cmd_compile(argv)
   if mode == :native_only
     c_path = run_spinel_to_c(input, opts[:output_dir], ast_path, ir_path)
     puts "[spinel-ebpf] native-only: wrote #{c_path}"
-    if opts[:build]
-      bin_path = build_binary(base, opts[:output_dir], false, verbose: opts[:verbose],
-                              int_overflow: opts[:int_overflow])
-      puts "[spinel-ebpf] build: wrote #{bin_path}"
+    if opts[:build] || opts[:emit_sources]
+      out = build_binary(base, opts[:output_dir], false, verbose: opts[:verbose],
+                         int_overflow: opts[:int_overflow], **build_flags(opts))
+      puts "[spinel-ebpf] #{opts[:emit_sources] ? "emit-sources" : "build"}: wrote #{out}"
     end
     return 0
   end
@@ -419,10 +464,19 @@ def cmd_compile(argv)
       # keeps them native while still emitting the uprobe progs.
       icc_env = {}
       icc_env["SPNL_AMP_M7"] = "1" if opts[:amp]   # AMP codegen path (board-agnostic)
+      icc_env["SPNL_ENFORCEMENT"] = "monitor" if opts[:enforcement] == "monitor"
       icc_env["SPNL_EBPF_EXCLUDE"] = opts[:self_targets].join(",") if opts[:self_targets] && !opts[:self_targets].empty?
       File.write(bpf_path, IO.popen(icc_env, [icc, input, base], &:read))
-      abort "error: in-process eBPF codegen failed for #{input}\n" \
-            "       (re-run with --native-only to skip eBPF emission)" unless $?.success?
+      unless $?.success?
+        # The codegen writes to stdout and die()s partway, so what landed in
+        # bpf_path is whatever it had emitted -- for a gate that fires early, an
+        # empty file. Leaving it behind makes a loud failure look like it produced
+        # something (and a later `make` in the same -o dir would find a .bpf.c).
+        # The message is already on stderr, straight from the codegen.
+        File.delete(bpf_path) if File.exist?(bpf_path)
+        abort "error: in-process eBPF codegen failed for #{input}\n" \
+              "       (re-run with --native-only to skip eBPF emission)"
+      end
       if opts[:amp]
         puts "[spinel-ebpf] amp: wrote #{bpf_path} for #{opts[:amp][:label]} " \
              "(clang -target bpf -> micro-bpf Thumb AOT)"
@@ -430,6 +484,14 @@ def cmd_compile(argv)
         puts "[spinel-ebpf] ebpf-mixed: wrote #{bpf_path} (#{ebpf_count} eBPF programs, in-process)"
       end
     else
+      # --enforcement=monitor is implemented in the production C codegen only;
+      # the retired Ruby oracle (CodegenBpf) has no monitor path. Fail loud
+      # rather than silently emit an enforce build.
+      if opts[:enforcement] == "monitor"
+        abort "error: --enforcement=monitor requires the in-process C codegen (build spinel: " \
+              "make -C #{SPINEL_DIR}); the fallback Ruby codegen has no monitor path, and " \
+              "silently producing an enforce build is not an option"
+      end
       begin
         bpf_text = SpinelEbpf::CodegenBpf.emit(ir, ast, result, base_name: base)
         File.write(bpf_path, bpf_text)
@@ -452,9 +514,22 @@ def cmd_compile(argv)
     puts "[spinel-ebpf] ebpf-dispatch: wrote #{dispatch_path} (#{extern_methods.length} shims)"
   end
 
+  # The portability contract is a property of each SIDE of the partition, not of
+  # the program. Print it right after the partition table so "which side does
+  # this method run on" and "what does that side require" are read together --
+  # and so the kernel floor is never something the reader (or an AI) has to
+  # guess.
+  begin
+    bpf_for_contract = File.join(opts[:output_dir], "#{base}.bpf.c")
+    contract = SpinelEbpf::Portability.contract(File.exist?(bpf_for_contract) ? File.read(bpf_for_contract) : nil)
+    puts ""
+    puts SpinelEbpf::Portability.human(contract)
+    puts ""
+  end
+
   # --build does the full toolchain. Native-only short-circuits to plain
   # spinel build; eBPF-mixed runs the full Ruby -> binary pipeline.
-  if opts[:build]
+  if opts[:build] || opts[:emit_sources]
     if opts[:amp]
       # amp-m7 output is blob + manifest (M7 and A55 are separate cores =
       # separate artifacts), NOT the Linux single binary. Separate build path.
@@ -464,10 +539,12 @@ def cmd_compile(argv)
       # default the native overflow mode to wrap for consistency unless overridden.
       eff_overflow = opts[:int_overflow] || (opts[:ebpf_dispatch] ? "wrap" : nil)
       warn "[spinel-ebpf] --ebpf-dispatch: native int overflow -> wrap (match eBPF; override with --int-overflow=raise)" if eff_overflow == "wrap" && opts[:int_overflow].nil?
-      bin_path = build_binary(base, opts[:output_dir], ebpf_count > 0,
-                              dispatch_path: dispatch_path, verbose: opts[:verbose],
-                              partition_result: result, int_overflow: eff_overflow)
-      puts "[spinel-ebpf] build: wrote #{bin_path}"
+      out = build_binary(base, opts[:output_dir], ebpf_count > 0,
+                         dispatch_path: dispatch_path, verbose: opts[:verbose],
+                         partition_result: result, int_overflow: eff_overflow,
+                         keep_filters: SpinelEbpf::KeepFilter.loader_declarations(src_text),
+                         **build_flags(opts))
+      puts "[spinel-ebpf] #{opts[:emit_sources] ? "emit-sources" : "build"}: wrote #{out}"
     end
   end
   0
@@ -598,6 +675,28 @@ def which(name)
   nil
 end
 
+# The ISA baseline. Unpinned, clang picks it for us and the choice moves with the
+# build host: clang 19 emits v1 and clang 22 emits v3 for the SAME source
+# (measured: 111 of 116 goldens differ in instructions between the two defaults),
+# and `-mcpu=probe` is documented to ask the running kernel. A .bpf.o is shipped
+# verbatim inside the generated skeleton (--emit-sources), so an unpinned ISA
+# means the artifact's kernel floor is whatever the build machine happened to
+# imply. v1 is the floor every committed golden was measured to reach: over the
+# corpus as it stood at the time of measurement (118 units), compile and load
+# outcomes were identical at v1, v2, v3 and at the then-current default, and v1
+# was instruction-identical to the clang-19 build for all 116 that compile. Only
+# v4 changes anything (it compiles the signed division in one polymorphic
+# fixture), and v4 would raise the floor to kernel 6.6 for every probe in order
+# to fix a single fixture that the `divu` builtin already covers.
+BPF_ISA_BASELINE = "v1"
+
+# bpf_arena's address-space cast. This is the one declared exception to the
+# baseline, and its trigger is a property of the SOURCE (`address_space(1)`
+# appears in the generated .bpf.c), never of the host -- so it stays
+# reproducible. It also costs no portability: arena needs kernel 6.9+, which is
+# already above v3's 5.1 floor.
+BPF_ISA_ARENA = "v3"
+
 # the `clang -target bpf -c <bpf.c> -o <bpf.o>` argv, factored so both
 # build_binary (via run!) and `spinel-ebpf check` (via Open3.capture3) drive the
 # identical command. Pure (no side effects) — reads bpf_c only to decide -mcpu.
@@ -606,13 +705,66 @@ def bpf_clang_argv(clang, bpf_c, bpf_o, build_dir)
     # <bpf/usdt.bpf.h> transitively pulls in <linux/errno.h> -> <asm/errno.h>,
   # which lives under /usr/include/<triplet>/asm/ on debian-style toolchains.
   arch_inc_flags = Dir.glob("/usr/include/*-linux-gnu").reject(&:empty?).flat_map { |p| ["-I", p] }
-  # bpf_arena uses the address-space cast, only emitted at ISA v3+. Add
-  # -mcpu=v3 only when the program references the arena address space.
-  cpu_flags = (File.exist?(bpf_c) && File.read(bpf_c).include?("address_space(1)")) ? ["-mcpu=v3"] : []
-  [clang, "-O2", "-g", "-target", "bpf", arch_macro, *cpu_flags,
+  # bpf_arena uses the address-space cast, only emitted at ISA v3+, so a program
+  # that references the arena address space builds at the arena ISA instead.
+  isa = (File.exist?(bpf_c) && File.read(bpf_c).include?("address_space(1)")) ? BPF_ISA_ARENA : BPF_ISA_BASELINE
+  [clang, "-O2", "-g", "-target", "bpf", arch_macro, "-mcpu=#{isa}",
    *arch_inc_flags,
+   *bpf_repro_flags(build_dir),
    "-I", build_dir, "-I", File.join(PROJECT_ROOT, "include"),
    "-c", bpf_c, "-o", bpf_o]
+end
+
+# Strip the build machine out of the artifact.
+#
+# Measured before this existed: the same probe built twice from the same repo into
+# two different -o directories produced .bpf.o files that DIFFER, and `strings`
+# found the output directory, the cwd and the clang version string inside them.
+# The .bpf.o is embedded byte-for-byte in the generated skeleton, so those strings
+# ship. Three flags, the same set ebpf-go's bpf2go uses:
+#
+#   -fdebug-prefix-map=<build_dir>=.  the .bpf.c path (given absolutely to -c) and
+#   -fdebug-prefix-map=<root>=.       the -I paths, as they land in DWARF and in
+#                                     .BTF.ext line info. build_dir is mapped FIRST
+#                                     so `<anywhere>/<base>.bpf.c` always becomes
+#                                     `./<base>.bpf.c`, whatever -o the caller gave.
+#   -fdebug-compilation-dir .         DW_AT_comp_dir, which is otherwise the cwd.
+#   -fno-ident                        drops the compiler ident record.
+#
+# Note these normalise the *recorded* paths only; the argv still uses real paths,
+# so nothing about include resolution changes.
+def bpf_repro_flags(build_dir)
+  ["-fdebug-prefix-map=#{File.expand_path(build_dir)}=.",
+   "-fdebug-prefix-map=#{PROJECT_ROOT}=.",
+   "-fdebug-compilation-dir", ".",
+   "-fno-ident"]
+end
+
+# Optional DWARF-only strip of the .bpf.o (opt-in via SPNL_BPF_STRIP=1).
+#
+# Measured: `llvm-strip -g` leaves .BTF byte-identical and keeps .BTF.ext (where
+# CO-RE relocations live) and .symtab; all probed goldens still LOAD_OK, and the
+# object shrinks by ~98% (887,520 -> 19,424 B for the dotted-kfield golden). That matters
+# because the object is embedded in the skeleton and shipped.
+#
+# It is NOT the default, because it would make the artifact depend on the build
+# host's tool inventory -- the exact class of bug this pinning is closing. Debian's
+# `clang` package ships no llvm-strip, and GNU strip cannot read BPF ELF at all
+# ("Unable to recognise the format of the input file"; it leaves the file
+# untouched), so "strip if available" would silently produce two different
+# artifacts on two machines. Opting in is explicit, and it fails loud.
+def bpf_strip_maybe!(bpf_o)
+  return unless ENV["SPNL_BPF_STRIP"] == "1"
+  strip = %w[llvm-strip llvm-strip-22 llvm-strip-21 llvm-strip-20 llvm-strip-19].map { |n| which(n) }.compact.first
+  unless strip
+    abort "error: SPNL_BPF_STRIP=1 but no llvm-strip on PATH.\n" \
+          "  why: only llvm-strip understands BPF ELF; GNU strip reports\n" \
+          "       \"Unable to recognise the format of the input file\" and leaves it unchanged.\n" \
+          "  fix: apt-get install llvm  (provides llvm-strip), or unset SPNL_BPF_STRIP."
+  end
+  # -g = DWARF only. .BTF / .BTF.ext / .symtab must survive: libbpf needs .BTF for
+  # map/prog BTF and .BTF.ext for CO-RE relocations.
+  run! [strip, "-g", bpf_o]
 end
 
 # build (and cache) the load-only verifier probe (tools/spnl_load_check.c).
@@ -792,7 +944,198 @@ def check_static_libelf!(clang, elf_dir)
   MSG
 end
 
-def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false, partition_result: nil, int_overflow: nil)
+# Materialize a shippable source bundle instead of linking here. Upstream spinel's portability story is "emit one self-contained
+# .c, ship it, build it on the target with its own cc" (`spinel app.rb -c`);
+# adding eBPF must not take that away. It doesn't have to: the eBPF side is
+# already compiled to *architecture-neutral* bytecode and embedded in the
+# generated skeleton (a C array), so the bundle carries the kernel side as
+# portable C too -- the target needs no clang, no bpftool and no BTF *to build*
+# (BTF is still required at run time, for CO-RE).
+#
+# The Makefile is generated from the very argv `--build` would have run, so the
+# two paths cannot drift: every conditional source (OTLP, TLS, dispatch shim)
+# is already resolved by the time we get here.
+def emit_source_bundle(out_dir, base:, defines:, include_args:, c_file:, sources:,
+                       link_args:, with_ebpf:, spinel_lib:, build_dir:, cc:, opt_flags:,
+                       bpf_c: nil)
+  FileUtils.mkdir_p(out_dir)
+  vendor = "spinel-ebpf"   # relative root, inside the bundle, for our own sources
+
+  # Map one absolute path into the bundle, copying it, and return the path to
+  # write into the Makefile. Files under PROJECT_ROOT keep their relative tree
+  # so that their #include neighbours resolve exactly as they do here.
+  place = lambda do |abs|
+    abs = File.expand_path(abs)
+    if abs.start_with?(File.expand_path(build_dir) + "/")
+      rel = File.basename(abs)
+      FileUtils.cp(abs, File.join(out_dir, rel)) unless File.expand_path(File.join(out_dir, rel)) == abs
+      rel
+    elsif abs.start_with?(File.expand_path(spinel_lib) + "/") || abs == File.expand_path(spinel_lib)
+      rel = abs.sub(File.expand_path(spinel_lib), "spinel-lib")
+      FileUtils.mkdir_p(File.dirname(File.join(out_dir, rel)))
+      FileUtils.cp(abs, File.join(out_dir, rel)) if File.file?(abs)
+      rel.sub(%r{\Aspinel-lib}, "$(SPINEL_LIB)")
+    elsif abs.start_with?(PROJECT_ROOT + "/")
+      rel = File.join(vendor, abs.sub(PROJECT_ROOT + "/", ""))
+      FileUtils.mkdir_p(File.dirname(File.join(out_dir, rel)))
+      FileUtils.cp(abs, File.join(out_dir, rel)) if File.file?(abs)
+      rel
+    else
+      abs   # outside our trees (system path): reference as-is
+    end
+  end
+
+  # Include directories: copy the headers that live in them (recursively for
+  # our own trees) so the bundle is self-contained.
+  copy_headers = lambda do |dir|
+    Dir.glob(File.join(dir, "**", "*.h")).each { |h| place.call(h) }
+  end
+
+  inc_flags = []
+  include_args.each_slice(2) do |flag, dir|
+    next unless flag == "-I"
+    abs = File.expand_path(dir)
+    if abs == File.expand_path(build_dir)
+      inc_flags << "-I." ; next
+    end
+    copy_headers.call(abs) if File.directory?(abs)
+    mapped =
+      if abs == File.expand_path(spinel_lib) then "$(SPINEL_LIB)"
+      elsif abs.start_with?(PROJECT_ROOT + "/") then File.join(vendor, abs.sub(PROJECT_ROOT + "/", ""))
+      elsif abs == PROJECT_ROOT then vendor
+      else abs
+      end
+    inc_flags << "-I#{mapped}"
+  end
+
+  src_rel  = [place.call(c_file)] + sources.map { |s| place.call(s) }
+  link_rel = link_args.map { |a| a.start_with?("-") ? a : place.call(a) }
+
+  # The kernel-side sources ship for audit even though the Makefile does not
+  # compile them (the skeleton already carries the verified bytecode).
+  if with_ebpf
+    ["#{base}.bpf.c", "#{base}.bpf.o", "#{base}.skel.h"].each do |f|
+      p = File.join(build_dir, f)
+      FileUtils.cp(p, File.join(out_dir, f)) if File.exist?(p)
+    end
+  end
+
+  contract = SpinelEbpf::Portability.contract(bpf_c)
+  # The MANIFEST's prose about architecture is derived from the same contract the
+  # compile output prints, so the bundle cannot say one thing while the contract
+  # says another. An arch-bound unit gets a different paragraph -- not a footnote
+  # on the portable one -- because the actionable advice differs (rebuild on the
+  # target's kernel vs. just carry the skeleton over).
+  arch_section =
+    if contract.ebpf && contract.ebpf["arch_bound"]
+      <<~BOUND.strip
+        This unit is **fixed to #{contract.ebpf["build_arch"]}**. It #{contract.ebpf["arch_bound_by"].join(" / ")},
+        which **picks a field name of `struct pt_regs` at compile time** and so cannot be
+        absorbed by CO-RE (`vmlinux.h` comes from the BTF of the running kernel; what CO-RE
+        can fix up at run time is a field's offset, and it cannot create a field that is not
+        there). **The bundled `#{base}.skel.h` is not meant to be carried to a destination on
+        another architecture** -- re-run `spinel-ebpf compile --emit-sources` on a kernel of
+        that architecture instead.
+
+        This does **not** mean it fails to run on another architecture. What was measured
+        stops at "the host it was built on cannot build it for another architecture".
+
+        Shipping to big-endian (s390x / mips / ppc64) is **untested** -- not known to be
+        broken, just not verified.
+      BOUND
+    elsif contract.ebpf
+      <<~FREE.strip
+        This unit **does not read arguments out of registers** (no `PT_REGS_PARM`, no USDT),
+        so it is not bound to an architecture. eBPF bytecode is architecture-independent
+        **within one endianness** (what CO-RE absorbs at run time is the layout of kernel
+        structs, not the byte order of the instruction stream). Within that range,
+        `#{base}.skel.h` **can be carried to a destination on another architecture as it
+        is**. Only the native side depends on the architecture, and the destination's `cc`
+        takes care of that.
+
+        Shipping to big-endian (s390x / mips / ppc64) is **untested** -- not known to be
+        broken, just not verified.
+      FREE
+    else
+      "This unit has no eBPF partition, so there is no architecture restriction either " \
+      "(the same terms as upstream spinel)."
+    end
+  File.write(File.join(out_dir, "Makefile"), <<~MAKE)
+    # Generated by spinel-ebpf --emit-sources.
+    # Built from the exact argv `--build` would have run, so this Makefile and
+    # an in-place build produce the same binary.
+    #
+    # Requirements on THIS machine:
+    #   - a C compiler (CC below; any gcc/clang)
+    #   - spinel's runtime: headers + libspinel_rt.a  -> point SPINEL_LIB at it
+    #{with_ebpf ? "#   - libbpf headers + libbpf/libelf/libz  (the eBPF bytecode is already\n    #     embedded in #{base}.skel.h, so clang / bpftool / BTF are NOT needed here)" : "#   (this unit has no eBPF partition: plain upstream spinel requirements)"}
+
+    CC        ?= #{cc}
+    SPINEL_LIB ?= ./spinel-lib
+    CFLAGS    ?= #{(opt_flags + defines).join(" ")}
+    LDLIBS    ?= #{link_rel.select { |a| a.start_with?("-l") }.join(" ")}
+
+    INCLUDES  = #{inc_flags.join(" ")}
+    SOURCES   = #{src_rel.join(" \\\n            ")}
+    ARCHIVES  = #{link_rel.reject { |a| a.start_with?("-") }.join(" ")}
+
+    #{base}: $(SOURCES) $(ARCHIVES)
+    \t$(CC) $(CFLAGS) $(INCLUDES) $(SOURCES) $(ARCHIVES) $(LDLIBS) -o $@
+
+    clean:
+    \trm -f #{base}
+    .PHONY: clean
+  MAKE
+
+  File.write(File.join(out_dir, "MANIFEST.md"), <<~MD)
+    # #{base} -- source bundle
+
+    The output of `spinel-ebpf compile #{base}.rb --emit-sources`. **Carry this one
+    directory to the destination and `make`** -- the same way upstream spinel's
+    `spinel app.rb -c` is used.
+
+    ## Contents
+
+    | File | What it is |
+    |---|---|
+    | `#{base}.c` | the native side, in C. Upstream spinel's output, unchanged |
+    #{with_ebpf ? "| `#{base}.skel.h` | **the kernel side itself**: the verified eBPF bytecode embedded as a C array. This is why the destination needs neither clang nor bpftool |\n    | `#{base}.bpf.c` | the kernel side in C, for audit. Not used by the build -- the skeleton above is what counts |\n    | `#{base}_glue.c` | load / attach / drain / teardown |" : "| -- | this unit has no eBPF partition |"}
+    | `Makefile` | generated from the same argv `--build` runs |
+    | `spinel-ebpf/` | the bundled runtime sources |
+    | `spinel-lib/` | spinel's runtime (headers + `libspinel_rt.a`) |
+
+    ## The portability contract
+
+    #{SpinelEbpf::Portability.human(contract)}
+
+    ### About architecture
+
+    **The "portability contract" above is what counts.** This section only restates it,
+    so believe the section above if the two ever look different.
+
+    #{arch_section}
+
+    In every case, `spinel-lib/libspinel_rt.a` -- and mbedTLS's `.a` files when TLS is in
+    use -- are **for the architecture of the machine this was built on**. To build for
+    another architecture, build upstream spinel's runtime at the destination and pass
+    `make SPINEL_LIB=<that directory>`.
+  MD
+
+  warn "[spinel-ebpf] emitted source bundle: #{out_dir}"
+  out_dir
+end
+
+# The compiler-facing flags spinel-ebpf shares with upstream spinel, collected
+# once so every build path honours them identically.
+def build_flags(opts)
+  { cc: opts[:cc], opt_level: opts[:opt_level], debug: opts[:debug] ? true : false,
+    extra_links: opts[:extra_links] || [],
+    emit_sources: opts[:emit_sources] }
+end
+
+def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false, partition_result: nil,
+                 int_overflow: nil, cc: nil, opt_level: nil, debug: false,
+                 extra_links: [], emit_sources: nil, keep_filters: [])
   abort "error: --build only supported on Linux (got #{RbConfig::CONFIG["host_os"]})" unless RbConfig::CONFIG["host_os"] =~ /linux/i
   clang   = which("clang")   || abort("error: clang not found in PATH")
   bpftool = with_ebpf ? (which("bpftool") || abort("error: bpftool not found")) : nil
@@ -868,9 +1211,26 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
     # (which captures its output instead of aborting). bpf_clang_argv builds the
     # exact same argv, so build_binary's behaviour is byte-identical.
     run! bpf_clang_argv(clang, bpf_c, bpf_o, build_dir)
+    # Opt-in DWARF strip. Must run BEFORE the skeleton is generated, since
+    # the skeleton embeds these exact bytes. `check` deliberately verifies the
+    # pre-strip object: strip is DWARF-only and leaves .BTF byte-identical and
+    # .BTF.ext intact (measured), so the two forms load the same.
+    bpf_strip_maybe!(bpf_o)
     # `name <sanitized>` overrides the struct prefix in the generated skel.h.
     File.write(skel_h, `#{bpftool} gen skeleton #{bpf_o} name #{skel_name}`)
     abort "error: bpftool gen skeleton failed" if File.empty?(skel_h)
+    # Which programs want a kprobe_multi link, and with which symbols. Read out
+    # of the EMITTED .bpf.c rather than re-derived from the partition result,
+    # because the choice between the two lowerings depends on a threshold, and a
+    # threshold that lived both here and in the C codegen would be a threshold
+    # that drifts. The codegen decides once and says so in a line only it writes;
+    # this side obeys. Expanded handlers produce ordinary SEC("kprobe/<sym>")
+    # programs and need nothing here -- libbpf auto-attaches them, which is
+    # exactly why expansion is the cheaper mechanism to support.
+    kprobe_multis = File.read(bpf_c).scan(
+      %r{/\* spnl:attach-multi kind=kprobe mode=multi n=\d+ prog=(\S+) syms=(\S+) \*/}
+    ).map { |prog, syms| { prog_name: prog, syms: syms.split(",") } }
+
     # collect reactor uprobe/USDT targets from MethodInfo so glue.c
     # can emit a per-prog target table.
     # also collect reactor perf_event progs with their Hz frequency.
@@ -922,12 +1282,27 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
     kc_ast_file = File.join(build_dir, "#{base}.ast")
     kc_paths = File.exist?(kc_ast_file) ?
       SpinelEbpf::KernelCache.declarations(SpinelEbpf::ParseSpinelAst.parse_file(kc_ast_file)).map(&:path) : []
+    # The same read-back for `param` -- the loader needs the name (to find the
+    # rodata field the codegen emitted) and the env var it answers to.
+    params = with_ebpf ? SpinelEbpf::Param.declarations_from_ast_file(kc_ast_file) : []
+    # And for `filter_by` -- a fixed vocabulary, so the loader only needs to know
+    # WHICH keys this unit declared (the rodata symbol and the env var follow
+    # from the key name).
+    filter_keys = with_ebpf ? SpinelEbpf::CommonFilter.declarations_from_ast_file(kc_ast_file) : []
     File.write(glue_c, build_glue_c(base, skel_name,
                                     with_dispatch: !dispatch_path.nil?,
                                     reactor_uprobes: reactor_uprobes,
                                     reactor_usdts: reactor_usdts,
                                     reactor_perf_events: reactor_perf_events,
+                                    kprobe_multis: kprobe_multis,
                                     kernel_cache_paths: kc_paths,
+                                    params: params,
+                                    filter_keys: filter_keys,
+                                    # The userspace consumer filter. Read from the
+                                    # SOURCE, not the .ast -- the declaration is lowered into
+                                    # the generated consumer before spinel ever sees it, so
+                                    # it never reaches an .ast (unlike `param`/`filter_by`).
+                                    keep_filters: with_ebpf ? keep_filters : [],
                                     with_otlp: otlp_on))
 
     include_args.concat(["-I", build_dir, "-I", File.join(PROJECT_ROOT, "src/runtime")])
@@ -955,6 +1330,13 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
       # through otlp_enrich_run rather than one by one.
       extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_enrich.c")
       extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_metric.c")
+      # Aggregating and sending the metrics derived from a record channel. The
+      # drain in otlp_agent.c calls the generated intake
+      # (spnl_recmetric_observe_<ch>); this is where that lives. It is kept out of
+      # the span path's translation unit to keep exactly one TU instantiating the
+      # generated tables -- the same arrangement the typed consumer's
+      # SPNL_REC_CONSUME_IMPL uses.
+      extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_recmetric.c")
       # Cross-layer lookup: reads L3/L4 metrics keyed by connection 4-tuple out of
       # a bpf map, so a userspace span can carry what the kernel measured.
       extra_sources << File.join(PROJECT_ROOT, "src/runtime/otlp/otlp_xlayer.c")
@@ -1026,7 +1408,30 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
     end
     check_static_libelf!(clang, ENV["SPNL_STATIC_ELF_DIR"])
   end
-  cmd = [clang, "-O2", *ov_flag, *cflags_extra, *static_flag, *include_args, c_file, *extra_sources, *static_ldirs, *link_args, *static_libs, "-o", out_bin]
+  # spinel's own compiler-facing flags stay available when you opt into eBPF. `--cc` / `-O` / `-g` / `--link` mean here what they mean in
+  # upstream spinel, so opting into the eBPF partition never costs you a spinel
+  # capability. clang is still required for `-target bpf`; the *native* side may
+  # be built by whatever compiler the user names. (spinel's `-I` -- the `require`
+  # search root -- is NOT forwarded: the in-process codegen re-parses the source
+  # for partition/IR without it, so honouring it on one frontend only would
+  # compile a different program than the one it partitioned. Deferred until the
+  # in-process codegen takes include roots too.)
+  native_cc = cc || clang
+  opt_flags = ["-O#{opt_level.nil? ? 2 : opt_level}"] + (debug ? ["-g"] : [])
+  link_args = link_args + extra_links
+
+  if emit_sources
+    bpf_c_path = File.join(build_dir, "#{base}.bpf.c")
+    return emit_source_bundle(emit_sources, base: base,
+                              defines: ov_flag + cflags_extra,
+                              include_args: include_args, c_file: c_file,
+                              sources: extra_sources, link_args: link_args,
+                              with_ebpf: with_ebpf, spinel_lib: spinel_lib,
+                              build_dir: build_dir, cc: native_cc, opt_flags: opt_flags,
+                              bpf_c: (File.exist?(bpf_c_path) ? File.read(bpf_c_path) : nil))
+  end
+
+  cmd = [native_cc, *opt_flags, *ov_flag, *cflags_extra, *static_flag, *include_args, c_file, *extra_sources, *static_ldirs, *link_args, *static_libs, "-o", out_bin]
   warn "[spinel-ebpf] linking: #{cmd.join(" ")}" if verbose
   run! cmd
   out_bin
@@ -1039,7 +1444,9 @@ end
 # linkage so the generated <base>_dispatch.c TU can reach it.
 def build_glue_c(base, skel_name, with_dispatch: false,
                  reactor_uprobes: [], reactor_usdts: [], reactor_perf_events: [],
-                 kernel_cache_paths: [], with_otlp: false)
+                 kprobe_multis: [],
+                 kernel_cache_paths: [], params: [], filter_keys: [], keep_filters: [],
+                 with_otlp: false)
   storage = with_dispatch ? "" : "static "
 
   # OTLP push FFI shims. Reads the per-unit emit ringbuf / keyed-hist via the
@@ -1237,6 +1644,192 @@ def build_glue_c(base, skel_name, with_dispatch: false,
       "    static const int _spnl_kc_npaths = #{kernel_cache_paths.length};"
     end
 
+  # `param` and `filter_by`: the two runtime knobs.
+  # Both are `volatile const` in .rodata that the codegen emitted; `bpftool gen
+  # skeleton` exposes each as a field of `skel->rodata`, so the loader needs no
+  # ELF symtab walk (which is what cilium/ebpf has to do, having no skeleton) --
+  # a plain struct assignment between __open() and __load() is the whole
+  # mechanism. They share one block because they share one failure mode.
+  #
+  # Three things are emitted, and the third is the one that matters in practice:
+  #
+  #   * a per-knob assignment, executed only when its env var is set, so the
+  #     compiled-in default is what a bare run gets;
+  #   * for SPNL_FILTER_COMM, a bounded copy into the 16-byte .rodata array (and
+  #     a refusal above 15 characters, which could never match a task comm);
+  #   * a sweep of the environment for SPNL_PARAM_* / SPNL_FILTER_* names this
+  #     program does not have. A mistyped switch is otherwise the perfect silent
+  #     failure: the operator sets it, the probe ignores it, and the output looks
+  #     like the filter simply matched nothing. A wrong instruction is refused,
+  #     not averaged. The sweep is emitted UNCONDITIONALLY -- a probe that
+  #     declares nothing is exactly the probe where a stray SPNL_FILTER_PID is
+  #     most misleading, so "(none)" is an answer worth printing.
+  #
+  # `keep_if` adds a third kind to the same table and the same sweep. Its value
+  # is read by the generated RUBY consumer (`ENV[...]`), not by the loader --
+  # .rodata would be the wrong home for it, since the filter runs after the
+  # record has already crossed into userspace. What the loader still owns is the
+  # part Ruby cannot do safely: (a) the sweep, so a mistyped SPNL_KEEP_* is
+  # refused instead of being a filter that never fires, and (b) parsing an
+  # integer predicate's value strictly, because `"12x".to_i` is 12 in Ruby and a
+  # typo that takes effect is worse than one that is refused. C validates, Ruby
+  # applies.
+  knob_decls =
+    params.map { |p| ["param #{p.name}", p.env_name] } +
+    filter_keys.map { |k| ["filter #{k.name}", k.env_name] } +
+    keep_filters.map { |k| ["keep #{k[:channel]}.#{k[:prop]} (#{k[:op]})", k[:env]] }
+  knob_table =
+    if knob_decls.empty?
+      "static const struct spnl_knob_decl _spnl_knob_decls[1] = { { 0, 0 } };\n" \
+      "static const int _spnl_knob_ndecls = 0;"
+    else
+      rows = knob_decls.map { |n, e| "    { #{n.inspect}, #{e.inspect} }," }.join("\n")
+      "static const struct spnl_knob_decl _spnl_knob_decls[] = {\n#{rows}\n};\n" \
+      "static const int _spnl_knob_ndecls = #{knob_decls.length};"
+    end
+
+  int_assigns =
+    params.map { |p|
+      "    if (_spnl_knob_env_i64(#{p.env_name.inspect}, &_v))\n" \
+      "        _spnl_skel->rodata->#{p.c_symbol} = (__s64)_v;"
+    } + filter_keys.reject(&:string?).map { |k|
+      "    if (_spnl_knob_env_i64(#{k.env_name.inspect}, &_v))\n" \
+      "        _spnl_skel->rodata->#{k.c_symbol} = (__s64)_v;"
+    }
+  str_assigns = filter_keys.select(&:string?).map { |k|
+    "    _spnl_knob_env_comm(#{k.env_name.inspect}, (char *)_spnl_skel->rodata->#{k.c_symbol}, " \
+    "sizeof(_spnl_skel->rodata->#{k.c_symbol}));"
+  }
+  # Validate only -- the value is consumed in Ruby. An int predicate is
+  # parsed here and thrown away so that a malformed one fails at startup rather
+  # than silently becoming a filter on some other number.
+  keep_checks = keep_filters.map { |k|
+    k[:expose] == "int" ?
+      "    (void)_spnl_knob_env_i64(#{k[:env].inspect}, &_v);" :
+      "    _spnl_keep_env_str(#{k[:env].inspect});"
+  }
+  assigns = (int_assigns + str_assigns + keep_checks).join("\n")
+  assigns = "    (void)_v;" if assigns.empty?
+
+  knobs_glue = <<~KNOBS
+    /* --- runtime knobs: `param` and `filter_by` ---------------------------- */
+    struct spnl_knob_decl { const char *name; const char *env; };
+    #{knob_table}
+
+    /* strtoll with the whole string required to parse. A partially-parsed
+     * value ("12x" -> 12) is a typo that would take effect, which is worse
+     * than one that is refused. Base 0 so 0x/0 prefixes work. */
+    __attribute__((unused))
+    static int _spnl_knob_env_i64(const char *var, long long *out)
+    {
+        const char *v = getenv(var);
+        if (!v) return 0;
+        while (*v == ' ' || *v == '\\t') v++;
+        if (!*v) {
+            fprintf(stderr, "[spinel-ebpf] %s is set but empty -- unset it to use the "
+                            "compiled-in default\\n", var);
+            exit(1);
+        }
+        errno = 0;
+        char *end = NULL;
+        long long n = strtoll(v, &end, 0);
+        while (end && (*end == ' ' || *end == '\\t')) end++;
+        if (!end || *end || errno == ERANGE) {
+            fprintf(stderr, "[spinel-ebpf] %s=%s is not an integer "
+                            "(64-bit signed, decimal or 0x-hex)\\n", var, v);
+            exit(1);
+        }
+        *out = n;
+        return 1;
+    }
+
+    /* SPNL_FILTER_COMM -> the 16-byte .rodata array the kernel compares
+     * against bpf_get_current_comm(). A task comm is at most 15 characters plus
+     * the NUL the kernel writes, so a longer value can never match anything:
+     * refusing it is the difference between "no such process" and "the filter
+     * was silently truncated to something else". */
+    __attribute__((unused))
+    static void _spnl_knob_env_comm(const char *var, char *dst, size_t cap)
+    {
+        const char *v = getenv(var);
+        if (!v) return;
+        size_t n = strlen(v);
+        if (n == 0) {
+            fprintf(stderr, "[spinel-ebpf] %s is set but empty -- unset it to match every "
+                            "process\\n", var);
+            exit(1);
+        }
+        if (n >= cap) {
+            fprintf(stderr, "[spinel-ebpf] %s=%s is %zu characters; a task comm is at most "
+                            "%zu, so this could never match\\n", var, v, n, cap - 1);
+            exit(1);
+        }
+        memcpy(dst, v, n);
+    }
+
+    /* A `keep_if` predicate's value. Empty means "does not constrain" to the
+     * generated Ruby, so an explicitly empty setting is an instruction that
+     * would do nothing -- refuse it here rather than let it read as unset. */
+    __attribute__((unused))
+    static void _spnl_keep_env_str(const char *var)
+    {
+        const char *v = getenv(var);
+        if (!v) return;
+        if (!*v) {
+            fprintf(stderr, "[spinel-ebpf] %s is set but empty -- unset it to keep every "
+                            "record\\n", var);
+            exit(1);
+        }
+    }
+
+    /* A SPNL_PARAM_* / SPNL_FILTER_* / SPNL_KEEP_* variable this program does not
+     * have cannot do anything. Saying so is the difference between "the filter
+     * matched nothing" and "you spelled the filter wrong", which look identical
+     * in the output. */
+    extern char **environ;
+    static void _spnl_knob_reject_unknown(void)
+    {
+        for (char **e = environ; e && *e; e++) {
+            if (strncmp(*e, "SPNL_PARAM_", 11) != 0 &&
+                strncmp(*e, "SPNL_FILTER_", 12) != 0 &&
+                strncmp(*e, "SPNL_KEEP_", 10) != 0) continue;
+            const char *eq = strchr(*e, '=');
+            if (!eq) continue;
+            size_t nlen = (size_t)(eq - *e);
+            int known = 0;
+            for (int i = 0; i < _spnl_knob_ndecls; i++)
+                if (strlen(_spnl_knob_decls[i].env) == nlen &&
+                    strncmp(_spnl_knob_decls[i].env, *e, nlen) == 0) { known = 1; break; }
+            if (known) continue;
+            fprintf(stderr, "[spinel-ebpf] %.*s is not a parameter of this program. "
+                            "Declared:", (int)nlen, *e);
+            for (int i = 0; i < _spnl_knob_ndecls; i++)
+                fprintf(stderr, " %s", _spnl_knob_decls[i].env);
+            fprintf(stderr, "%s\\n", _spnl_knob_ndecls ? "" : " (none)");
+            exit(1);
+        }
+    }
+
+    /* Between __open() and __load(): after this the kernel BPF_MAP_FREEZEs the
+     * read-only map, which is what lets the verifier treat these as constants
+     * and drop the branches that test them. Assigning after __load() would be
+     * both refused and pointless. */
+    static void _spnl_knobs_apply(void)
+    {
+        long long _v = 0;
+        _spnl_knob_reject_unknown();
+    #{assigns}
+        for (int i = 0; i < _spnl_knob_ndecls; i++)
+            if (getenv(_spnl_knob_decls[i].env))
+                fprintf(stderr, "[spinel-ebpf] %s = %s (%s)\\n",
+                        _spnl_knob_decls[i].name, getenv(_spnl_knob_decls[i].env),
+                        _spnl_knob_decls[i].env);
+    }
+  KNOBS
+  knobs_glue = knobs_glue.gsub(/^(?=.)/, "    ").chomp   # sit at the glue's top-level indent
+  params_glue = knobs_glue
+  params_apply_call = "\n        _spnl_knobs_apply();"
+
   # emit a const array of reactor uprobe/USDT targets. _spnl_uprobe_attach_all
   # and _spnl_usdt_attach_all consult it (by program name) and fall back to env
   # vars when the prog name isn't in the table (legacy flat-form attach).
@@ -1283,6 +1876,30 @@ def build_glue_c(base, skel_name, with_dispatch: false,
       "static const int _spnl_reactor_perf_events_count = #{reactor_perf_events.length};"
     end
 
+  # Per-prog symbol arrays plus the index table for kprobe_multi. Two levels,
+  # unlike the flat uprobe/USDT rows, because each entry owns a variable-length
+  # list of symbols. The COOKIE is the symbol's position in this array, which is
+  # the same integer the codegen burned into the expanded wrappers -- that
+  # identity is what makes `attached_index` mean one thing.
+  kmulti_sym_arrays = kprobe_multis.each_with_index.map { |t, i|
+    "static const char *_spnl_kmulti_syms#{i}[] = { " +
+      t[:syms].map { |s| "\"#{s}\"" }.join(", ") + " };"
+  }.join("\n    ")
+  kmulti_table = kprobe_multis.each_with_index.map { |t, i|
+    "    { \"#{t[:prog_name]}\", _spnl_kmulti_syms#{i}, #{t[:syms].length} },"
+  }.join("\n")
+  kmulti_table_decl =
+    if kprobe_multis.empty?
+      "static const struct spnl_kprobe_multi _spnl_kmultis[1] = {};\n" \
+      "static const int _spnl_kmultis_count = 0;"
+    else
+      "#{kmulti_sym_arrays}\n" \
+      "static const struct spnl_kprobe_multi _spnl_kmultis[] = {\n" \
+      "#{kmulti_table}\n" \
+      "};\n" \
+      "static const int _spnl_kmultis_count = #{kprobe_multis.length};"
+    end
+
   <<~GLUE
     /* SPDX-License-Identifier: GPL-2.0
      * GENERATED by spinel-ebpf. Auto-loads, attaches kprobe/
@@ -1313,14 +1930,25 @@ def build_glue_c(base, skel_name, with_dispatch: false,
        poll (counts are then not attributable to a single channel). */
     static const char *_spnl_last_chan = "";
 
-    /* track XDP-attached interfaces so the destructor can detach. */
-    static int  _spnl_xdp_ifindex = 0;
-    static int  _spnl_xdp_attached = 0;
+    /* XDP attach is link-based (bpf_program__attach_xdp) so that
+     * (a) an interface that already has an XDP program is never silently
+     *     replaced -- attach fails loud and the foreign program is untouched,
+     * (b) the destructor detaches only our own programs, and
+     * (c) the kernel drops the link when the process dies (SIGKILL-safe:
+     *     no leftover prog on the iface -- one-shot, zero-trace hygiene). */
+    #define SPNL_XDP_MAX_LINKS 8
+    static struct bpf_link *_spnl_xdp_links[SPNL_XDP_MAX_LINKS];
+    static int              _spnl_xdp_link_count = 0;
 
     /* uprobe / uretprobe / USDT links (bpf_link*). */
     #define SPNL_UPROBE_MAX 32
     static struct bpf_link *_spnl_uprobe_links[SPNL_UPROBE_MAX];
     static int              _spnl_uprobe_link_count = 0;
+
+    /* kprobe_multi links -- one link covers the whole symbol list. */
+    #define SPNL_KMULTI_MAX 16
+    static struct bpf_link *_spnl_kmulti_links[SPNL_KMULTI_MAX];
+    static int              _spnl_kmulti_link_count = 0;
 
     /* reactor-form target tables. Each entry maps a BPF program name
      * (synthesized by partition, e.g. "uprobe__react0") to the original
@@ -1348,9 +1976,21 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         const char *prog_name;
         int hz;
     };
+    /* A SEC("kprobe.multi") program plus the symbol list it is to be attached
+     * to. libbpf deliberately does NOT auto-attach a bare "kprobe.multi" section
+     * (only the "kprobe.multi/<glob>" form), which is what lets us attach it
+     * here with an explicit symbol array AND a per-symbol cookie -- the glob
+     * form cannot carry cookies, so it could not answer "which symbol fired". */
+    struct spnl_kprobe_multi {
+        const char *prog_name;
+        const char **syms;   /* libbpf's opts field is `const char **` (it does not
+                              * take ownership); the strings are literals. */
+        int nsyms;
+    };
     #{uprobe_table_decl}
     #{usdt_table_decl}
     #{pe_table_decl}
+    #{kmulti_table_decl}
 
     static const struct spnl_reactor_uprobe *_spnl_lookup_reactor_uprobe(const char *name)
     {
@@ -1400,6 +2040,14 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         return 1;
     }
 
+    /* `xdp_tail__*` programs are PROG_ARRAY sub-programs -- loaded but
+     * never attached to an interface (the dispatcher tail-calls them). */
+    static int _spnl_is_xdp_tail_prog(struct bpf_program *prog)
+    {
+        const char *name = bpf_program__name(prog);
+        return name && strncmp(name, "xdp_tail__", 10) == 0;
+    }
+
     static void _spnl_xdp_attach_all(void)
     {
         const char *iface = getenv("SPNL_XDP_IFACE");
@@ -1407,7 +2055,8 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         int xdp_count = 0;
 
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
-            if (bpf_program__type(prog) == BPF_PROG_TYPE_XDP)
+            if (bpf_program__type(prog) == BPF_PROG_TYPE_XDP &&
+                !_spnl_is_xdp_tail_prog(prog))
                 xdp_count++;
         }
         if (xdp_count == 0)
@@ -1426,16 +2075,27 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         }
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             if (bpf_program__type(prog) != BPF_PROG_TYPE_XDP) continue;
-            int fd = bpf_program__fd(prog);
-            int err = bpf_xdp_attach(ifindex, fd, 0, NULL);
-            if (err) {
-                fprintf(stderr, "[spinel-ebpf] bpf_xdp_attach(%s, %s): %s\\n",
-                        iface, bpf_program__name(prog), strerror(-err));
+            if (_spnl_is_xdp_tail_prog(prog)) continue;
+            if (_spnl_xdp_link_count >= SPNL_XDP_MAX_LINKS) {
+                fprintf(stderr, "[spinel-ebpf] too many XDP programs (>%d)\\n",
+                        SPNL_XDP_MAX_LINKS);
+                break;
+            }
+            struct bpf_link *link = bpf_program__attach_xdp(prog, ifindex);
+            if (!link) {
+                int err = errno;
+                fprintf(stderr, "[spinel-ebpf] bpf_program__attach_xdp(%s, %s): %s\\n",
+                        iface, bpf_program__name(prog), strerror(err));
+                if (err == EBUSY || err == EEXIST)
+                    fprintf(stderr, "[spinel-ebpf]   %s already has an XDP program "
+                                    "(another tool's -- e.g. Cilium, libxdp, or a previous probe). "
+                                    "Refusing to replace it; it was left untouched. "
+                                    "Pick another interface or detach that program first.\\n",
+                            iface);
                 continue;
             }
-            _spnl_xdp_ifindex = ifindex;
-            _spnl_xdp_attached = 1;
-            fprintf(stderr, "[spinel-ebpf] XDP attached: %s -> %s\\n",
+            _spnl_xdp_links[_spnl_xdp_link_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] XDP attached (link): %s -> %s\\n",
                     bpf_program__name(prog), iface);
         }
     }
@@ -1914,6 +2574,58 @@ def build_glue_c(base, skel_name, with_dispatch: false,
      *   use that entry's binary + provider + probe.
      * Flat form: parse provider/probe from prog name (`usdt__<P>__<N>`)
      *   + binary from $SPNL_USDT_BINARY. */
+    /* Attach every SEC("kprobe.multi") program to its declared symbol list,
+     * cookie[i] = i, so bpf_get_attach_cookie() in the program hands the body
+     * the SAME index the expanded lowering would have burned in as a literal.
+     * One link for the whole list, whatever its length -- that is the entire
+     * reason this mechanism exists.
+     *
+     * Failure is loud and per-handler: kprobe_multi refuses the WHOLE
+     * link if any one symbol is unresolvable, so a typo'd or config-dependent
+     * name silently costs every symbol in the set, not just its own. Saying which
+     * set failed is the difference between a fixable message and a probe that
+     * quietly measures nothing. */
+    static void _spnl_kmulti_attach_all(void)
+    {
+        if (_spnl_kmultis_count == 0) return;
+        struct bpf_program *prog;
+        bpf_object__for_each_program(prog, _spnl_skel->obj) {
+            const char *name = bpf_program__name(prog);
+            const char *sec  = bpf_program__section_name(prog);
+            if (!name || !sec || strcmp(sec, "kprobe.multi") != 0) continue;
+            const struct spnl_kprobe_multi *e = NULL;
+            for (int i = 0; i < _spnl_kmultis_count; i++)
+                if (strcmp(_spnl_kmultis[i].prog_name, name) == 0) { e = &_spnl_kmultis[i]; break; }
+            if (!e) continue;
+            if (_spnl_kmulti_link_count >= SPNL_KMULTI_MAX) {
+                fprintf(stderr, "[spinel-ebpf] too many kprobe.multi programs (>%d)\\n", SPNL_KMULTI_MAX);
+                break;
+            }
+            __u64 *cookies = calloc((size_t)e->nsyms, sizeof(__u64));
+            if (!cookies) continue;
+            for (int i = 0; i < e->nsyms; i++) cookies[i] = (__u64)i;
+            LIBBPF_OPTS(bpf_kprobe_multi_opts, kopts,
+                        .syms = e->syms, .cookies = cookies, .cnt = (size_t)e->nsyms);
+            struct bpf_link *link = bpf_program__attach_kprobe_multi_opts(prog, NULL, &kopts);
+            if (!link) {
+                fprintf(stderr,
+                        "[spinel-ebpf] kprobe.multi attach failed for %s (%d symbols): %s\\n",
+                        name, e->nsyms, strerror(errno));
+                fprintf(stderr,
+                        "[spinel-ebpf]   the link covers the whole list, so ONE unresolvable "
+                        "symbol fails all of them.\\n"
+                        "[spinel-ebpf]   check each against /sys/kernel/tracing/available_filter_functions; "
+                        "kprobe.multi also needs kernel 5.18+.\\n");
+                free(cookies);
+                continue;
+            }
+            free(cookies);
+            _spnl_kmulti_links[_spnl_kmulti_link_count++] = link;
+            fprintf(stderr, "[spinel-ebpf] kprobe.multi attached: %s -> %d symbols (%s%s)\\n",
+                    name, e->nsyms, e->syms[0], e->nsyms > 1 ? ", ..." : "");
+        }
+    }
+
     static void _spnl_usdt_attach_all(void)
     {
         struct bpf_program *prog;
@@ -2166,7 +2878,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             fprintf(stderr, "[spinel-ebpf] iter ran: %s\\n", bpf_program__name(prog));
         }
     }
-
+    #{params_glue}
     __attribute__((constructor))
     static void _spnl_init(void)
     {
@@ -2177,23 +2889,32 @@ def build_glue_c(base, skel_name, with_dispatch: false,
          * (xdp_md / bpf_timer / net headers), so a recent kernel's BTF works as a
          * stand-in on an older BTF-less kernel. */
         const char *_spnl_btf_path = getenv("SPNL_BTF_PATH");
+        /* Open and load are two steps, not __open_and_load(), because
+         * .rodata is only writable in the gap between them -- after
+         * __load() libbpf has BPF_MAP_FREEZEd it. Both branches go through the
+         * same gap, so SPNL_BTF_PATH and `param` compose instead of one silently
+         * disabling the other. */
         if (_spnl_btf_path && _spnl_btf_path[0]) {
             LIBBPF_OPTS(bpf_object_open_opts, _spnl_oo, .btf_custom_path = _spnl_btf_path);
             _spnl_skel = #{skel_name}__open_opts(&_spnl_oo);
-            if (_spnl_skel && #{skel_name}__load(_spnl_skel)) {
-                fprintf(stderr, "[spinel-ebpf] BPF load failed (custom BTF %s)\\n", _spnl_btf_path);
-                #{skel_name}__destroy(_spnl_skel);
-                _spnl_skel = NULL;
-            } else if (_spnl_skel) {
-                fprintf(stderr, "[spinel-ebpf] BPF loaded with custom BTF %s\\n", _spnl_btf_path);
-            }
         } else {
-            _spnl_skel = #{skel_name}__open_and_load();
+            _spnl_skel = #{skel_name}__open();
         }
         if (!_spnl_skel) {
-            fprintf(stderr, "[spinel-ebpf] BPF open/load failed\\n");
+            fprintf(stderr, "[spinel-ebpf] BPF open failed\\n");
+            return;
+        }#{params_apply_call}
+        if (#{skel_name}__load(_spnl_skel)) {
+            if (_spnl_btf_path && _spnl_btf_path[0])
+                fprintf(stderr, "[spinel-ebpf] BPF load failed (custom BTF %s)\\n", _spnl_btf_path);
+            else
+                fprintf(stderr, "[spinel-ebpf] BPF open/load failed\\n");
+            #{skel_name}__destroy(_spnl_skel);
+            _spnl_skel = NULL;
             return;
         }
+        if (_spnl_btf_path && _spnl_btf_path[0])
+            fprintf(stderr, "[spinel-ebpf] BPF loaded with custom BTF %s\\n", _spnl_btf_path);
         if (#{skel_name}__attach(_spnl_skel)) {
             fprintf(stderr, "[spinel-ebpf] BPF attach failed (some attach points may be missing)\\n");
         } else {
@@ -2208,6 +2929,16 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             bpf_object__for_each_map(_m, _spnl_skel->obj) {
                 if (bpf_map__type(_m) == BPF_MAP_TYPE_RINGBUF)
                     spnl_channel_declare(bpf_map__name(_m));
+                /* Bind the per-unit ringbuf lost-sample counter
+                 * (<unit>_lost PERCPU_ARRAY) so the balance report can name the
+                 * records the kernel dropped on a full ring -- the one silent
+                 * drop the drain-layer counters can't see. */
+                else if (bpf_map__type(_m) == BPF_MAP_TYPE_PERCPU_ARRAY) {
+                    const char *_mn = bpf_map__name(_m);
+                    size_t _ml = _mn ? strlen(_mn) : 0;
+                    if (_ml >= 5 && strcmp(_mn + _ml - 5, "_lost") == 0)
+                        spnl_lost_bind(bpf_map__fd(_m));
+                }
             }
         }
         /* populate PROG_ARRAY *before* attaching the XDP dispatcher so
@@ -2218,6 +2949,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         _spnl_sockops_attach_all();
         _spnl_cgroup_attach_all();
         _spnl_iter_run_all();
+        _spnl_kmulti_attach_all();
         _spnl_uprobe_attach_all();
         _spnl_usdt_attach_all();
         _spnl_perf_event_attach_all();
@@ -2836,6 +3568,10 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             }
         }
         if (_spnl_sockops_cgroup_fd >= 0) close(_spnl_sockops_cgroup_fd);
+        /* detach kprobe.multi links. */
+        for (int i = 0; i < _spnl_kmulti_link_count; i++) {
+            if (_spnl_kmulti_links[i]) bpf_link__destroy(_spnl_kmulti_links[i]);
+        }
         /* detach uprobe / uretprobe / USDT links. */
         for (int i = 0; i < _spnl_uprobe_link_count; i++) {
             if (_spnl_uprobe_links[i]) bpf_link__destroy(_spnl_uprobe_links[i]);
@@ -2848,8 +3584,10 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         for (int i = 0; i < _spnl_tcx_link_count; i++) {
             if (_spnl_tcx_links[i]) bpf_link__destroy(_spnl_tcx_links[i]);
         }
-        if (_spnl_xdp_attached) {
-            bpf_xdp_detach(_spnl_xdp_ifindex, 0, NULL);
+        /* XDP links -- destroying detaches only our own programs;
+         * a foreign program on the same iface is never touched. */
+        for (int i = 0; i < _spnl_xdp_link_count; i++) {
+            if (_spnl_xdp_links[i]) bpf_link__destroy(_spnl_xdp_links[i]);
         }
         if (_spnl_skel) #{skel_name}__destroy(_spnl_skel);
     }
@@ -2978,6 +3716,14 @@ def check_stage_codegen(build_dir, ctx)
   return SpinelEbpf::Check.skip_stage("codegen", "in-process codegen unavailable") unless icc
   bpf_c = File.join(build_dir, "#{ctx[:base]}.bpf.c")
   out, err, st = Open3.capture3(icc, ctx[:input], ctx[:base])
+  # `check --json` is the machine-facing surface, so it must survive the
+  # diagnostic it is reporting. Measured: a codegen message containing one
+  # non-ASCII byte crashed this line with Encoding::CompatibilityError under the
+  # build container's default US-ASCII locale -- the checker died with a Ruby
+  # backtrace instead of reporting which stage failed. capture3 hands back
+  # ASCII-8BIT/locale-tagged bytes; retag as UTF-8 and scrub so the diagnostic is
+  # at worst mangled, never fatal.
+  err = err.dup.force_encoding(Encoding::UTF_8).scrub("?")
   return SpinelEbpf::Check.fail_stage("codegen", "in-process eBPF codegen failed", detail: err.strip) unless st.success?
   File.write(bpf_c, out)
   ctx[:bpf_c] = bpf_c
@@ -3005,6 +3751,12 @@ def check_stage_clang(build_dir, ctx)
   warn "[spinel-ebpf] check clang: #{argv.join(' ')}" if ctx[:verbose]
   _out, err, st = Open3.capture3(*argv)
   unless st.success?
+    # clang's stderr arrives in the default external encoding, which is US-ASCII
+    # when the environment sets no locale (the container's default). A diagnostic
+    # that quotes a multi-byte character then makes the scan below raise
+    # ArgumentError -- a stack trace where the whole point of `check` is to hand
+    # back the message (measured).
+    err = err.dup.force_encoding(Encoding::UTF_8).scrub
     first = err.lines.find { |l| l =~ /error:/i }&.strip
     return SpinelEbpf::Check.fail_stage("clang", first || "clang -target bpf failed", detail: err.strip)
   end
@@ -3098,6 +3850,11 @@ def cmd_capabilities(argv)
         puts format("    %-20s e.g. %s", b, ex) if ex
         g = SpinelEbpf::Capabilities.gate_for(b)
         puts format("      ! only valid in: %s", g[:valid_secs].join(" | ")) if g
+        # Units and byte order of the return value. Showing only how to call it
+        # (the example) and not what it means is how a plausible-looking number
+        # gets misread and still passes.
+        sem = SpinelEbpf::Capabilities.value_semantics_for(b)
+        puts format("      = %s", sem) if sem
       end
     end
   else
@@ -3149,6 +3906,15 @@ when "--help", "-h", nil
                         Directory holding a libelf.a that carries the elfutils libeu
                         objects (elfutils >= 0.195). Needed with SPNL_STATIC=1 when the
                         system libelf.a is older; spinel-ebpf checks and explains if so.
+      SPNL_BPF_STRIP=1  Strip DWARF from the .bpf.o with llvm-strip -g before the
+                        skeleton embeds it. Keeps .BTF / .BTF.ext, so CO-RE is
+                        intact; shrinks the shipped skeleton by ~96%. Off by default so
+                        the artifact never depends on whether the build host has
+                        llvm-strip; with it set and llvm-strip missing, the build fails.
+
+    The .bpf.o is built at a pinned ISA (-mcpu=v1; v3 only for bpf_arena sources) with
+    build paths mapped out, so the same source yields the same bytes regardless
+    of -o, cwd, and repo location.
 
     See docs/architecture.md for how the partitioning pipeline fits together.
   HELP

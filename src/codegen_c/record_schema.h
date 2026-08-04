@@ -18,6 +18,13 @@
  * All four come out of tools/gen_record_mirror.c except S1, which #includes
  * this header directly; `make -C src/codegen_c mirror` refreshes the artifacts.
  *
+ * There is a fifth reading of the same records: what they AGGREGATE into. A
+ * span answers "what happened once"; a metric answers "how often, and how long",
+ * and declaring that here means the generator can compute -- before any data
+ * exists -- the ceiling on how many time series a probe can create. That number
+ * is the one property of this contract with no local symptom when it is wrong,
+ * which is why it is computed rather than asserted. See the CcRecMetric block.
+ *
  * Evolution rule (as in Cap'n Proto and SBE; it was applied by hand before it was enforced):
  * APPEND-ONLY -- existing entries never move and never change type; new fields go
  * at the end and read as zero on an older producer. The table order IS the record
@@ -60,6 +67,47 @@ typedef struct {
   int         align;   /* _Alignof(element), bytes */
   const char *note;    /* provenance / meaning -- surfaced by S3 */
   const char *expose;  /* S4: Ruby-visible type ("int" | "str") or NULL */
+  /* The `filter_by` key that selects on THE SAME VALUE in the kernel, or NULL
+   * when no kernel key does.
+   *
+   * A userspace consumer filter (`keep_if :<chan>, <prop>: :eq`) and the
+   * in-kernel common filter can express the same narrowing -- but only where the
+   * record's field really is the value `bpf_get_current_*()` returns in the
+   * handler that emits it. Where it is, the kernel's is strictly better (the
+   * record is never created, so the ringbuf, the drain and the send are all
+   * saved) and declaring the correspondence here is what lets the consumer
+   * transform refuse the redundant spelling and name the replacement.
+   *
+   * WHY THIS IS PER FIELD AND NOT PER KEY NAME. "The record's pid" and "the
+   * current task's pid" are the same number in some channels and different in
+   * others, and the difference is invisible from the field's name:
+   *
+   *   dns    -- every producer (emit_dns, dns_emit) fills pid/comm/cgid from
+   *             bpf_get_current_*() in the same task the record is about, and
+   *             the request/response pair runs in that one task. Same value.
+   *   conn   -- sock_owner_set OVERWRITES pid/comm/cgid with the stashed
+   *             connecting task, precisely because the ESTABLISHED transition
+   *             fires in softirq where the current task is swapper/0. The kernel
+   *             key would test swapper.
+   *   l7 /   -- filled from the entry stashed at send time, correlated by sock.
+   *   http      The emit runs in the receiving path; the record is about the
+   *             earlier one.
+   *   offcpu -- the emit does read the current task, but the channel needs its
+   *             sched_switch handler to see EVERY task: offcpu_account keys on
+   *             the tracepoint's prev_pid/next_pid, so gating that handler on
+   *             the current task would silently drop the "coming back" half of
+   *             the accounting (current is still prev when next is scheduled in).
+   *
+   * So a channel that correlates across tasks -- which is most of them -- has no
+   * kernel equivalent for its identity fields, and that is a fact about its
+   * producers, not about the word "pid". Declaring it is the only way the
+   * affordance surface can answer "why is this filter in userspace" with
+   * something other than prose.
+   *
+   * The value must be one of CommonFilter::KEYS (src/spinel_ebpf/common_filter.rb);
+   * tests/spinel_ebpf/keep_filter_test.rb checks the join, since the generator
+   * has no view of the Ruby-side vocabulary. */
+  const char *kfilter;
 } CcRecField;
 
 /* --- Derived properties ---
@@ -117,11 +165,326 @@ typedef struct {
   const char *name;      /* Ruby-visible property name (ev.<name>) */
   const char *expose;    /* "int" | "str" (same meaning as CcRecField.expose) */
   const char *from;      /* record field the derivation reads */
-  const char *impl;      /* C function that performs it (defined in the runtime) */
+  const char *impl;      /* C function that performs it (defined in the runtime), or,
+                          * for impl_form "code_to_name", the id of a CcValueMap below */
   const char *impl_form; /* its calling convention; see tools/gen_record_mirror.c */
   int         cap;       /* output buffer size for a "str" derivation; 0 for "int" */
   const char *note;      /* provenance / caveats -- surfaced to Ruby */
 } CcRecDerived;
+
+/* --- Type-driven derivations: a value map ---------------------------------
+ *
+ * Everything above declares a derivation's EXISTENCE and leaves its body in C,
+ * because a DNS QNAME walk or an HTTP request-line parse is domain logic. One
+ * shape of derivation is not domain logic at all: a CODE -- a value drawn from a
+ * closed set whose members have names. `oldstate == 2` is TCP_SYN_SENT and
+ * nothing else; there is no algorithm, only the table. Written as C, that table
+ * is a hand-typed switch that nothing checks, which is how the codegen's own
+ * TCP_STATE_* list came to be three enumerators behind the kernel, measured
+ * against its BTF, without anybody noticing: a missing name does not fail, it
+ * just stops naming.
+ *
+ * So for codes the declaration IS the implementation. A CcValueMap is the whole
+ * mapping; tools/gen_record_mirror.c generates the lookup function, and a
+ * derivation opts in by naming the map in `impl` with impl_form "code_to_name".
+ * That is the layer this adds: a code gets a name because its TYPE was
+ * declared, not because somebody wrote the switch again.
+ *
+ * WHY EVERY MAP MUST DECLARE ITS AUTHORITY, AND WHY ONE IS REFUSED OUTRIGHT
+ *
+ * A wrong entry in such a table cannot be caught downstream. `error=2` rendered
+ * as "EPERM" is a plausible errno; `oldstate=2` rendered as "SYN_RECV" is a
+ * plausible state. This is the same silent-failure class the kernel-side string
+ * and namespace builtins attack -- so the map does not just carry names, it
+ * carries where the names come FROM, in a form a test can go and check
+ * (tests/spinel_ebpf/value_map_test.rb reads `btf_*` and asks the running
+ * kernel's BTF).
+ *
+ * `arch_invariant` is the harder half, and it is why the generator has a refusal
+ * rather than a warning. A syscall number is a code with names, and it is the
+ * one shape of code that MUST NOT be baked into a committed artifact: measured
+ * with `ausyscall`, the number 2 is `io_submit` on aarch64, `open` on x86_64 and
+ * `fork` on i386/arm/ppc/s390x. All four are real syscalls, so a table baked on
+ * one architecture renders a plausible wrong name on the next -- exactly the
+ * failure this file exists to make inexpressible, and exactly the seam the
+ * portability contract has to name. A map that cannot say `arch_invariant = 1`
+ * therefore does not compile: it must either be resolved at RUNTIME on the
+ * machine that produced the record (glibc's strerrorname_np / sigabbrev_np are
+ * that answer for errno and signal, and were measured present here) or carry the
+ * architecture in the contract. */
+typedef struct {
+  long        value;
+  const char *name;   /* the name this value has -- never a guess, never a range */
+} CcValueName;
+
+typedef struct {
+  const char *id;             /* stable map id, named by a derivation's `impl` */
+  const char *authority;      /* where the truth lives, in prose (surfaced to Ruby) */
+  /* Rendering for a value the table does not name. Either a plain literal (a
+   * closed reading whose fallback is itself a documented answer, like conn's
+   * "other") or a format with EXACTLY ONE `%ld`, which keeps the number the
+   * reader would otherwise lose. The generator rejects any other conversion:
+   * an unnamed code must not come out looking like a name. */
+  const char *unknown;
+  /* 1 = one table for every architecture spinel-ebpf targets. 0 does not compile
+   * (see the block comment above); the field exists so that the refusal is a
+   * declared property rather than a convention nobody wrote down. */
+  int         arch_invariant;
+  /* Machine-checkable authority. `btf_anchor` names one enumerator of the kernel
+   * BTF enum this map is drawn from and `btf_prefix` is what gets stripped from
+   * the enumerator to yield the map's name. `btf_mode`:
+   *   "names" -- the map IS the enum: every enumerator (minus `btf_omit`) must
+   *              appear here with the same value and the stripped name
+   *   "keys"  -- only the VALUES are the enum's; the names are this project's own
+   *              reading of it, so the check is that no key is a number the
+   *              kernel never produces
+   *   NULL    -- not drawn from a kernel enum (no machine check is possible) */
+  const char *btf_mode;
+  const char *btf_anchor;
+  const char *btf_prefix;
+  const char *btf_omit;       /* space-separated enumerators legitimately absent */
+  const CcValueName *values;
+  int         nvalues;
+  const char *note;
+} CcValueMap;
+
+/* --- tcp_state: the kernel's TCP state enum, by name ----------------------
+ *
+ * The consumer is conn's `oldstate`, which reaches userspace as a bare number.
+ * The only thing the span used to say about it was spnl.conn.direction, and
+ * that reading answers one question ("who opened this?") by collapsing ten of the
+ * thirteen states into "other" -- so a record from a probe that does not filter
+ * on ESTABLISHED left the process with its state erased. This map is the other
+ * reading: the state's own name, which is what the kernel calls it.
+ *
+ * TCP_MAX_STATES is omitted because it is the enum's bound, not a state; a sock
+ * is never in it. Everything else is named, including TCP_BOUND_INACTIVE (13),
+ * which the codegen's hand-typed TCP_STATE_* table still does not know about
+ * -- the difference between a table nothing checks and one that is checked
+ * against the kernel it describes. */
+static const CcValueName cc_valmap_tcp_state_values[] = {
+  {  1, "ESTABLISHED"    }, {  2, "SYN_SENT"    }, {  3, "SYN_RECV"  },
+  {  4, "FIN_WAIT1"      }, {  5, "FIN_WAIT2"   }, {  6, "TIME_WAIT" },
+  {  7, "CLOSE"          }, {  8, "CLOSE_WAIT"  }, {  9, "LAST_ACK"  },
+  { 10, "LISTEN"         }, { 11, "CLOSING"     }, { 12, "NEW_SYN_RECV" },
+  { 13, "BOUND_INACTIVE" },
+};
+
+static const CcValueMap cc_valmap_tcp_state = {
+  .id        = "tcp_state",
+  .authority = "the kernel's own TCP state enum (include/net/tcp_states.h; the same values are "
+               "frozen into the uapi enum BPF_TCP_* in include/uapi/linux/bpf.h). Both are in "
+               "vmlinux BTF, so the declaration below is checked against the running kernel "
+               "rather than trusted",
+  /* A state this kernel has and the table does not name keeps its number rather
+   * than borrowing a neighbour's name: a newer kernel appends states (13 is
+   * itself an appended one), and "an unnamed 14" is true where "CLOSING" is not. */
+  .unknown        = "unnamed(%ld)",
+  /* TCP state numbering lives in one generic header. No architecture defines its
+   * own -- unlike the syscall table, which is why that one is refused. */
+  .arch_invariant = 1,
+  .btf_mode       = "names",
+  .btf_anchor     = "TCP_ESTABLISHED",
+  .btf_prefix     = "TCP_",
+  .btf_omit       = "TCP_MAX_STATES",
+  .values         = cc_valmap_tcp_state_values,
+  .nvalues        = (int)(sizeof cc_valmap_tcp_state_values / sizeof cc_valmap_tcp_state_values[0]),
+  .note           = "the state a sock was in, spelled as the kernel spells it (without the TCP_ "
+                    "prefix, which is the enum's namespace and not part of the name of the state)",
+};
+
+/* --- conn_direction: this project's READING of the same enum ---------------
+ *
+ * The "who opened this connection" answer, which used to be three lines of C
+ * in otlp_agent.c (`oldstate == 2 ? "active" : oldstate == 3 ? "passive" :
+ * "other"`) with the two numbers written as numbers. As a declared map the same
+ * output is byte-identical, but the two keys are now checkable: `btf_mode =
+ * "keys"` makes the test assert that 2 and 3 are values the kernel's TCP state
+ * enum actually produces, which is the half of "did I write the right number"
+ * that a name map can decide on its own.
+ *
+ * The names are NOT the kernel's (the kernel has no notion of active/passive), so
+ * this is deliberately a different mode from tcp_state: what is borrowed from the
+ * kernel is the key space, not the vocabulary. Its "other" fallback stays a plain
+ * literal -- it is a published attribute value with a documented meaning ("some
+ * transition that is neither a client nor a server opening"), not a value the
+ * table failed to name. That is why both readings are now published: `direction`
+ * answers the question it was built for and `tcp_state` keeps the fact. */
+static const CcValueName cc_valmap_conn_direction_values[] = {
+  { 2, "active"  },   /* TCP_SYN_SENT -> ESTABLISHED: we opened it (client) */
+  { 3, "passive" },   /* TCP_SYN_RECV -> ESTABLISHED: we accepted it (server) */
+};
+
+static const CcValueMap cc_valmap_conn_direction = {
+  .id             = "conn_direction",
+  .authority      = "this project's reading of the pre-ESTABLISHED TCP state. The names are this "
+                    "project's (semconv has no connection-direction key); only the two keys "
+                    "come from the kernel enum, and those are checked against its BTF",
+  .unknown        = "other",
+  .arch_invariant = 1,
+  .btf_mode       = "keys",
+  .btf_anchor     = "TCP_ESTABLISHED",
+  .btf_prefix     = "TCP_",
+  .btf_omit       = "",
+  .values         = cc_valmap_conn_direction_values,
+  .nvalues        = (int)(sizeof cc_valmap_conn_direction_values / sizeof cc_valmap_conn_direction_values[0]),
+  .note           = "\"active\" = we initiated, \"passive\" = we accepted, \"other\" = a transition "
+                    "into ESTABLISHED from neither (and, on a probe that emits every transition, "
+                    "any transition at all -- which is what spnl.conn.tcp_state is for)",
+};
+
+/* Every declared value map. Same shape as cc_rec_all() below: the generator, the
+ * affordance surface and the authority test all walk one registry. */
+static inline const CcValueMap *const *cc_valmap_all(int *n) {
+  static const CcValueMap *const v[] = { &cc_valmap_tcp_state, &cc_valmap_conn_direction };
+  *n = (int)(sizeof v / sizeof v[0]);
+  return v;
+}
+
+/* --- Metrics from a record channel ----------------------------------------
+ *
+ * A channel already declares what one record MEANS as a span (CcEgressSpan). A
+ * span is the right shape for "what happened once"; it is the wrong shape for
+ * "how often, and how long" across millions of records. That second reading is a
+ * metric, and until now the only way to get one was to write the aggregation in
+ * C by hand (otlp_httpspan.c does exactly that for the native HTTP server).
+ *
+ * THE TRAP THIS DECLARATION EXISTS TO CLOSE
+ *
+ * A metric's cost is not its value, it is its LABELS: one time series per
+ * distinct combination, forever, in the backend. Put `url.path` on a metric and
+ * a probe that was fine in test bankrupts a tenant in production -- and it does
+ * so at exit 0, with every span still correct, because nothing in the process
+ * ever sees the bill. That is the same shape as a ring-full sample the kernel
+ * dropped, or a map that silently filled: a loss with no local symptom.
+ *
+ * The obvious defences do not work, and both were measured:
+ *
+ *   - "measure it first" cannot establish a label. Over one workload `pid`
+ *     showed 1 distinct value and looked as safe as anything here; over a second
+ *     workload -- same probe, same field, 30 client processes instead of 1 -- it
+ *     showed 30. Measurement refutes a label (a candidate that grows 1:1 with
+ *     traffic is settled: `url.path` did, and so did `dport`, which is a __u16
+ *     and still reached 101 distinct values in 200 records because the peer of an
+ *     inbound record is an ephemeral port). It cannot certify one, because the
+ *     next workload is not the one that was measured.
+ *   - "let the author declare a bound" is a claim about data nobody has seen.
+ *
+ * So the rule here is neither: a label must have a bound the GENERATOR can
+ * compute from a declaration, before any data exists, and there are exactly two
+ * ways to give it one:
+ *
+ *   (1) `values` + `fallback` -- the permitted set is written here and ENFORCED
+ *       when the metric is emitted: a value outside the set is emitted as
+ *       `fallback`, never as itself. The bound is then a fact about the METRIC
+ *       (nvalues + 1), not a claim about the data, and it holds for traffic
+ *       nobody has seen. This is also what OpenTelemetry itself does for
+ *       http.request.method, whose registry value is `_OTHER` for any method
+ *       outside the known set -- same problem, same answer.
+ *   (2) a `code_to_name` derivation whose value map renders unnamed codes
+ *       as a LITERAL. Then the map is already a closed set and the bound is its
+ *       size + 1, computed from the map. A map whose `unknown` carries `%ld` is
+ *       NOT closed -- it renders each unnamed code as its own string -- so it is
+ *       refused here even though it is perfectly good for a span attribute.
+ *       (`tcp_state` is exactly that map: a fine span attribute, not a label.)
+ *
+ * Anything else does not compile. `url.path`, `dns.question.name`, `peer`,
+ * `comm`, `pid`, `cgid` have no declaration that bounds them, so they cannot be
+ * named as a label at all -- the refusal names the property and says where the
+ * value is still available, which is the span (`ev.path` is not lost; it just
+ * is not a label). The generator then multiplies the label bounds into a series
+ * bound per metric, sums them, and refuses the whole file if the total exceeds
+ * the runtime's series capacity -- so a declaration that could not be exported
+ * is not expressible, and the accumulator array cannot overflow at runtime
+ * because the declaration already proved it cannot.
+ *
+ * RELATION TO THE SPAN. A metric never invents a value. `value_from` and
+ * every label's `from` must name a PUBLISHED property of the channel -- the same
+ * field or derivation the typed consumer reads and the span builder calls -- so
+ * the number in the histogram is the number in the span, by construction and for
+ * the same reason `ev.srtt_us` and net.peer.srtt_us cannot drift. Where a
+ * label's declared set collapses a value to `fallback`, the span still carries
+ * the exact one: the metric is a declared COARSENING of the span, and the
+ * affordance surface prints it as such rather than leaving a reader to discover
+ * that `_OTHER` in a dashboard. */
+typedef struct {
+  const char *key;        /* attribute key, verbatim as emitted */
+  const char *from;       /* published property of the channel that supplies it */
+  const char *stability;  /* "semconv" = OTel registry key; "spinel" = project-specific */
+  /* Bound, route (1): the permitted set, enforced at emit time. NULL = route (2),
+   * in which case `from` must be a code_to_name derivation over a closed map. */
+  const char *const *values;
+  int         nvalues;
+  const char *fallback;   /* what a value outside `values` is emitted as */
+  const char *note;
+} CcMetricLabel;
+
+/* Explicit histogram bucket boundaries, declared once and shared. Bucket layout
+ * is an interop decision, not a local one: a consumer that re-buckets loses the
+ * ability to compare, so the boundaries live here with the authority that chose
+ * them (OBI's were adopted for exactly that reason, and this is that same array,
+ * now with one author instead of two). */
+typedef struct {
+  const char   *id;
+  const char   *unit;       /* the unit the boundaries below are expressed in */
+  const char   *authority;
+  const double *values;     /* ascending */
+  int           nvalues;
+  const char   *note;
+} CcBoundsSet;
+
+/* OBI's default duration boundaries (pkg/export/bucket.go), in seconds -- the
+ * same 15 numbers http.server.request.duration was aligned to so that a
+ * spinel-ebpf probe and an OBI agent land in comparable buckets. Declared here so
+ * that a second duration metric cannot quietly choose a different ruler; the
+ * runtime's own copy in otlp_httpspan.c is now this array. */
+static const double cc_bounds_otel_duration_s_values[] =
+  { 0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 };
+
+static const CcBoundsSet cc_bounds_otel_duration_s = {
+  .id        = "otel_duration_s",
+  .unit      = "s",
+  .authority = "OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the "
+               "default duration buckets its HTTP/RPC duration metrics use. They were adopted for "
+               "http.server.request.duration so that the two agents' histograms are comparable, and "
+               "the array itself is now the declaration both sides read",
+  .values    = cc_bounds_otel_duration_s_values,
+  .nvalues   = (int)(sizeof cc_bounds_otel_duration_s_values / sizeof cc_bounds_otel_duration_s_values[0]),
+  .note      = "seconds. A record carries nanoseconds, so a metric over a *_ns property declares "
+               "value_unit \"ns\" and the generator emits the ns -> s conversion; the pair of units "
+               "is checked against a closed list, so an unconverted nanosecond value cannot be "
+               "silently bucketed against second boundaries",
+};
+
+static inline const CcBoundsSet *const *cc_bounds_all(int *n) {
+  static const CcBoundsSet *const v[] = { &cc_bounds_otel_duration_s };
+  *n = (int)(sizeof v / sizeof v[0]);
+  return v;
+}
+
+/* One metric derived from a channel's records.
+ *
+ * `kind`:
+ *   "counter"   -- monotonic Sum of records matching the label combination. No
+ *                  value is read; `value_from`/`value_unit`/`bounds` must be NULL.
+ *   "histogram" -- explicit-bounds Histogram of `value_from` over `bounds`. Its
+ *                  data points also carry `count`, so a histogram already answers
+ *                  the rate question and a channel does not need both.
+ * Both spellings exist because both are exportable: the runtime encodes a Sum and
+ * an explicit-bounds Histogram, in protobuf and in JSON. A third kind would have
+ * to bring its encoder with it -- the generator refuses any other word. */
+typedef struct {
+  const char *id;          /* stable id within the channel (affordance + gate key) */
+  const char *name;        /* OTel metric name, verbatim as emitted */
+  const char *kind;        /* "counter" | "histogram" */
+  const char *unit;        /* UCUM unit of the metric as exported */
+  const char *value_from;  /* histogram: published int property supplying the value */
+  const char *value_unit;  /* histogram: the unit that property is already in */
+  const char *bounds;      /* histogram: id of a CcBoundsSet */
+  const CcMetricLabel *labels;
+  int         nlabels;
+  const char *note;
+} CcRecMetric;
 
 /* --- The semantic half of the contract ---
  *
@@ -189,6 +552,12 @@ typedef struct {
   /* S4: properties a typed consumer sees that are not plain fields. */
   const CcRecDerived *derived;
   int                 nderived;
+  /* Metrics this channel's records aggregate into. Every `from` names a
+   * published property, so a channel declaring metrics must also publish its
+   * typed consumer (`typed_consumer = 1`); the generator enforces that rather
+   * than letting a metric read a property nobody can see. */
+  const CcRecMetric  *metrics;
+  int                 nmetrics;
   /* S4 opt-in: 1 = publish the typed-consumer contract, so that
    * `on_emit :<id> do |ev|` lowers to the generated accessors. 0 = the channel is
    * declarative for S1-S3 only and `on_emit :<id>` keeps its named-event
@@ -208,12 +577,12 @@ typedef struct {
  * the QNAME label walk that turns it into `dns.question.name` runs in userspace
  * (an in-kernel walk blows up verifier state --). */
 static const CcRecField cc_rec_dns_fields[] = {
-  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",         "__u32",                 0,  4, 4, "producer tgid (init-ns)", "int" },
-  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str" },
-  { "raw",         "unsigned char",        64,  1, 1, "first 64B of the DNS payload; QNAME parsed in userspace", NULL },
-  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int" },
-  { "duration_ns", "__u64",                 0,  8, 8, "resolution RTT; 0 = query-only", "int" },
+  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",         "__u32",                 0,  4, 4, "producer tgid (init-ns)", "int", "pid" },
+  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str", "comm" },
+  { "raw",         "unsigned char",        64,  1, 1, "first 64B of the DNS payload; QNAME parsed in userspace", NULL, NULL },
+  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", "cgroup_id" },
+  { "duration_ns", "__u64",                 0,  8, 8, "resolution RTT; 0 = query-only", "int", NULL },
 };
 
 /* The one derived property of a DNS record: the dotted hostname. `raw` holds
@@ -234,7 +603,7 @@ static const CcRecDerived cc_rec_dns_derived[] = {
  * (duration_ns stays 0) and dns_emit adds the resolution RTT. */
 static const char *const cc_rec_dns_producers[] = { "emit_dns", "dns_emit" };
 
-/* What spnl_otlp_dns_span_push makes of one record. Mirrors — and now *feeds* —
+/* What spnl_otlp_dns_span_push makes of one record. Mirrors -- and now *feeds* --
  * spnl_otlp_dns_span_push_obj() in src/runtime/otlp/otlp_agent.c. */
 static const CcEgressAttr cc_rec_dns_egress_attrs[] = {
   { "dns.question.name", "raw[64] -> QNAME (length-prefixed labels walked in userspace)",
@@ -287,17 +656,17 @@ static const CcRecSchema cc_rec_dns = {
  * two u64 halves, because a 5-argument BPF handler could not carry a 16-byte
  * address until the caps-struct change). Append-only throughout. */
 static const CcRecField cc_rec_conn_fields[] = {
-  { "hdr",       "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",       "__u32",                 0,  4, 4, "producer tgid; sock_owner_set restores it when the ESTABLISHED transition fires in softirq", "int" },
-  { "comm",      "char",                 16,  1, 1, "bpf_get_current_comm -- the connecting process, not the idle task", "str" },
-  { "daddr",     "__u32",                 0,  4, 4, "remote IPv4 address, network byte order (valid when family == AF_INET)", NULL },
-  { "dport",     "__u16",                 0,  2, 2, "remote port, host byte order", "int" },
-  { "family",    "__u16",                 0,  2, 2, "address family (2 = AF_INET, 10 = AF_INET6)", NULL },
-  { "srtt_us",   "__s64",                 0,  8, 8, "tcp_sock->srtt_us via CO-RE, on the wire in the kernel's 1/8 us scale. Not exposed raw: the us value is the derived property ev.srtt_us, which is the same function's output as the span attribute net.peer.srtt_us", NULL },
-  { "cgid",      "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int" },
-  { "oldstate",  "__u32",                 0,  4, 4, "TCP state before ESTABLISHED (2 = SYN_SENT -> active, 3 = SYN_RECV -> passive)", NULL },
-  { "daddr6_hi", "__u64",                 0,  8, 8, "remote IPv6 address, bytes 0..7 (network order)", NULL },
-  { "daddr6_lo", "__u64",                 0,  8, 8, "remote IPv6 address, bytes 8..15 (network order)", NULL },
+  { "hdr",       "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",       "__u32",                 0,  4, 4, "producer tgid; sock_owner_set restores it when the ESTABLISHED transition fires in softirq", "int", NULL },
+  { "comm",      "char",                 16,  1, 1, "bpf_get_current_comm -- the connecting process, not the idle task", "str", NULL },
+  { "daddr",     "__u32",                 0,  4, 4, "remote IPv4 address, network byte order (valid when family == AF_INET)", NULL, NULL },
+  { "dport",     "__u16",                 0,  2, 2, "remote port, host byte order", "int", NULL },
+  { "family",    "__u16",                 0,  2, 2, "address family (2 = AF_INET, 10 = AF_INET6)", NULL, NULL },
+  { "srtt_us",   "__s64",                 0,  8, 8, "tcp_sock->srtt_us via CO-RE, on the wire in the kernel's 1/8 us scale. Not exposed raw: the us value is the derived property ev.srtt_us, which is the same function's output as the span attribute net.peer.srtt_us", NULL, NULL },
+  { "cgid",      "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", NULL },
+  { "oldstate",  "__u32",                 0,  4, 4, "TCP state before ESTABLISHED (2 = SYN_SENT -> active, 3 = SYN_RECV -> passive)", NULL, NULL },
+  { "daddr6_hi", "__u64",                 0,  8, 8, "remote IPv6 address, bytes 0..7 (network order)", NULL, NULL },
+  { "daddr6_lo", "__u64",                 0,  8, 8, "remote IPv6 address, bytes 8..15 (network order)", NULL, NULL },
 };
 
 /* The conn record's derived properties, and the reason this channel
@@ -325,15 +694,59 @@ static const CcRecDerived cc_rec_conn_derived[] = {
     "NOT bracketed (\"::1:19377\"), because that is how the span name has spelled it since. "
     "cap 64 >= the longest such string: inet_ntop writes at most INET6_ADDRSTRLEN-1 = 45 characters, "
     "plus \":\" and 5 port digits and the NUL = 52" },
-  { "direction", "str", "oldstate", "spnl_conn_direction", "record_to_str", 16,
+  { "direction", "str", "oldstate", "conn_direction", "code_to_name", 16,
     "\"active\" (we initiated: SYN_SENT -> ESTABLISHED), \"passive\" (we accepted: SYN_RECV -> "
     "ESTABLISHED), \"other\". Byte-identical to the span attribute spnl.conn.direction (same function). "
-    "cap 16 >= the longest of that closed set of literals (\"passive\", 7 + NUL)" },
+    "cap 16 >= the longest of that closed set of literals (\"passive\", 7 + NUL). "
+    "The three-line switch this used to be is now the declared value map `conn_direction`, so "
+    "the two state numbers it keys on are checked against the kernel's enum instead of trusted" },
+  { "tcp_state", "str", "oldstate", "tcp_state", "code_to_name", 24,
+    "the pre-transition TCP state under its own name (\"SYN_SENT\", \"CLOSE\", ...) = the span "
+    "attribute spnl.conn.tcp_state, from the declared value map `tcp_state` checked against the "
+    "kernel's BTF enum. `direction` answers who opened the connection and collapses ten of the "
+    "thirteen states into \"other\"; this keeps the state. A state this kernel has but the map does "
+    "not name reads as \"unnamed(<n>)\" -- the number survives rather than borrowing a name. "
+    "cap 24 >= both bounds, and unlike every other cap in this file the generator COMPUTES them "
+    "rather than taking the note's word for it: the longest name (\"BOUND_INACTIVE\" = 14 + NUL) and "
+    "the widest unnamed rendering of the source field (`oldstate` is a __u32, so "
+    "\"unnamed(4294967295)\" = 19 + NUL). A closed set is the one derivation whose bound is a fact" },
   { "srtt_us", "int", "srtt_us (the kernel's 1/8 us scale)", "spnl_conn_srtt_us", "record_to_int", 0,
     "smoothed RTT in MICROSECONDS -- the same value the span attribute net.peer.srtt_us "
     "carries, because both are this one function's output. The >>3 that turns the kernel's 1/8 us "
     "into us is layer 2's business, so a consumer never divides by 8. Note it is the L4 smoothed RTT "
     "(a property of the connection), not an L7 round trip" },
+};
+
+/* --- conn's metric: route (2), a bound taken from an existing value map -------
+ *
+ * `direction` is a code_to_name derivation over `conn_direction`, whose unknown
+ * rendering is the plain literal "other" -- so the set of strings that derivation
+ * can EVER return is {active, passive, other} and the generator can count it: 3.
+ * Nothing is declared twice here; the label just names the property, and the
+ * value map (already checked against the kernel's BTF) supplies the bound.
+ *
+ * The contrast worth keeping in view is `tcp_state`, the sibling derivation over
+ * the same field. Its map renders an unnamed code as "unnamed(%ld)", which is the
+ * right answer for a span (the number survives rather than borrowing a
+ * name) and disqualifies it as a label, because "closed except for a counter" is
+ * not closed. Same record, same byte, two readings, and only one of them is a
+ * safe label -- which is why this is a property of the DECLARATION and not of
+ * the field. */
+static const CcMetricLabel cc_metric_conn_count_labels[] = {
+  { "spnl.conn.direction", "direction", "spinel", NULL, 0, NULL,
+    "the same string the span attribute spnl.conn.direction carries (same value map, "
+    "same function). Bound 3 = the map's two names plus its literal fallback \"other\", computed "
+    "from `conn_direction` rather than declared here" },
+};
+
+static const CcRecMetric cc_rec_conn_metrics[] = {
+  { "count", "spnl.conn.count", "counter", "{connection}", NULL, NULL, NULL,
+    cc_metric_conn_count_labels,
+    (int)(sizeof cc_metric_conn_count_labels / sizeof cc_metric_conn_count_labels[0]),
+    "how many connect records the probe emitted, split by who opened the connection. A "
+    "counter rather than a histogram because this channel has no duration -- a connect is a point "
+    "event and its span duration is 0. semconv has no key for \"connections a probe "
+    "observed\", so the name is a project key, for the same reason spnl.conn.direction is" },
 };
 
 static const char *const cc_rec_conn_producers[] = { "emit_connect" };
@@ -350,7 +763,15 @@ static const CcEgressAttr cc_rec_conn_egress_attrs[] = {
     "semconv has no smoothed-RTT key, so this is a project key; the value is L4 srtt, not an L7 "
     "round trip. the >>3 has one author, shared with the typed consumer" },
   { "spnl.conn.direction", "oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other)",
-    "spinel", "always", "semconv has no connection-direction key" },
+    "spinel", "always",
+    "semconv has no connection-direction key. The mapping is the declared value map "
+    "`conn_direction`, shared with the typed consumer's ev.direction" },
+  { "spnl.conn.tcp_state", "oldstate -> value map `tcp_state` (the kernel's enum, by name)",
+    "spinel", "always",
+    "semconv has no TCP-state key. spnl.conn.direction answers who opened the connection and "
+    "says \"other\" for every state that is neither SYN_SENT nor SYN_RECV -- which is most of them on "
+    "a probe that emits transitions other than ESTABLISHED. This is the same byte read as the state "
+    "it is, and it is the same function's output as the typed consumer's ev.tcp_state" },
   { "process.executable.name", "comm[16]", "semconv", "comm non-empty",
     "recovered from the sock->owner map when the transition fires in softirq context" },
 };
@@ -386,6 +807,8 @@ static const CcRecSchema cc_rec_conn = {
   .egress        = &cc_rec_conn_egress,
   .derived       = cc_rec_conn_derived,
   .nderived      = (int)(sizeof cc_rec_conn_derived / sizeof cc_rec_conn_derived[0]),
+  .metrics       = cc_rec_conn_metrics,
+  .nmetrics      = (int)(sizeof cc_rec_conn_metrics / sizeof cc_rec_conn_metrics[0]),
   /* Publishes a typed consumer. This channel came last because `peer` has to be
    * derived from the record as a whole rather than from one field, and that form of
    * derivation had to exist first.
@@ -403,15 +826,15 @@ static const CcRecSchema cc_rec_conn = {
  * Protocol-independent send->recv latency: unlike the connect record (duration 0)
  * the duration IS the payload here. Wire history: -> appended cgid. */
 static const CcRecField cc_rec_l7_fields[] = {
-  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",         "__u32",                 0,  4, 4, "producer tgid (the process that sent the request)", "int" },
-  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str" },
-  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order", NULL },
-  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order", "int" },
-  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET; IPv6 addresses are not carried on this channel)", NULL },
-  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the first send on this socket (span start)", NULL },
-  { "duration_ns", "__u64",                 0,  8, 8, "send -> response-visible round trip (tcp_cleanup_rbuf), = span duration", "int" },
-  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int" },
+  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",         "__u32",                 0,  4, 4, "producer tgid (the process that sent the request)", "int", NULL },
+  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str", NULL },
+  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order", NULL, NULL },
+  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order", "int", NULL },
+  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET; IPv6 addresses are not carried on this channel)", NULL, NULL },
+  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the first send on this socket (span start)", NULL, NULL },
+  { "duration_ns", "__u64",                 0,  8, 8, "send -> response-visible round trip (tcp_cleanup_rbuf), = span duration", "int", NULL },
+  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", NULL },
 };
 
 static const char *const cc_rec_l7_producers[] = { "emit_l7" };
@@ -473,17 +896,17 @@ static const CcRecSchema cc_rec_l7 = {
  * bytes read from an SSL_read/SSL_write plaintext buffer, where there is no sock
  * -> daddr/dport stay 0 and the consumer marks url.scheme=https). */
 static const CcRecField cc_rec_http_fields[] = {
-  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",         "__u32",                 0,  4, 4, "producer tgid", "int" },
-  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str" },
-  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order; 0 on the TLS path (no sock)", NULL },
-  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order; 0 on the TLS path", "int" },
-  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET)", NULL },
-  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the request send (span start)", NULL },
-  { "duration_ns", "__u64",                 0,  8, 8, "request -> response round trip, = span duration", "int" },
-  { "req",         "unsigned char",        64,  1, 1, "first 64B of the request; \"METHOD path HTTP/x\" parsed in userspace", NULL },
-  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the response; \"HTTP/1.1 NNN\" status parsed in userspace", NULL },
-  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int" },
+  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",         "__u32",                 0,  4, 4, "producer tgid", "int", NULL },
+  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str", NULL },
+  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order; 0 on the TLS path (no sock)", NULL, NULL },
+  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order; 0 on the TLS path", "int", NULL },
+  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET)", NULL, NULL },
+  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the request send (span start)", NULL, NULL },
+  { "duration_ns", "__u64",                 0,  8, 8, "request -> response round trip, = span duration", "int", NULL },
+  { "req",         "unsigned char",        64,  1, 1, "first 64B of the request; \"METHOD path HTTP/x\" parsed in userspace", NULL, NULL },
+  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the response; \"HTTP/1.1 NNN\" status parsed in userspace", NULL, NULL },
+  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", NULL },
 };
 
 /* The HTTP record's derived properties: the three L7 values a consumer
@@ -509,6 +932,77 @@ static const CcRecDerived cc_rec_http_derived[] = {
   { "status", "int", "resp", "spnl_http_status", "bytes_to_int", 0,
     "status digits of the response head; 0 when the head does not parse. "
     ">= 500 is what sets Span.status = ERROR on the egress side" },
+};
+
+/* --- http's metric: route (1), a bound the declaration ENFORCES ---------------
+ *
+ * Both labels here are properties whose value set is, in the data, not closed at
+ * all: `method` is the first token of a 64-byte bounded copy of the wire (the
+ * kernel-side filter only inspects 4 bytes, so a head with no space at all
+ * reaches userspace and the token is then the whole field), and `status` is up
+ * to three digits, i.e. 0..999. Neither could be a label on the strength of what
+ * the data happens to contain.
+ *
+ * They are labels because the SET IS WRITTEN HERE and the emitter enforces it:
+ * anything outside it is emitted as `_OTHER`, so however hostile the traffic,
+ * this metric has at most 10 x 18 = 180 series. The bound is a fact about the
+ * metric rather than a hope about the wire -- which is the whole difference
+ * between this and "we looked and it seemed fine".
+ *
+ * `_OTHER` is not invented here: it is the value OpenTelemetry's own registry
+ * gives http.request.method for any method outside its known set, which is the
+ * same problem with the same answer. Reusing the spelling for `status` keeps one
+ * word for one meaning ("outside the declared set"), following the rule that a
+ * standard spelling is for when you mean the standard thing.
+ *
+ * WHY THE NAME IS PROJECT-SCOPED. The buckets, the unit and both attribute keys
+ * are the standard ones (the OBI-aligned boundaries; semconv's
+ * http.request.method / http.response.status_code), so these histograms are
+ * directly comparable with an OBI or SDK-produced one. The NAME is not
+ * http.client.request.duration, because a consumer reading that name is entitled
+ * to assume the attribute values are the real ones -- and here two of them are
+ * declared coarsenings and the peer dimensions are absent by refusal. Taking the
+ * standard name for a deliberately reduced metric is the misleading half of the
+ * rule that says to take it when you mean it. */
+static const char *const cc_metric_http_method_values[] = {
+  /* OpenTelemetry's known-method set (semconv http.request.method registry). */
+  "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+};
+
+static const char *const cc_metric_http_status_values[] = {
+  "200", "201", "202", "204", "301", "302", "304",
+  "400", "401", "403", "404", "409", "429",
+  "500", "502", "503", "504",
+};
+
+static const CcMetricLabel cc_metric_http_duration_labels[] = {
+  { "http.request.method", "method", "semconv",
+    cc_metric_http_method_values,
+    (int)(sizeof cc_metric_http_method_values / sizeof cc_metric_http_method_values[0]),
+    "_OTHER",
+    "the same token spnl_http_method() gives the span attribute http.request.method, but "
+    "projected onto OTel's known-method set. A request whose method is not in that set still gets "
+    "a span carrying the exact token; only the metric label collapses. Bound 10 = 9 methods + _OTHER" },
+  { "http.response.status_code", "status", "semconv",
+    cc_metric_http_status_values,
+    (int)(sizeof cc_metric_http_status_values / sizeof cc_metric_http_status_values[0]),
+    "_OTHER",
+    "spnl_http_status() parses at most three digits, so the property alone admits 0..999 -- "
+    "180 000 series once multiplied by the method label. This declared set is what makes it a "
+    "label: 17 codes worth a dashboard, everything else _OTHER. The RED error axis survives the "
+    "collapse (500/502/503/504 are named), and the span still carries the exact code. Bound 18" },
+};
+
+static const CcRecMetric cc_rec_http_metrics[] = {
+  { "duration", "spnl.http.client.request.duration", "histogram", "s",
+    "duration_ns", "ns", "otel_duration_s",
+    cc_metric_http_duration_labels,
+    (int)(sizeof cc_metric_http_duration_labels / sizeof cc_metric_http_duration_labels[0]),
+    "RED for the HTTP channel. The value is the SAME property the span's duration is built "
+    "from (duration_ns), so a rate/latency dashboard and a trace waterfall cannot disagree about "
+    "how long a request took; the data point's `count` is the rate axis, so no separate counter is "
+    "declared. Buckets are the OBI-aligned `otel_duration_s` set and the record's "
+    "nanoseconds are converted once, by the generator, against a checked unit pair" },
 };
 
 static const char *const cc_rec_http_producers[] = { "http_emit", "ssl_emit" };
@@ -565,6 +1059,8 @@ static const CcRecSchema cc_rec_http = {
   .egress        = &cc_rec_http_egress,
   .derived       = cc_rec_http_derived,
   .nderived      = (int)(sizeof cc_rec_http_derived / sizeof cc_rec_http_derived[0]),
+  .metrics       = cc_rec_http_metrics,
+  .nmetrics      = (int)(sizeof cc_rec_http_metrics / sizeof cc_rec_http_metrics[0]),
   /* Publishes a typed consumer. With `ev.status >= 500`, `ev.path` and
    * `ev.duration_ns` available, a probe can decide what to send before it sends it.
    * The raw request and response bytes are not exposed: what is wanted is the
@@ -581,17 +1077,17 @@ static const CcRecSchema cc_rec_http = {
  * two can evolve independently and so that `describe` tells the truth about
  * which struct a Redis probe actually writes. */
 static const CcRecField cc_rec_redis_fields[] = {
-  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",         "__u32",                 0,  4, 4, "producer tgid", NULL },
-  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", NULL },
-  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order", NULL },
-  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order", NULL },
-  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET)", NULL },
-  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the command send (span start)", NULL },
-  { "duration_ns", "__u64",                 0,  8, 8, "command -> reply round trip, = span duration", NULL },
-  { "req",         "unsigned char",        64,  1, 1, "first 64B of the RESP request; command + first key parsed in userspace (values never read)", NULL },
-  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the reply; a leading '-' marks a RESP error", NULL },
-  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", NULL },
+  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",         "__u32",                 0,  4, 4, "producer tgid", NULL, NULL },
+  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", NULL, NULL },
+  { "daddr",       "__u32",                 0,  4, 4, "remote IPv4 address, network byte order", NULL, NULL },
+  { "dport",       "__u16",                 0,  2, 2, "remote port, host byte order", NULL, NULL },
+  { "family",      "__u16",                 0,  2, 2, "address family (2 = AF_INET)", NULL, NULL },
+  { "start_ktime", "__u64",                 0,  8, 8, "ktime of the command send (span start)", NULL, NULL },
+  { "duration_ns", "__u64",                 0,  8, 8, "command -> reply round trip, = span duration", NULL, NULL },
+  { "req",         "unsigned char",        64,  1, 1, "first 64B of the RESP request; command + first key parsed in userspace (values never read)", NULL, NULL },
+  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the reply; a leading '-' marks a RESP error", NULL, NULL },
+  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", NULL, NULL },
 };
 
 static const char *const cc_rec_redis_producers[] = { "redis_emit" };
@@ -649,17 +1145,17 @@ static const CcRecSchema cc_rec_redis = {
  * new fields) instead of dropping it. `required_through = "cgid"` is that rule,
  * declared -- everything after cgid reads as zero when the producer is older. */
 static const CcRecField cc_rec_offcpu_fields[] = {
-  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "pid",         "__u32",                 0,  4, 4, "producer tgid (the request handler)", "int" },
-  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str" },
-  { "duration_ns", "__u64",                 0,  8, 8, "whole request window (recv -> send), = parent span duration", "int" },
-  { "offcpu_ns",   "__u64",                 0,  8, 8, "voluntary off-CPU time accumulated inside the window. Not exposed raw: what the span carries is min(offcpu_ns, duration_ns) -- the accumulation and the window are measured by different hooks, so a record where the sum overshoots the window is expressible. The clamped value is the derived property ev.offcpu_ns, the same function's output as spnl.offcpu_ns", NULL },
-  { "wait_stack",  "__s32",                 0,  4, 4, "bpf_get_stackid of the last wait; -1 = none. Classified against kallsyms in userspace. Not exposed: a stack id is an index into a per-unit BPF map, meaningless as a number in Ruby -- the reading of it is the derived property ev.wait_kind", NULL },
-  { "req",         "unsigned char",        64,  1, 1, "first 64B of the request; \"METHOD path HTTP/x\" parsed in userspace", NULL },
-  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the response; \"HTTP/1.1 NNN\" status parsed in userspace", NULL },
-  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int" },
-  { "start_ktime", "__u64",                 0,  8, 8, "real window start (span anchor + child correlation); 0 on a pre- producer. Not exposed: a raw ktime is an anchor for span assembly (layer 2), not something a consumer can judge on", NULL },
-  { "hdr_ext",     "unsigned char",       128,  1, 1, "first 128B of the request head, scanned for a W3C traceparent in userspace; zero on a pre- producer. Not exposed: raw header bytes, like dns `raw` -- what a consumer wants from them (the trace context) is layer 2's, and the request line is already ev.method / ev.path", NULL },
+  { "hdr",         "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "pid",         "__u32",                 0,  4, 4, "producer tgid (the request handler)", "int", NULL },
+  { "comm",        "char",                 16,  1, 1, "bpf_get_current_comm -> process.executable.name", "str", NULL },
+  { "duration_ns", "__u64",                 0,  8, 8, "whole request window (recv -> send), = parent span duration", "int", NULL },
+  { "offcpu_ns",   "__u64",                 0,  8, 8, "voluntary off-CPU time accumulated inside the window. Not exposed raw: what the span carries is min(offcpu_ns, duration_ns) -- the accumulation and the window are measured by different hooks, so a record where the sum overshoots the window is expressible. The clamped value is the derived property ev.offcpu_ns, the same function's output as spnl.offcpu_ns", NULL, NULL },
+  { "wait_stack",  "__s32",                 0,  4, 4, "bpf_get_stackid of the last wait; -1 = none. Classified against kallsyms in userspace. Not exposed: a stack id is an index into a per-unit BPF map, meaningless as a number in Ruby -- the reading of it is the derived property ev.wait_kind", NULL, NULL },
+  { "req",         "unsigned char",        64,  1, 1, "first 64B of the request; \"METHOD path HTTP/x\" parsed in userspace", NULL, NULL },
+  { "resp",        "unsigned char",        16,  1, 1, "first 16B of the response; \"HTTP/1.1 NNN\" status parsed in userspace", NULL, NULL },
+  { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", NULL },
+  { "start_ktime", "__u64",                 0,  8, 8, "real window start (span anchor + child correlation); 0 on a pre- producer. Not exposed: a raw ktime is an anchor for span assembly (layer 2), not something a consumer can judge on", NULL, NULL },
+  { "hdr_ext",     "unsigned char",       128,  1, 1, "first 128B of the request head, scanned for a W3C traceparent in userspace; zero on a pre- producer. Not exposed: raw header bytes, like dns `raw` -- what a consumer wants from them (the trace context) is layer 2's, and the request line is already ev.method / ev.path", NULL, NULL },
 };
 
 /* The off-CPU record's derived properties. Three of them are the HTTP
@@ -709,6 +1205,25 @@ static const CcRecDerived cc_rec_offcpu_derived[] = {
     "\"unknown\" (the stack map or /proc/kallsyms could not be read). Best-effort by construction: "
     " classifies the LAST wait's top frames, not every wait in the window. "
     "cap 16 >= the longest of that closed set of literals (\"unknown\", 7 + NUL)" },
+  { "wait_stack_trace", "str", "wait_stack -> the same frames wait_kind classifies, symbolised",
+    "spnl_offcpu_wait_stack", "record_to_str", 448,
+    "WHERE the wait happened -- the frames themselves, \";\"-joined, INNERMOST FIRST, as "
+    "kallsyms names without offsets. Named for the field it reads (`wait_stack` is a stack id and "
+    "stays unexposed; this is the reading of it) but deliberately not the same word, because an "
+    "index and a call stack are not the same value. "
+    "Same-source guarantee: wait_kind and this property are two readings of ONE frame fetch "
+    "-- spnl_offcpu_wait_stack() and spnl_offcpu_wait_kind() both call the same _oc_frames(), so a "
+    "kind of \"io\" is always explained by a frame that is actually in this string. Innermost-first "
+    "is that guarantee made visible: the classifier scans frames in this order and stops at the "
+    "first match, so the reason is the leftmost matching frame. (The folded stack output this "
+    "project also emits is the other way round -- outermost first -- because a flame graph is "
+    "drawn from the root. This is not paste-compatible with it.) "
+    "Empty unless the operator sets SPNL_STACK_FRAMES > 0 (default 0): a stack is the one property "
+    "here that costs real bytes on every span, so it is off until somebody asks. The SAME number "
+    "bounds both this string and the span attribute, so the two never differ in depth. "
+    "cap 448 = the declared maximum depth, exactly: 8 frames x 55 characters (the symbol width the "
+    "userspace kallsyms table stores, _oc_sym.n[56]) + 7 separators + NUL. A declared derivation "
+    "never truncates, so the depth cap and the byte cap are one statement" },
 };
 
 static const char *const cc_rec_offcpu_producers[] = { "offcpu_emit" };
@@ -726,6 +1241,20 @@ static const CcEgressAttr cc_rec_offcpu_egress_attrs[] = {
     "best-effort classification of the last wait's top frames. \"none\" = no voluntary "
     "off-CPU in the window (wait_stack < 0); \"unknown\" = the stack map or /proc/kallsyms could "
     "not be read. Same function as the typed consumer's ev.wait_kind" },
+  { "spnl.wait.stack", "wait_stack -> the same frames spnl.wait.kind classifies, symbolised "
+    "(\";\"-joined, innermost first, at most SPNL_STACK_FRAMES of them)",
+    "spinel", "SPNL_STACK_FRAMES > 0 and the frames could be read (default 0 = attribute absent)",
+    "WHERE the request waited, beside WHAT it waited on. Same function's output as the typed "
+    "consumer's ev.wait_stack_trace, and the same frame fetch spnl.wait.kind classifies -- so the "
+    "kind is always explained by a frame in this value. "
+    "Why not semconv `code.stacktrace`: that key is the stack of the INSTRUMENTED code, and the "
+    "instrumented code here is the Ruby probe -- these frames belong to the OBSERVED task, in the "
+    "kernel. Naming them spnl.wait.* keeps them beside spnl.wait.kind (their sibling reading) and "
+    "leaves code.stacktrace free for the case it actually describes, a user-space stack, which no "
+    "record carries today. "
+    "Opt-in because it is the one attribute here whose size is unbounded by the record: up to 448 "
+    "bytes per span, on both the request-window span and its off-CPU wait child, inside batches of "
+    "up to SPNL_OTLP_BATCH_MAX spans" },
   { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "" },
 };
 
@@ -783,10 +1312,10 @@ static const CcRecSchema cc_rec_offcpu = {
  * per record. Declaring it here makes the kernel struct derive from the table
  * like the others; the glue reader is still hand-written (S5 boundary). */
 static const CcRecField cc_rec_l7stream_fields[] = {
-  { "hdr",  "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL },
-  { "sock", "__u64",                 0,  8, 8, "sock pointer -- the reassembly key (one stream per connection)", NULL },
-  { "len",  "__u32",                 0,  4, 4, "valid bytes in raw (raw is length-bounded, NOT NUL-terminated)", NULL },
-  { "raw",  "char",                128,  1, 1, "up to 128B of stream payload; the consumer reads exactly len bytes", NULL },
+  { "hdr",  "struct spnl_event_hdr", 0, 16, 8, "the 16-byte common event header (type/version/reserved/timestamp)", NULL, NULL },
+  { "sock", "__u64",                 0,  8, 8, "sock pointer -- the reassembly key (one stream per connection)", NULL, NULL },
+  { "len",  "__u32",                 0,  4, 4, "valid bytes in raw (raw is length-bounded, NOT NUL-terminated)", NULL, NULL },
+  { "raw",  "char",                128,  1, 1, "up to 128B of stream payload; the consumer reads exactly len bytes", NULL, NULL },
 };
 
 static const char *const cc_rec_l7stream_producers[] = { "emit_tcp_stream", "emit_tcp_payload" };

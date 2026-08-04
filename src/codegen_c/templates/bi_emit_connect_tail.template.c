@@ -6,5 +6,5 @@
         _ce@E@->daddr6_hi = (__u64)(@DADDR6_HI@);   /* IPv6 daddr hi/lo (used when family==AF_INET6) */
         _ce@E@->daddr6_lo = (__u64)(@DADDR6_LO@);
         bpf_ringbuf_submit(_ce@E@, 0);
-    }
+    } else spnl_lost_inc();   /* ring full -> account the dropped record */
 }

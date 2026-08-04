@@ -1,0 +1,118 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/161_attach_multi_params.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name A
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name include
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 ConstantPathNode
+N 8 ConstantReadNode
+S 8 name BPF
+R 7 parent 8
+S 7 name EventLoop
+A 6 arguments 7
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+N 9 CallNode
+S 9 name on
+R 9 receiver -1
+N 10 ArgumentsNode
+N 11 SymbolNode
+S 11 value kprobe
+N 12 ArrayNode
+N 13 StringNode
+S 13 content vfs_read
+I 13 fzl 1
+N 14 StringNode
+S 14 content vfs_write
+I 14 fzl 1
+A 12 elements 13,14
+N 15 KeywordHashNode
+N 16 AssocNode
+N 17 SymbolNode
+S 17 value via
+R 16 key 17
+N 18 SymbolNode
+S 18 value multi
+R 16 value 18
+A 15 elements 16
+A 10 arguments 11,12,15
+R 9 arguments 10
+N 19 BlockNode
+S 19 locals file,buf
+N 20 BlockParametersNode
+N 21 ParametersNode
+N 22 RequiredParameterNode
+S 22 name file
+N 23 RequiredParameterNode
+S 23 name buf
+A 21 requireds 22,23
+A 21 optionals 
+A 21 keywords 
+A 21 posts 
+R 20 parameters 21
+R 19 parameters 20
+N 24 StatementsNode
+N 25 InstanceVariableWriteNode
+S 25 name @calls
+N 26 CallNode
+S 26 name +
+N 27 InstanceVariableReadNode
+S 27 name @calls
+R 26 receiver 27
+N 28 ArgumentsNode
+N 29 IntegerNode
+I 29 value 1
+A 28 arguments 29
+R 26 arguments 28
+R 26 block -1
+S 26 call_operator .
+R 25 value 26
+N 30 IfNode
+N 31 CallNode
+S 31 name >
+N 32 LocalVariableReadNode
+S 32 name buf
+R 31 receiver 32
+N 33 ArgumentsNode
+N 34 IntegerNode
+I 34 value 0
+A 33 arguments 34
+R 31 arguments 33
+R 31 block -1
+S 31 call_operator .
+R 30 predicate 31
+N 35 StatementsNode
+N 36 InstanceVariableWriteNode
+S 36 name @nonzero
+N 37 CallNode
+S 37 name +
+N 38 InstanceVariableReadNode
+S 38 name @nonzero
+R 37 receiver 38
+N 39 ArgumentsNode
+N 40 IntegerNode
+I 40 value 1
+A 39 arguments 40
+R 37 arguments 39
+R 37 block -1
+S 37 call_operator .
+R 36 value 37
+A 35 body 36
+R 30 statements 35
+R 30 subsequent -1
+A 24 body 25,30
+R 19 body 24
+R 9 block 19
+S 9 call_operator .
+A 4 body 5,9
+R 2 body 4
+A 1 body 2
+R 0 statements 1

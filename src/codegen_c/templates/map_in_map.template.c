@@ -1,39 +1,21 @@
 /* map-in-map. 4 inner ARRAY maps + an
- * ARRAY_OF_MAPS outer that libbpf populates with them at load time. */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __s64);
-    __uint(max_entries, 64);
-} bpf_mim_inner0 SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __s64);
-    __uint(max_entries, 64);
-} bpf_mim_inner1 SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __s64);
-    __uint(max_entries, 64);
-} bpf_mim_inner2 SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __s64);
-    __uint(max_entries, 64);
-} bpf_mim_inner3 SEC(".maps");
-
+ * ARRAY_OF_MAPS outer that libbpf populates with them at load time.
+ * The inners must be instances of the SAME named struct that appears in
+ * __array(values, ...): with per-map anonymous struct types the `.values`
+ * initializer is an incompatible-pointer-types diagnostic, which clang >= 22
+ * rejects by default. */
 struct mim_inner_t {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
     __type(value, __s64);
     __uint(max_entries, 64);
 };
+
+struct mim_inner_t bpf_mim_inner0 SEC(".maps");
+struct mim_inner_t bpf_mim_inner1 SEC(".maps");
+struct mim_inner_t bpf_mim_inner2 SEC(".maps");
+struct mim_inner_t bpf_mim_inner3 SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
     __uint(max_entries, 4);

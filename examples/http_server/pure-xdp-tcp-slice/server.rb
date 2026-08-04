@@ -1,3 +1,14 @@
+# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
+#
+# This example uses the XDP_TX static-response builtins (xdp_match_health, xdp_reply_health), which did not survive the move from the
+# original Ruby code generator to the C one. Compiling it now stops with a
+# message that names the missing piece and points at the alternative, rather
+# than emitting a program that loads and never fires -- which is what used to
+# happen, silently.
+#
+# The file is kept because it records how the feature was expressed. Restoring
+# it means porting the generator side, not editing this file.
+#
 # examples/http_server/pure-xdp-tcp-slice/server.rb
 #
 # Kernel-side static response for GET /health via XDP_TX.

@@ -1,0 +1,44 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/136_kfield_str_arity.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__vfs_read
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name file
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 IfNode
+N 7 CallNode
+S 7 name kfield_str_eq
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 LocalVariableReadNode
+S 9 name file
+N 10 StringNode
+S 10 content file
+I 10 fzl 1
+N 11 StringNode
+S 11 content spnl_target.txt
+I 11 fzl 1
+A 8 arguments 9,10,11
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+R 6 predicate 7
+N 12 StatementsNode
+N 13 IntegerNode
+I 13 value 0
+A 12 body 13
+R 6 statements 12
+R 6 subsequent -1
+A 5 body 6
+R 2 body 5
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

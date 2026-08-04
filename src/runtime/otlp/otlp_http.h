@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>   /* otlp_env_kv_list (static inline) */
 #include <unistd.h>
 
 #ifdef __cplusplus
@@ -85,10 +86,67 @@ int otlp_http_post(const char *host, const char *port, const char *path,
  * key lowercased. */
 typedef struct { char key[128]; char val[512]; } otlp_kv_t;
 
+/* Parse an env var of the shape "k1=v1,k2=v2" as one grammar, returning the
+ * number of pairs stored. A pair with an empty key, or without an '=', is
+ * dropped; surrounding whitespace is trimmed. Two environment variables have
+ * this shape -- OTEL_EXPORTER_OTLP_HEADERS and OTEL_RESOURCE_ATTRIBUTES -- so
+ * there is one parser for both. Writing two is how you get headers that work
+ * while resource attributes quietly lose their last pair.
+ *
+ * It is a `static inline` in the header for the same reason
+ * otlp_service_instance_id is: both the protobuf path (otlp_pbutil.h) and the
+ * JSON path (otlp_json.c) need it, and the JSON encoder's unit test does not
+ * link otlp_http.c -- putting this in the .c gives an undefined reference.
+ * POSIX only, and nothing from nanopb. */
+static inline int otlp_env_kv_list(const char *envname, otlp_kv_t *out, int max) {
+    const char *e = envname ? getenv(envname) : NULL;
+    if (!e || !*e || !out || max <= 0) return 0;
+    int n = 0;
+    const char *p = e;
+    while (*p && n < max) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        const char *comma = strchr(p, ',');
+        const char *segend = comma ? comma : p + strlen(p);
+        const char *eq = (const char *)memchr(p, '=', (size_t)(segend - p));
+        if (eq) {
+            /* Copy [start,end) into the fixed-width field, trimming whitespace. */
+            const char *ks = p, *ke = eq, *vs = eq + 1, *ve = segend;
+            while (ks < ke && (*ks == ' ' || *ks == '\t')) ks++;
+            while (ke > ks && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+            while (vs < ve && (*vs == ' ' || *vs == '\t')) vs++;
+            while (ve > vs && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            size_t kn = (size_t)(ke - ks), vn = (size_t)(ve - vs);
+            if (kn >= sizeof out[n].key) kn = sizeof out[n].key - 1;
+            if (vn >= sizeof out[n].val) vn = sizeof out[n].val - 1;
+            memcpy(out[n].key, ks, kn); out[n].key[kn] = '\0';
+            memcpy(out[n].val, vs, vn); out[n].val[vn] = '\0';
+            if (out[n].key[0]) n++;
+        }
+        p = comma ? comma + 1 : segend;
+    }
+    return n;
+}
+
 /* Parse OTEL_EXPORTER_OTLP_HEADERS ("k1=v1,k2=v2") into out[] and return the
  * count. This is how an authentication header -- a vendor token, a Bearer
  * credential -- gets attached when sending straight to a backend. */
 int otlp_env_headers(otlp_kv_t *out, int max);
+
+/* OTEL_RESOURCE_ATTRIBUTES ("k1=v1,k2=v2") is the OpenTelemetry standard way to
+ * say "label this producer". Before it was honoured only OTEL_SERVICE_NAME was,
+ * which left a gap where other tools have per-deployment tags. Opening the
+ * standard door instead of inventing a tags vocabulary of our own follows from
+ * what a resource attribute is:
+ *   - it is written once per ResourceSpans, not once per span
+ *   - it is an assertion by whoever *ran* the probe. Promoting the author's own
+ *     `# @intent` comment to the wire instead would turn an unverified claim by
+ *     someone who is not present into searchable evidence
+ *   - the keys are ones a collector, SIEM or SaaS backend already understands
+ * The cap of 16 is past any operational label count. Overflow is dropped in
+ * silence: this is an operator's declaration, not a diagnostic, so it is no
+ * reason to stop sending. */
+#define OTLP_ENV_RESOURCE_ATTRS_MAX 16
 
 /* When OTEL_EXPORTER_OTLP_COMPRESSION=gzip, compress in into out and return 1.
  * Returns 0 when compression is disabled or failed, and the caller then sends the

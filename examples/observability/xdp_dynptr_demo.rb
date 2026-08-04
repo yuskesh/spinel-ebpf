@@ -1,3 +1,14 @@
+# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
+#
+# This example uses pkt.byte_at, which did not survive the move from the
+# original Ruby code generator to the C one. Compiling it now stops with a
+# message that names the missing piece and points at the alternative, rather
+# than emitting a program that loads and never fires -- which is what used to
+# happen, silently.
+#
+# The file is kept because it records how the feature was expressed. Restoring
+# it means porting the generator side, not editing this file.
+#
 # pkt_dynptr_byte_at — verifier-safe byte access into an XDP frame.
 #
 # This counts how many packets have byte 0x45 at offset 14 (the IPv4

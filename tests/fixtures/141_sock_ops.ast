@@ -1,0 +1,136 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/141_sock_ops.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @active_connects
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @established
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name sock_ops__main
+R 6 parameters -1
+N 7 StatementsNode
+N 8 LocalVariableWriteNode
+S 8 name op
+N 9 CallNode
+S 9 name sock_ops_op
+R 9 receiver -1
+R 9 arguments -1
+R 9 block -1
+S 9 call_operator .
+I 9 vcall 1
+R 8 value 9
+N 10 IfNode
+N 11 CallNode
+S 11 name ==
+N 12 LocalVariableReadNode
+S 12 name op
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 ConstantPathNode
+N 15 ConstantPathNode
+N 16 ConstantReadNode
+S 16 name BPF
+R 15 parent 16
+S 15 name SockOps
+R 14 parent 15
+S 14 name TCP_CONNECT_CB
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @active_connects
+N 19 CallNode
+S 19 name +
+N 20 InstanceVariableReadNode
+S 20 name @active_connects
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 IntegerNode
+I 22 value 1
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 17 body 18
+R 10 statements 17
+R 10 subsequent -1
+N 23 IfNode
+N 24 CallNode
+S 24 name ==
+N 25 LocalVariableReadNode
+S 25 name op
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 ConstantPathNode
+N 28 ConstantPathNode
+N 29 ConstantReadNode
+S 29 name BPF
+R 28 parent 29
+S 28 name SockOps
+R 27 parent 28
+S 27 name STATE_CB
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+R 23 predicate 24
+N 30 StatementsNode
+N 31 IfNode
+N 32 CallNode
+S 32 name ==
+N 33 CallNode
+S 33 name sock_ops_state
+R 33 receiver -1
+R 33 arguments -1
+R 33 block -1
+S 33 call_operator .
+I 33 vcall 1
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 ConstantReadNode
+S 35 name TCP_STATE_ESTABLISHED
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+R 31 predicate 32
+N 36 StatementsNode
+N 37 InstanceVariableWriteNode
+S 37 name @established
+N 38 CallNode
+S 38 name +
+N 39 InstanceVariableReadNode
+S 39 name @established
+R 38 receiver 39
+N 40 ArgumentsNode
+N 41 IntegerNode
+I 41 value 1
+A 40 arguments 41
+R 38 arguments 40
+R 38 block -1
+S 38 call_operator .
+R 37 value 38
+A 36 body 37
+R 31 statements 36
+R 31 subsequent -1
+A 30 body 31
+R 23 statements 30
+R 23 subsequent -1
+N 42 IntegerNode
+I 42 value 0
+A 7 body 8,10,23,42
+R 6 body 7
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1
