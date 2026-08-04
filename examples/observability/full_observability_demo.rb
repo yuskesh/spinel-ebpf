@@ -1,14 +1,3 @@
-# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
-#
-# This example uses `on :timer` and the user-ringbuf drain builtin, which did not survive the move from the
-# original Ruby code generator to the C one. Compiling it now stops with a
-# message that names the missing piece and points at the alternative, rather
-# than emitting a program that loads and never fires -- which is what used to
-# happen, silently.
-#
-# The file is kept because it records how the feature was expressed. Restoring
-# it means porting the generator side, not editing this file.
-#
 # Reactor DSL "everything-included" demo. A single module handles 6 kinds of
 # event source at once, aggregates counters / state into shared ivars, and runs
 # a periodic dump with bpf_timer. A kernel-side observability suite that reads

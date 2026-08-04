@@ -1,14 +1,3 @@
-# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
-#
-# This example uses the `user_ringbuf__` attach kind and its drain builtin, which did not survive the move from the
-# original Ruby code generator to the C one. Compiling it now stops with a
-# message that names the missing piece and points at the alternative, rather
-# than emitting a program that loads and never fires -- which is what used to
-# happen, silently.
-#
-# The file is kept because it records how the feature was expressed. Restoring
-# it means porting the generator side, not editing this file.
-#
 # `on :user_cmd do |cmd| ... end` in BPF::EventLoop. Userspace pushes
 # 8-byte commands into the bpf_user_cmds USER_RINGBUF; the kernel-side
 # callback (synthesized as `user_ringbuf__cmd_handler`) drains them via

@@ -1,0 +1,127 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/173_user_cmd_reactor.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @xdp_count
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @cmds_received
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @last_value
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 ModuleNode
+N 9 ConstantReadNode
+S 9 name CmdChannel
+R 8 constant_path 9
+N 10 StatementsNode
+N 11 CallNode
+S 11 name include
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 ConstantPathNode
+N 14 ConstantReadNode
+S 14 name BPF
+R 13 parent 14
+S 13 name EventLoop
+A 12 arguments 13
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+N 15 CallNode
+S 15 name on
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 SymbolNode
+S 17 value xdp
+A 16 arguments 17
+R 15 arguments 16
+N 18 BlockNode
+N 19 StatementsNode
+N 20 InstanceVariableWriteNode
+S 20 name @xdp_count
+N 21 CallNode
+S 21 name +
+N 22 InstanceVariableReadNode
+S 22 name @xdp_count
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 IntegerNode
+I 24 value 1
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+R 20 value 21
+N 25 CallNode
+S 25 name user_ringbuf_drain
+R 25 receiver -1
+R 25 arguments -1
+R 25 block -1
+S 25 call_operator .
+I 25 vcall 1
+N 26 ConstantPathNode
+N 27 ConstantReadNode
+S 27 name XDP
+R 26 parent 27
+S 26 name PASS
+A 19 body 20,25,26
+R 18 body 19
+R 15 block 18
+S 15 call_operator .
+N 28 CallNode
+S 28 name on
+R 28 receiver -1
+N 29 ArgumentsNode
+N 30 SymbolNode
+S 30 value user_cmd
+A 29 arguments 30
+R 28 arguments 29
+N 31 BlockNode
+S 31 locals cmd
+N 32 BlockParametersNode
+N 33 ParametersNode
+N 34 RequiredParameterNode
+S 34 name cmd
+A 33 requireds 34
+A 33 optionals 
+A 33 keywords 
+A 33 posts 
+R 32 parameters 33
+R 31 parameters 32
+N 35 StatementsNode
+N 36 InstanceVariableWriteNode
+S 36 name @cmds_received
+N 37 CallNode
+S 37 name +
+N 38 InstanceVariableReadNode
+S 38 name @cmds_received
+R 37 receiver 38
+N 39 ArgumentsNode
+N 40 IntegerNode
+I 40 value 1
+A 39 arguments 40
+R 37 arguments 39
+R 37 block -1
+S 37 call_operator .
+R 36 value 37
+N 41 InstanceVariableWriteNode
+S 41 name @last_value
+N 42 LocalVariableReadNode
+S 42 name cmd
+R 41 value 42
+A 35 body 36,41
+R 31 body 35
+R 28 block 31
+S 28 call_operator .
+A 10 body 11,15,28
+R 8 body 10
+A 1 body 2,4,6,8
+R 0 statements 1

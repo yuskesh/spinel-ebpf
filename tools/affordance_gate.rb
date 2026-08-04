@@ -20,9 +20,26 @@
 # pkt_dynptr_byte_at is; the PROG_ARRAY map type is gone BECAUSE both of those
 # are. Split across files, a port that revives one half and forgets the other is
 # green in both. Here the run reports "advertised N broken=0 / withdrawn M
-# revived=0" for each vocabulary, and refuses to pass if any negative-control
-# set is empty -- so no half can quietly become a gate that only knows how to
-# say yes.
+# revived=0" for each vocabulary, plus a self-check per vocabulary that re-proves
+# on every run that this gate can still produce each negative verdict -- so no
+# half can quietly become a gate that only knows how to say yes.
+#
+# THE NEGATIVE CONTROL IS NOT THE WITHDRAWN SET ANY MORE
+#
+# It used to be, and that made the gate's detection power a function of how much
+# was still broken: as the demoted surfaces get re-ported, two of the four
+# withdrawn sets reach zero. The sugar half hit it first -- it printed all-green
+# numbers and then aborted with "no negative control". The pressure that creates
+# is the wrong one: keep a fake entry in the SHIPPED affordance so the gate stays
+# armed (the affordance IS the shipped artifact, and a whole round of work went
+# into taking names out of it that were not real).
+#
+# So the two jobs the withdrawn set was doing are split by lifetime -- see the
+# block after `check`:
+#   capability      "can this gate still say no?"     synthesised, never depletes
+#   correspondence  "the record and the refusals agree"  vacuous when both are
+#                                                        empty, and correctly so
+# An empty withdrawn set is now a printed note stating a true fact, not an abort.
 #
 # THE MAP SECTION MEASURES THE OTHER DIRECTION
 #
@@ -104,11 +121,23 @@ CC  = ENV["SPNL_INPROC_CC"] || File.join(ROOT, "build/codegen_c/spinel-ebpf-cc")
 # One entry per context this gate can write. `params` are the handler's declared
 # parameters; free identifiers from the call that are not among them become
 # either extra params (kinds that take them) or locals.
+# `preamble`: a companion declaration the probe needs to be LEGAL, not
+# scaffolding for the call itself -- `user_ringbuf_drain` is refused unless the
+# unit also declares the `def user_ringbuf__<name>(value)` it drains into (and
+# the callback is refused unless something drains it, so neither half can be
+# probed alone). Emitted verbatim before the handler; the sugar table carries
+# the same idea as `companion_sugar` / `companion_flat`.
 Shape = Struct.new(:def_line, :params, :takes_params, :ret, :open, :close,
-                   :reactor, keyword_init: true)
+                   :reactor, :preamble, keyword_init: true)
 
 SHAPES = {
   kprobe:          Shape.new(def_line: "def kprobe__do_sys_openat2", takes_params: true,  ret: "0"),
+  # The drain needs a callback to call. Written as a kprobe drain site
+  # on purpose -- the affordance says the drain point is the author's choice and
+  # is not restricted to any hook (measured: 12 program types, all LOAD_OK).
+  user_ringbuf:    Shape.new(def_line: "def kprobe__do_sys_openat2", takes_params: true, ret: "0",
+                             preamble: "def user_ringbuf__cmd_handler(value)\n" \
+                                       "  @hits = @hits + value\nend\n"),
   # attached_index / attached_symbol_eq only exist inside a multi-symbol
   # handler, whose only surface is the reactor form (a symbol list cannot live in
   # a method name). `reactor` is the probe text up to the body; `source` appends
@@ -157,6 +186,9 @@ SHAPE_OVERRIDE = {
   "sock_daddr" => :kprobe, "sock_family" => :kprobe, "sock_state" => :kprobe,
   "sock_protocol" => :kprobe, "sock_saddr6_hi" => :kprobe, "sock_saddr6_lo" => :kprobe,
   "sock_daddr6_hi" => :kprobe, "sock_daddr6_lo" => :kprobe,
+  # observability domain, but the drain is only legal beside the
+  # callback it drains into -- the `user_ringbuf` shape carries that declaration.
+  "user_ringbuf_drain" => :user_ringbuf,
 }.freeze
 
 KIND_TO_SHAPE = SHAPES.keys.to_h { |k| [k, k] }.freeze
@@ -218,7 +250,7 @@ module AffordanceGate
     sh = SHAPES.fetch(shape_key)
     if sh.reactor
       body = (vars.map { |v| "    #{v} = 0" } + ["    @hits = @hits + 1", "    #{call}"]).join("\n")
-      return "#{PRELUDE}\n#{sh.reactor}#{body}\n  end\nend\n"
+      return "#{PRELUDE}\n#{sh.preamble}#{sh.reactor}#{body}\n  end\nend\n"
     end
     fixed = (sh.params || []).dup
     extra = vars - fixed
@@ -231,6 +263,7 @@ module AffordanceGate
     body << "#{ind}  #{sh.ret}"
     src = +PRELUDE
     src << "\n"
+    src << sh.preamble << "\n" if sh.preamble
     src << "#{sh.open}\n" if sh.open
     src << sh.def_line
     src << "(#{params.join(', ')})" unless params.empty?
@@ -300,6 +333,19 @@ module AffordanceGate
     sched_ext:     aclass("class ProbeSX < BPF::SchedExt", "dispatch", %w[cpu prev], "<member>" => "dispatch"),
     qdisc:         aclass("class ProbeQ < BPF::Qdisc", "enqueue", %w[skb sch to_free], "<member>" => "enqueue"),
     xdp:           aflat("xdp__probe", ret: "XDP_PASS"),
+    # a tail-call TARGET, written on its own. That is deliberate and
+    # it is also what a unit legitimately looks like before its dispatcher is
+    # written: the promise this kind makes is SEC("xdp") plus a slot in
+    # `spnl_prog_array`, and both hold with nobody jumping. (It is also the probe
+    # the map section compiles for the PROG_ARRAY claim, so if a lone target
+    # stopped emitting the map, two sections would say so.)
+    xdp_tail:      aflat("xdp_tail__probe", ret: "XDP_PASS"),
+    # the ONE kind whose body is thrown away (the affordance says so with
+    # `body: :discarded`). `ret:` is still written the way an author would write
+    # the marker -- the point of the probe is that it is the surface, not a
+    # minimal input -- but the marker cannot survive into the C, so check_attach
+    # looks for the declared `emits:` symbol instead. See the note there.
+    xdp_tcp_slice: aflat("xdp__tcp_slice__probe", ret: "XDP_PASS"),
     tc_ingress:    aflat("tc__ingress__probe", ret: "TC_ACT_OK"),
     tc_egress:     aflat("tc__egress__probe", ret: "TC_ACT_OK"),
     sk_reuseport:  aflat("sk_reuseport__probe", ret: "SK_PASS"),
@@ -307,6 +353,21 @@ module AffordanceGate
     sk_skb_verdict: aflat("sk_skb__verdict__probe", ret: "SK_PASS"),
     sk_skb_parser: aflat("sk_skb__parser__probe", ret: "SK_PASS"),
     perf_event:    aflat("perf_event__sample"),
+    # reactor-only, like kprobe_multi -- there is no `def` form,
+    # because the interval arrives as a keyword on the `on` call. This is the
+    # kind stage 2 of check_attach exists for: its promised SEC is "syscall",
+    # which is also what the silent degradation emits, so only "did the body
+    # reach the output" tells the two apart.
+    timer:         areactor("module ProbeTimer\n  include BPF::EventLoop\n" \
+                            "  on :timer, every: 1.seconds do\n", {}),
+    # the only kind that emits NO program, so the affordance publishes
+    # `emits:` (a C symbol) where the others publish `sec:`. The probe still has
+    # to be a legal unit: a callback with nothing draining it is refused, so the
+    # drain site comes along. Its own SEC("xdp") is not what is being asserted --
+    # `promised_needle` reads the affordance and asks for the callback symbol.
+    user_ringbuf:  AttachShape.new(def_line: "def user_ringbuf__cmd_handler", params: %w[value],
+                                   ret: "0", subst: { "<name>" => "cmd_handler" },
+                                   close: "\ndef xdp__drain\n  user_ringbuf_drain\n  XDP_PASS\nend"),
   }.freeze
 
   # The withdrawn kinds' surfaces come from the affordance's own record, so the
@@ -323,26 +384,63 @@ module AffordanceGate
     src
   end
 
+  # The marker the body carries is a LITERAL, not the ivar's name.
+  #
+  # It used to be the name, and that made stage 2 much weaker than it read: the
+  # probe declares `@<marker> = 0` at top level, the codegen turns every
+  # top-level ivar into a per-unit map called `<unit>_top_<marker>`, and so the
+  # NAME appears in the emitted C whether or not the body survived. Measured
+  # while porting the one kind that legitimately discards its body
+  # (`xdp__tcp_slice__probe`): body gone, marker name present twice, stage 2
+  # satisfied. The self-check never noticed because it asks for a name that
+  # appears NOWHERE, which proves the comparison runs, not that the needle can
+  # only come from the body.
+  #
+  # BODY_MARK is emitted only by the increment, so its presence is evidence
+  # about the body and nothing else. The ivar stays (a handler that assigns
+  # nothing is not the shape an author writes) but it is no longer the needle.
+  BODY_MARK = "416416"
+
   def attach_source(kind, marker)
     sh = ATTACH_SHAPES.fetch(kind)
     if sh.reactor
       return "@#{marker} = 0\n\n#{PRELUDE}\n#{sh.reactor}" \
-             "    @#{marker} = @#{marker} + 1\n  end\nend\n"
+             "    @#{marker} = @#{marker} + #{BODY_MARK}\n  end\nend\n"
     end
     ind = sh.open ? "  " : ""
     src = +"@#{marker} = 0\n\n#{PRELUDE}\n"
     src << "#{sh.open}\n" if sh.open
     src << sh.def_line
     src << "(#{sh.params.join(', ')})" unless (sh.params || []).empty?
-    src << "\n#{ind}  @#{marker} = @#{marker} + 1\n#{ind}  #{sh.ret}\n#{ind}end\n"
+    src << "\n#{ind}  @#{marker} = @#{marker} + #{BODY_MARK}\n#{ind}  #{sh.ret}\n#{ind}end\n"
     src << "#{sh.close}\n" if sh.close
     src
   end
 
   # The affordance's promise, with this shape's concrete names substituted in.
+  #
+  # Every kind publishes exactly one of two promises, and the gate reads whichever
+  # the entry carries: `sec:` -- a program SEC, checked against prog_secs;
+  # or `emits:` -- a C symbol, for the one kind that emits no program at all
+  # (a USER_RINGBUF callback). Writing "syscall" for that one would have been
+  # worse than useless: it is the exact string the silent degradation produced.
   def promised_sec(kind)
     entry = CAP::ATTACH_KINDS.find { |a| a[:kind] == kind } or return nil
-    ATTACH_SHAPES.fetch(kind).subst.reduce(entry[:sec].dup) { |s, (ph, v)| s.gsub(ph, v) }
+    promise = entry[:sec] || entry[:emits] or return nil
+    ATTACH_SHAPES.fetch(kind).subst.reduce(promise.dup) { |s, (ph, v)| s.gsub(ph, v) }
+  end
+
+  # true when this kind throws the handler body away (so the marker cannot
+  # appear in the output and stage 2 has to ask a different question).
+  def discards_body?(kind)
+    e = CAP::ATTACH_KINDS.find { |a| a[:kind] == kind }
+    !!(e && e[:body] == :discarded && e[:emits])
+  end
+
+  # true when this kind's promise is a C symbol rather than a program SEC.
+  def emits_symbol?(kind)
+    e = CAP::ATTACH_KINDS.find { |a| a[:kind] == kind }
+    !!(e && e[:sec].nil? && e[:emits])
   end
 
   # Run the codegen and hand back text we can actually scan.
@@ -363,24 +461,61 @@ module AffordanceGate
     out.scan(/SEC\("([^"]+)"\)/).flatten.reject { |s| s == "license" || s.start_with?(".") }.uniq
   end
 
-  # [:kept | :broken, message]. "Kept" needs the promised SEC AND the handler
-  # body in the output: `on :timer` degraded to a body that never reached the C
-  # at all, and its advertised SEC ("syscall") is the same string a silent
-  # degradation produces -- a SEC check alone would have called it fine.
-  def check_attach(dir, tag, kind)
+  # [:kept | :broken, message, promised_sec, reason]. "Kept" needs the promised
+  # SEC AND the handler body in the output: `on :timer` degraded to a body that
+  # never reached the C at all, and its advertised SEC ("syscall") is the same
+  # string a silent degradation produces -- a SEC check alone would have called it
+  # fine. The two stages fail with different `reason`s so the self-check can
+  # demand each of them separately; a self-check that only asserted :broken would
+  # pass with stage 2 deleted, i.e. it would reopen that same hole.
+  #
+  # `want_sec` / `want_marker` exist ONLY for that self-check: they perturb the
+  # gate's own expectation in memory (the sugar self-check's move) so the
+  # run re-proves it can still produce each verdict.
+  def check_attach(dir, tag, kind, want_sec: nil, want_marker: nil)
     marker = "zz#{tag}"
     path = File.join(dir, "#{tag}.rb")
     File.write(path, attach_source(kind, marker))
     out, err, st = cap3(CC, path, tag)
-    want = promised_sec(kind)
-    return [:broken, "refused: #{err.lines.map(&:strip).reject(&:empty?).first}", want] unless st.success?
-    return [:broken, "compiled, but the handler body never reached the emitted C " \
-                     "(the kind was skipped, not merely unattached)", want] unless out.include?(marker)
+    want = want_sec || promised_sec(kind)
+    needle = want_marker || BODY_MARK
+    return [:broken, "refused: #{err.lines.map(&:strip).reject(&:empty?).first}", want, :refused] unless st.success?
+    # for a kind that DISCARDS the body, "the body reached the C" is false
+    # by design, so stage 2 asks the question the affordance says is the right
+    # one for it: did the machine the body was replaced BY come out? Which symbol
+    # to look for is declared (`emits:`), not written here -- same rule as the
+    # SEC, and the same reason: an expectation the gate owns is an expectation
+    # that stops testing the affordance.
+    #
+    # This is the second time a kind has not fitted the SEC+body pair (the first
+    # had no SEC at all). Both were handled by letting the affordance
+    # say what to look for rather than by special-casing a name in the gate.
+    if !want_marker && discards_body?(kind)
+      sym = CAP::ATTACH_KINDS.find { |a| a[:kind] == kind }[:emits]
+      return [:broken, "declares body: :discarded and emits #{sym.inspect}, but that symbol " \
+                       "is not in the output -- the body was dropped and nothing replaced it, " \
+                       "which is the silent degradation with an extra step", want, :no_body] unless out.include?(sym)
+    elsif !out.include?(needle)
+      return [:broken, "compiled, but the handler body never reached the emitted C " \
+                       "(the kind was skipped, not merely unattached)", want, :no_body]
+    end
     got = prog_secs(out)
+    # a kind that promises a SYMBOL instead of a SEC. Both halves are the
+    # same question the SEC check asks -- did the promised thing come out, and is
+    # the measured degradation absent -- but the degradation here is a program
+    # where there should be none, so it is named rather than inferred.
+    if want_sec.nil? && emits_symbol?(kind)
+      return [:broken, "promised to emit #{want.inspect}, and it is not in the output",
+              want, :wrong_sec] unless out.include?(want)
+      return [:broken, "emitted SEC(\"syscall\") -- the plain-method wrapper. This kind emits " \
+                       "no program of its own; a syscall wrapper is what the silent degradation " \
+                       "produced", want, :wrong_sec] if got.include?("syscall")
+      return [:kept, nil, want, nil]
+    end
     return [:broken, "promised SEC(#{want.inspect}), emitted #{got.inspect}" +
                      (got == ["syscall"] ? " -- the plain-method wrapper, i.e. a program that loads and never fires" : ""),
-            want] unless got.include?(want)
-    [:kept, nil, want]
+            want, :wrong_sec] unless got.include?(want)
+    [:kept, nil, want, nil]
   end
 
   # A withdrawn kind must be REFUSED. Withdrawing it from the affordance is only
@@ -471,8 +606,14 @@ module AffordanceGate
   # kind is: taking it out of the affordance does not stop the codegen
   # from accepting it, and an author working from an older doc still gets
   # whatever it silently becomes.
+  #
+  # The entry carries its own `form` (and, for :attach, its own probe text
+  # and return literal), because the withdrawn set is not guaranteed to be an
+  # expression: un-withdrawing the last expression entry (`pkt.byte_at`) left the
+  # reactor spelling of a withdrawn attach kind as the control.
   def check_withdrawn_sugar(dir, tag, spelling, info)
-    e = { form: :expr, shape: info[:ctx] || info[:shape], sugar: spelling }
+    e = { form: info[:form] || :expr, shape: info[:ctx] || info[:shape],
+          sugar: info[:sugar] || spelling, ret: info[:ret] }
     path = File.join(dir, "#{tag}.rb")
     File.write(path, sugar_source(e, :sugar))
     _o, err, st = cap3(CC, path, tag)
@@ -631,30 +772,142 @@ module AffordanceGate
     [:ok, nil]
   end
 
-  # Compile the probe; return [:compiled | :refused, message].
+  # Compile the probe; return [:compiled | :refused, message, shape, call, reason].
   # "Compiled" also requires that the call PRODUCED something: a call the codegen
   # silently drops is not evidence that the builtin exists. The witness is the
   # same probe with the call deleted -- identical output means the call was air.
-  def check(dir, tag, name)
-    call  = call_text(name)
-    vars  = free_vars(name, call)
+  #
+  # `call` / `vars` are overridable only for the self-check, which needs to
+  # hand this method an input whose correct verdict is known in advance.
+  def check(dir, tag, name, call: nil, vars: nil)
+    call ||= call_text(name)
+    vars ||= free_vars(name, call)
     shape = shape_for(name)
     with    = File.join(dir, "#{tag}_a.rb")
     without = File.join(dir, "#{tag}_b.rb")
     File.write(with, source(shape, call, vars))
     out, err, st = cap3(CC, with, "#{tag}_a")
     unless st.success?
-      return [:refused, err.lines.map(&:strip).reject(&:empty?).first.to_s, shape, call]
+      return [:refused, err.lines.map(&:strip).reject(&:empty?).first.to_s, shape, call, :died]
     end
     File.write(without, source(shape, "@hits = @hits + 0", vars))
     out2, _e2, st2 = cap3(CC, without, "#{tag}_a")
     if st2.success? && out2 == out
-      return [:refused, "compiled, but emitted C identical to the call-less twin (the call produced nothing)", shape, call]
+      return [:refused, "compiled, but emitted C identical to the call-less twin (the call produced nothing)",
+              shape, call, :no_effect]
     end
     unless out.include?("_inner")
-      return [:refused, "compiled, but no _inner was emitted (the method was not eBPF-eligible)", shape, call]
+      return [:refused, "compiled, but no _inner was emitted (the method was not eBPF-eligible)",
+              shape, call, :no_inner]
     end
-    [:compiled, nil, shape, call]
+    [:compiled, nil, shape, call, nil]
+  end
+
+  # ---- the controls that do NOT deplete -----------------------------------
+  #
+  # The WITHDRAWN sets used to BE the negative control: "a demoted surface must
+  # still fail". That works, and it is EXHAUSTED BY SUCCESS -- as those surfaces
+  # get re-ported, two of the four sets reach zero (the sugar half already hit it:
+  # it printed all-green numbers and then aborted). A gate whose detection power
+  # is backed by an inventory of broken things gets weaker as the tree gets
+  # healthier, and it pushes each implementer to leave a fake entry in the
+  # SHIPPED affordance to keep the gate armed -- the exact kind of lie the
+  # affordance must not contain.
+  #
+  # So the two jobs the withdrawn set was doing are separated by lifetime:
+  #
+  #   capability      "can this gate still say no?" -- synthesised in memory,
+  #                   never depletes. That is what these self-checks are.
+  #   correspondence  "the affordance's withdrawn record and the codegen's
+  #                   refusals are the same set" -- a statement ABOUT the
+  #                   inventory, so it is vacuously true when the inventory is
+  #                   empty, and that is the CORRECT answer: nothing is withdrawn.
+  #
+  # The substitution is only EXACT for one vocabulary, so it was MEASURED, per
+  # vocabulary, rather than assumed:
+  #
+  #   builtin  a withdrawn name and a name that never existed hit the SAME C path
+  #            (`CallNode not yet ported (Stage 1): <name>`) -- the synthetic
+  #            control is a full substitute.
+  #   attach   NOT the same. A withdrawn kind hits CC_WITHDRAWN_ATTACH (exit 1,
+  #            loud); an unknown prefix is exit 0 + SEC("syscall") -- the silent
+  #            degradation itself. So the self-check covers the gate's comparison
+  #            and cc_withdrawn_attach_prefixes covers the table's existence.
+  #   sugar    NOT the same (its one entry's refusal IS the attach table's),
+  #            though an unknown pkt.* member is refused by its own C path.
+  #   map      WITHDRAWN_MAPS never tested a refusal path at all -- `mrevived` is
+  #            a set intersection, so it was never a detection control. The map
+  #            half's real controls are already the two self-checks.
+  #
+  # Each self-check is anchored to a LIVE claim and aborts if that claim is gone,
+  # so the control cannot quietly stop referring to anything -- which is the
+  # failure this whole section is about.
+  SELFCHECK_BUILTIN = "hist_observe"   # live, arity 1, domain-shaped kprobe
+  SELFCHECK_ATTACH  = :xdp             # live, flat surface, stable SEC
+  SELFCHECK_SUGAR   = "pkt.l4.proto"   # live; anchors the pkt.* chain family
+
+  # A name nothing implements, written in the documented shape of one that works.
+  # Must be REFUSED, and refused with :died -- the loud shape.
+  def selfcheck_builtin_absent(dir)
+    absent = "#{SELFCHECK_BUILTIN}_zz_absent_name"
+    call   = call_text(SELFCHECK_BUILTIN).sub(SELFCHECK_BUILTIN, absent)
+    v, _m, _s, _c, reason = check(dir, "bsc_absent", SELFCHECK_BUILTIN,
+                                  call: call, vars: free_vars(absent, call))
+    v == :refused ? reason : v
+  end
+
+  # A "call" that emits nothing. The probe and its call-less twin are the same
+  # text BY CONSTRUCTION, so the only thing that can report this is the twin
+  # witness inside `check`. Delete that witness and this half goes green -- which
+  # is precisely what it is here to notice. (Tautological input on purpose: like
+  # the sugar half's deliberately mismatched pair, it tests the gate's logic, not
+  # the C.)
+  def selfcheck_builtin_no_effect(dir)
+    v, _m, _s, _c, reason = check(dir, "bsc_noop", SELFCHECK_BUILTIN, call: "@hits = @hits + 0")
+    v == :refused ? reason : v
+  end
+
+  # Stage 1 of the attach verdict: the emitted SEC is compared against the
+  # affordance's promise. Corrupt the promise in memory (the sugar self-check's
+  # move) and the run must come back :wrong_sec.
+  def selfcheck_attach_wrong_sec(dir)
+    _v, _m, _w, reason = check_attach(dir, "asc_sec", SELFCHECK_ATTACH,
+                                      want_sec: "#{promised_sec(SELFCHECK_ATTACH)}_zz_never_promised")
+    reason
+  end
+
+  # Stage 2, and the reason there are two: stage 1 alone was MEASURED to miss
+  # `on :timer`, whose advertised SEC ("syscall") is the same string the
+  # silent degradation emits -- the tell is that the BODY never reaches the C.
+  # Ask for a marker the probe provably does not contain; must be :no_body.
+  def selfcheck_attach_no_body(dir)
+    _v, _m, _w, reason = check_attach(dir, "asc_body", SELFCHECK_ATTACH,
+                                      want_marker: "zz_marker_never_written")
+    reason
+  end
+
+  # Absence, for the sugar half: a chain member nobody implements must be refused
+  # the same way a withdrawn spelling is. Anchored on the pkt.* family existing.
+  def selfcheck_sugar_absent(dir)
+    v, = check_withdrawn_sugar(dir, "ssc_absent", "pkt.zz_absent_member", { shape: :xdp })
+    v
+  end
+
+  # ---- the attach refusal lives in TWO places -----------------------------
+  # The affordance table says WHAT is withdrawn (and is what this gate probes);
+  # CC_WITHDRAWN_ATTACH in the C codegen is what actually refuses. If an entry
+  # leaves the affordance and its C prefix stays, nothing probes it any more and
+  # nothing says so -- the control disappears silently, which is this section's
+  # own problem one level down. Requiring the two to be the SAME SET is an invariant
+  # that keeps its meaning (and stays cheap) when both are empty.
+  CC_SOURCE = File.join(ROOT, "src/codegen_c/spinel_ebpf_cc.c")
+
+  # nil means "could not read the table" -- never [] , because an empty list and
+  # an unreadable one must not look alike to the caller.
+  def cc_withdrawn_attach_prefixes
+    return nil unless File.exist?(CC_SOURCE)
+    body = File.read(CC_SOURCE)[/CC_WITHDRAWN_ATTACH\[\][^{]*\{(.*?)\n\};/m] or return nil
+    body.scan(/\{\s*"([^"]+)"/).flatten
   end
 end
 
@@ -736,6 +989,26 @@ unless noshape.empty? || !do_attach
         "  Add one to ATTACH_SHAPES. A kind the gate cannot write is a kind nothing checks,\n" \
         "  which is exactly how four attach kinds stayed advertised while silently dead."
 end
+# The affordance's withdrawn ATTACH record and the codegen's refusal table must
+# be the same set. This is the half of the old empty-set abort that is actually
+# about the inventory -- and unlike that abort it stays meaningful when both are
+# empty, which is where re-porting the demoted surfaces is heading.
+cc_prefixes = nil
+aorphan = []   # a refusal and its record that no longer point at each other
+if do_attach
+  cc_prefixes = AffordanceGate.cc_withdrawn_attach_prefixes
+  abort "affordance gate: could not read CC_WITHDRAWN_ATTACH out of\n" \
+        "  #{AffordanceGate::CC_SOURCE}\n" \
+        "  That table is what actually refuses a withdrawn attach kind; if the gate cannot\n" \
+        "  see it, it cannot tell an empty refusal set from an unreadable one." if cc_prefixes.nil?
+  aprefixes = CAP::WITHDRAWN_ATTACH.values.map { |w| w[:method_prefix].to_s }
+  cc_prefixes.each do |p|
+    aorphan << [:codegen_only, p] unless aprefixes.any? { |m| m.include?(p) }
+  end
+  CAP::WITHDRAWN_ATTACH.each do |k, w|
+    aorphan << [:affordance_only, k] unless cc_prefixes.any? { |p| w[:method_prefix].to_s.include?(p) }
+  end
+end
 # Same rule for sugar: a claim this gate cannot write is a claim nothing checks.
 if do_sugar
   bad = CAP.surface_sugar.reject { |s| s[:form] == :attach || AffordanceGate::SUGAR_SHAPES.key?(s[:shape]) }
@@ -775,6 +1048,15 @@ arevived = [] # withdrawn kind still accepted -- the silent no-op is back
 sbroken = []  # advertised sugar: died, diverged, or the gate wrote a bad pair
 srevived = [] # withdrawn sugar still accepted
 selfcheck = nil
+bself = {}    # builtin self-check
+aself = {}    # attach self-check (both stages)
+sself = nil   # sugar absence half
+# NB: aorphan is declared with the correspondence check ABOVE, not here. Ruby
+# creates a local at the point the assignment is PARSED, so a declaration below
+# its first use is a NameError -- and one that only fires when the list is
+# non-empty, i.e. exactly when the check has something to report. Caught by
+# actually running the gate against a simulated depleted tree, which is the whole
+# argument for running that world instead of reasoning about it.
 mbroken = []   # advertised map: not emitted, or emitted with other properties
 muncovered = [] # a map came out that the affordance never mentions -- the SILENT one
 mrevived = []  # a withdrawn map type is back without being re-advertised
@@ -793,6 +1075,34 @@ Dir.mktmpdir("affordance-gate") do |dir|
       abort "affordance gate: the sugar self-check's reference claim is gone."
     v, m = AffordanceGate.check_sugar(dir, "selfchk", live.merge(flat: "XDP_DROP"))
     selfcheck = [v, m]
+    # The other half -- absence. Until now the sugar section got that from
+    # WITHDRAWN_SUGAR, an inventory that re-porting empties.
+    CAP.surface_sugar.any? { |s| s[:sugar] == AffordanceGate::SELFCHECK_SUGAR } or
+      abort "affordance gate: the sugar absence self-check's reference family is gone\n" \
+            "  (#{AffordanceGate::SELFCHECK_SUGAR} is no longer an advertised sugar claim, so\n" \
+            "  `pkt.zz_absent_member` is no longer a probe of the pkt.* chain's refusal)."
+    sself = AffordanceGate.selfcheck_sugar_absent(dir)
+  end
+  # The builtin half's own controls, so it no longer depends on there being
+  # broken builtins left. Two halves because `check` can say no in two shapes, and
+  # the silent one (a call that emits nothing) is the one a text gate cannot see.
+  if do_builtins && !only
+    CAP.all_builtins.include?(AffordanceGate::SELFCHECK_BUILTIN) or
+      abort "affordance gate: the builtin self-check's reference claim " \
+            "(#{AffordanceGate::SELFCHECK_BUILTIN}) is no longer advertised.\n" \
+            "  Point SELFCHECK_BUILTIN at another live builtin that takes an argument."
+    bself[:absent_name]    = AffordanceGate.selfcheck_builtin_absent(dir)
+    bself[:no_effect_call] = AffordanceGate.selfcheck_builtin_no_effect(dir)
+  end
+  # Both STAGES of the attach verdict. A one-stage self-check would
+  # pass with the body check deleted, i.e. it would reproduce the `on :timer` hole.
+  if do_attach && !only
+    CAP::ATTACH_KINDS.any? { |a| a[:kind] == AffordanceGate::SELFCHECK_ATTACH } or
+      abort "affordance gate: the attach self-check's reference kind " \
+            "(#{AffordanceGate::SELFCHECK_ATTACH}) is no longer advertised.\n" \
+            "  Point SELFCHECK_ATTACH at another live kind with a flat surface."
+    aself[:wrong_sec]    = AffordanceGate.selfcheck_attach_wrong_sec(dir)
+    aself[:body_missing] = AffordanceGate.selfcheck_attach_no_body(dir)
   end
   advertised.each_with_index do |b, i|
     verdict, msg, shape, call = AffordanceGate.check(dir, "adv#{i}", b)
@@ -894,25 +1204,41 @@ end
 
 puts "-" * 72
 puts "affordance gate (builtins / attach kinds / surface sugar / maps)"
+# An empty withdrawn set is a true statement about the tree (nothing is
+# withdrawn), not a hole in the gate -- the detection power lives in the
+# self-checks now. Say which it is on the line itself, so the number cannot be
+# read as "control missing".
+EMPTY_NOTE = "  (record empty: nothing is withdrawn -- absence is the self-check's job)"
 if do_builtins
   puts format("  builtin  advertised  %3d  broken=%d", advertised.size, broken.size)
-  puts format("  builtin  withdrawn   %3d  revived=%d", withdrawn.size, revived.size)
+  puts format("  builtin  withdrawn   %3d  revived=%d%s", withdrawn.size, revived.size,
+              withdrawn.empty? && !only ? EMPTY_NOTE : "")
+  puts format("  builtin  self-check       %s",
+              bself.empty? ? "(skipped: --only)" : bself.map { |k, v| "#{k}=#{v}" }.join(" "))
 end
 if do_attach
   puts format("  attach   advertised  %3d  broken=%d", akinds.size, abroken.size)
-  puts format("  attach   withdrawn   %3d  revived=%d", awithdrawn.size, arevived.size)
+  puts format("  attach   withdrawn   %3d  revived=%d%s", awithdrawn.size, arevived.size,
+              awithdrawn.empty? && !only ? EMPTY_NOTE : "")
+  puts format("  attach   refusals    %3d in CC_WITHDRAWN_ATTACH  orphan=%d",
+              cc_prefixes.size, aorphan.size)
+  puts format("  attach   self-check       %s",
+              aself.empty? ? "(skipped: --only)" : aself.map { |k, v| "#{k}=#{v}" }.join(" "))
 end
 if do_sugar
   puts format("  sugar    advertised  %3d  broken=%d", sugars.size, sbroken.size)
-  puts format("  sugar    withdrawn   %3d  revived=%d", swithdrawn.size, srevived.size)
-  puts format("  sugar    self-check       %s", selfcheck ? selfcheck[0] : "(skipped: --only)")
+  puts format("  sugar    withdrawn   %3d  revived=%d%s", swithdrawn.size, srevived.size,
+              swithdrawn.empty? && !only ? EMPTY_NOTE : "")
+  puts format("  sugar    self-check       %s",
+              selfcheck ? "diverged_pair=#{selfcheck[0]} absent_member=#{sself}" : "(skipped: --only)")
 end
 if do_maps
   puts format("  map      advertised  %3d  broken=%d", maps.size, mbroken.size)
   puts format("  map      coverage    %3d surfaces swept, %d maps seen (%s)  uncovered=%d",
               msweep, mseen.size,
               mseen.group_by(&:form).map { |f, v| "#{f}:#{v.size}" }.sort.join(" "), muncovered.size)
-  puts format("  map      withdrawn   %3d types  revived=%d", CAP::WITHDRAWN_MAPS.size, mrevived.size)
+  puts format("  map      withdrawn   %3d types  revived=%d%s", CAP::WITHDRAWN_MAPS.size, mrevived.size,
+              CAP::WITHDRAWN_MAPS.empty? && !only ? EMPTY_NOTE : "")
   puts format("  map      self-check       %s",
               mselfcheck.empty? ? "(skipped: --only)" : mselfcheck.map { |k, v| "#{k}=#{v}" }.join(" "))
 end
@@ -931,6 +1257,26 @@ unless abroken.empty?
   puts "  or take it out of Capabilities::ATTACH_KINDS and record it in"
   puts "  Capabilities::WITHDRAWN_ATTACH -- and add its prefix to CC_WITHDRAWN_ATTACH"
   puts "  so the codegen REFUSES it instead of silently degrading."
+end
+
+unless aorphan.empty?
+  puts "\nTHE WITHDRAWN ATTACH RECORD AND THE CODEGEN'S REFUSALS DISAGREE. The"
+  puts "affordance table says what is withdrawn and is what this gate probes;"
+  puts "CC_WITHDRAWN_ATTACH is what actually refuses. When they drift, the surface stops"
+  puts "being checked and nothing says so -- the control disappears silently."
+  aorphan.each do |dir_, what|
+    if dir_ == :codegen_only
+      puts "  #{what}   refused by the codegen, but not in Capabilities::WITHDRAWN_ATTACH"
+      puts "      Nothing probes this refusal any more. Either record it again, or -- if the"
+      puts "      kind was re-ported -- delete the entry from CC_WITHDRAWN_ATTACH"
+      puts "      and advertise the kind in ATTACH_KINDS."
+    else
+      puts "  #{what}   recorded as withdrawn, but no CC_WITHDRAWN_ATTACH prefix matches"
+      puts "      method_prefix: #{CAP::WITHDRAWN_ATTACH[what][:method_prefix].inspect}"
+      puts "      Withdrawing it from the affordance is only half the fix: without the"
+      puts "      codegen refusal the name still compiles to a silent SEC(\"syscall\") no-op."
+    end
+  end
 end
 
 unless arevived.empty?
@@ -1025,12 +1371,40 @@ if advertised.empty? && withdrawn.empty? && akinds.empty? && awithdrawn.empty? &
   abort "\naffordance gate: nothing was checked."
 end
 unless only
-  if do_maps
-    if CAP::WITHDRAWN_MAPS.empty?
-      abort "\naffordance gate: WITHDRAWN_MAPS is empty, so the map half lost the record of\n" \
-            "  which types left with the withdrawn builtin and attach surfaces.\n" \
-            "  Keep at least one entry."
+  # The four "the withdrawn set is empty" aborts are gone. They claimed the
+  # run had NO negative control, and that claim is now false: every
+  # section carries a synthesised control that cannot be exhausted by fixing
+  # things. What is left below is the capability half -- if a self-check stops
+  # being able to produce its verdict, every `broken=0` above means nothing, so
+  # that still aborts.
+  if do_builtins
+    if bself[:absent_name] != :died
+      abort "\naffordance gate: the builtin self-check did not catch an absent name (got\n" \
+            "  #{bself[:absent_name].inspect}). A call to a builtin that does not exist, written in\n" \
+            "  the documented shape, was accepted -- so every `broken=0` above means nothing:\n" \
+            "  this gate can no longer tell an implemented builtin from a missing one."
     end
+    if bself[:no_effect_call] != :no_effect
+      abort "\naffordance gate: the builtin self-check did not catch a call that emits nothing\n" \
+            "  (got #{bself[:no_effect_call].inspect}). The probe and its call-less twin were the same\n" \
+            "  text, and the gate still called it compiled -- so the twin witness is gone and a\n" \
+            "  builtin the codegen silently drops would now read as working."
+    end
+  end
+  if do_attach
+    if aself[:wrong_sec] != :wrong_sec
+      abort "\naffordance gate: the attach self-check did not catch a wrong SEC (got\n" \
+            "  #{aself[:wrong_sec].inspect}). A deliberately corrupted promise was reported as kept, so\n" \
+            "  every attach `broken=0` above means nothing."
+    end
+    if aself[:body_missing] != :no_body
+      abort "\naffordance gate: the attach self-check did not catch a missing handler body (got\n" \
+            "  #{aself[:body_missing].inspect}). This is stage 2 of the attach verdict and it is the only\n" \
+            "  one that sees `on :timer`: its advertised SEC (\"syscall\") is the same string the\n" \
+            "  silent degradation emits, so a SEC comparison alone calls it fine."
+    end
+  end
+  if do_maps
     wrong = mselfcheck.to_h
     if wrong[:wrong_property] != :mismatch
       abort "\naffordance gate: the map self-check did not catch a wrong property (got\n" \
@@ -1050,10 +1424,12 @@ unless only
             "  (the way this vocabulary failed) would go unnoticed."
     end
   end
-  if do_sugar && swithdrawn.empty?
-    abort "\naffordance gate: the withdrawn SUGAR set is empty, so the sugar half had no\n" \
-          "  negative control for absence. Keep at least one entry, or delete this\n" \
-          "  section deliberately."
+  if do_sugar && sself != :refused
+    abort "\naffordance gate: the sugar self-check did not catch an absent chain member (got\n" \
+          "  #{sself.inspect}). `pkt.zz_absent_member` -- a spelling nothing implements -- was\n" \
+          "  accepted, so the sugar half can no longer see a surface that is simply not there.\n" \
+          "  (This is the half WITHDRAWN_SUGAR used to provide, before re-porting the demoted\n" \
+          "  surfaces began emptying it.)"
   end
   if selfcheck && selfcheck[0] != :diverged
     abort "\naffordance gate: the sugar self-check did not report a divergence (got\n" \
@@ -1062,21 +1438,9 @@ unless only
           "  this gate can no longer tell a working surface from one that lowers to\n" \
           "  something else. Fix check_sugar before reading any verdict."
   end
-  if do_builtins && withdrawn.empty?
-    abort "\naffordance gate: the withdrawn BUILTIN set is empty, so this run had no\n" \
-          "  negative control -- it cannot distinguish 'every builtin works' from 'this\n" \
-          "  gate can no longer detect a broken one'. Keep at least one entry, or delete\n" \
-          "  this gate deliberately."
-  end
-  if do_attach && awithdrawn.empty?
-    abort "\naffordance gate: the withdrawn ATTACH set is empty, so the attach half had\n" \
-          "  no negative control. It matters more here than for builtins: an unimplemented\n" \
-          "  attach kind does not raise, it degrades to SEC(\"syscall\"), so a degenerate\n" \
-          "  gate and a healthy one both print 'broken=0'."
-  end
 end
 
-exit((broken.size + revived.size + abroken.size + arevived.size +
+exit((broken.size + revived.size + abroken.size + arevived.size + aorphan.size +
       sbroken.size + srevived.size +
       mbroken.size + muncovered.size + mrevived.size).zero? ? 0 : 1)
 end

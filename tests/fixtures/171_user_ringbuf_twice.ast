@@ -1,0 +1,90 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/171_user_ringbuf_twice.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @a
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @b
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name user_ringbuf__first
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name value
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 9 StatementsNode
+N 10 InstanceVariableWriteNode
+S 10 name @a
+N 11 CallNode
+S 11 name +
+N 12 InstanceVariableReadNode
+S 12 name @a
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name value
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 value 11
+A 9 body 10
+R 6 body 9
+R 6 receiver -1
+N 15 DefNode
+S 15 name user_ringbuf__second
+N 16 ParametersNode
+N 17 RequiredParameterNode
+S 17 name value
+A 16 requireds 17
+A 16 optionals 
+A 16 keywords 
+A 16 posts 
+R 15 parameters 16
+N 18 StatementsNode
+N 19 InstanceVariableWriteNode
+S 19 name @b
+N 20 CallNode
+S 20 name +
+N 21 InstanceVariableReadNode
+S 21 name @b
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 LocalVariableReadNode
+S 23 name value
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+R 19 value 20
+A 18 body 19
+R 15 body 18
+R 15 receiver -1
+N 24 DefNode
+S 24 name xdp__pump
+R 24 parameters -1
+N 25 StatementsNode
+N 26 CallNode
+S 26 name user_ringbuf_drain
+R 26 receiver -1
+R 26 arguments -1
+R 26 block -1
+S 26 call_operator .
+I 26 vcall 1
+N 27 ConstantReadNode
+S 27 name XDP_PASS
+A 25 body 26,27
+R 24 body 25
+R 24 receiver -1
+A 1 body 2,4,6,15,24
+R 0 statements 1

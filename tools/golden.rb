@@ -69,13 +69,24 @@ bases.each do |b|
   #   exit != 0        -> the codegen REFUSED the program. That is a claim worth
   #                       pinning: a refusal that appears or disappears is a
   #                       behaviour change, not a skip.
-  #   exit 0, no _inner-> nothing eBPF-eligible in it. Production writes no
+  #   exit 0, no program -> nothing eBPF-eligible in it. Production writes no
   #                       .bpf.c either, so there is no golden to compare.
   unless st.success?
     rejected[b] = cerr.lines.first.to_s.strip
     next
   end
-  unless cout.include?("_inner")
+  # This used to ask `cout.include?("_inner")`, which is a PROXY for "did
+  # anything eBPF come out". It held because every handler is an inner plus a
+  # wrapper -- every handler except a timer, whose output is a bpf_timer callback
+  # and an arm program and contains no inner at all. So a timer-only probe (the
+  # shape the public example uses) landed in the skip bucket and
+  # would have had NO GOLDEN, silently. Ask the question directly instead: did a
+  # PROGRAM section come out? `license` and the .-sections (.maps, .struct_ops,
+  # .data.*) are storage, not programs. Measured: the seven genuinely-empty
+  # fixtures emit SEC("license") and nothing else, so no other verdict moved.
+  progs = cout.scan(/SEC\("([^"]+)"\)/).flatten
+              .reject { |s| s == "license" || s.start_with?(".") }
+  if progs.empty?
     skip += 1
     next
   end

@@ -1,0 +1,60 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/163_timer_no_interval.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @ticks
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 ModuleNode
+N 5 ConstantReadNode
+S 5 name NoInterval
+R 4 constant_path 5
+N 6 StatementsNode
+N 7 CallNode
+S 7 name include
+R 7 receiver -1
+N 8 ArgumentsNode
+N 9 ConstantPathNode
+N 10 ConstantReadNode
+S 10 name BPF
+R 9 parent 10
+S 9 name EventLoop
+A 8 arguments 9
+R 7 arguments 8
+R 7 block -1
+S 7 call_operator .
+N 11 CallNode
+S 11 name on
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 SymbolNode
+S 13 value timer
+A 12 arguments 13
+R 11 arguments 12
+N 14 BlockNode
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @ticks
+N 17 CallNode
+S 17 name +
+N 18 InstanceVariableReadNode
+S 18 name @ticks
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+A 15 body 16
+R 14 body 15
+R 11 block 14
+S 11 call_operator .
+A 6 body 7,11
+R 4 body 6
+A 1 body 2,4
+R 0 statements 1

@@ -1,13 +1,22 @@
-# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
+# STILL NOT BUILDABLE, FOR A REASON THAT HAS NOTHING TO DO WITH THIS FILE'S
+# BPF PROGRAM.
 #
-# This example uses the BPF reuseport-selection builtins (reuseport_hash, worker_select), which did not survive the move from the
-# original Ruby code generator to the C one. Compiling it now stops with a
-# message that names the missing piece and points at the alternative, rather
-# than emitting a program that loads and never fires -- which is what used to
-# happen, silently.
+# The two builtins this example is about -- reuseport_hash and worker_select --
+# were demoted by the audit and have since been restored, so that refusal is
+# gone. What stops the build now is older and unrelated: the partitioner routes
+# worker_loop, an accept loop, to the eBPF side, and the eBPF generator cannot
+# lower an unbounded `loop`. Compiling stops there.
 #
-# The file is kept because it records how the feature was expressed. Restoring
-# it means porting the generator side, not editing this file.
+# It is not this file's BPF program that is at fault. Its sibling
+# ../l7-path-counter/server.rb uses none of these surfaces and fails in exactly
+# the same place, in both compilation modes: `CallNode not yet ported
+# (Stage 1): loop` under --ebpf-dispatch, and upstream spinel refusing the
+# path_counter_inc call in the plain mode.
+#
+# The kernel half of the example is worth reading on its own: sk_reuseport__select
+# is generated, and `spinel-ebpf describe` on this file reports which
+# REUSEPORT_SOCKARRAY slots the arithmetic can reach and whether the userspace
+# half registers and attaches.
 #
 # examples/http_server/so-reuseport/server.rb
 #

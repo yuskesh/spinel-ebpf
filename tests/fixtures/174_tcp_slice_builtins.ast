@@ -1,0 +1,776 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/174_tcp_slice_builtins.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name XDP_DROP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 ConstantWriteNode
+S 6 name XDP_TX
+N 7 IntegerNode
+I 7 value 3
+R 6 value 7
+N 8 ConstantWriteNode
+S 8 name XDP_ABORTED
+N 9 IntegerNode
+I 9 value 0
+R 8 value 9
+N 10 DefNode
+S 10 name xdp__slice
+R 10 parameters -1
+N 11 StatementsNode
+N 12 LocalVariableWriteNode
+S 12 name flags
+N 13 CallNode
+S 13 name flags
+N 14 CallNode
+S 14 name tcp
+N 15 CallNode
+S 15 name pkt
+R 15 receiver -1
+R 15 arguments -1
+R 15 block -1
+S 15 call_operator .
+I 15 vcall 1
+R 14 receiver 15
+R 14 arguments -1
+R 14 block -1
+S 14 call_operator .
+R 13 receiver 14
+R 13 arguments -1
+R 13 block -1
+S 13 call_operator .
+R 12 value 13
+N 16 IfNode
+N 17 AndNode
+N 18 CallNode
+S 18 name !=
+N 19 ParenthesesNode
+N 20 StatementsNode
+N 21 CallNode
+S 21 name &
+N 22 LocalVariableReadNode
+S 22 name flags
+R 21 receiver 22
+N 23 ArgumentsNode
+N 24 ConstantPathNode
+N 25 ConstantPathNode
+N 26 ConstantReadNode
+S 26 name TCP
+R 25 parent 26
+S 25 name Flag
+R 24 parent 25
+S 24 name SYN
+A 23 arguments 24
+R 21 arguments 23
+R 21 block -1
+S 21 call_operator .
+A 20 body 21
+R 19 body 20
+R 18 receiver 19
+N 27 ArgumentsNode
+N 28 IntegerNode
+I 28 value 0
+A 27 arguments 28
+R 18 arguments 27
+R 18 block -1
+S 18 call_operator .
+R 17 left 18
+N 29 CallNode
+S 29 name ==
+N 30 ParenthesesNode
+N 31 StatementsNode
+N 32 CallNode
+S 32 name &
+N 33 LocalVariableReadNode
+S 33 name flags
+R 32 receiver 33
+N 34 ArgumentsNode
+N 35 ConstantPathNode
+N 36 ConstantPathNode
+N 37 ConstantReadNode
+S 37 name TCP
+R 36 parent 37
+S 36 name Flag
+R 35 parent 36
+S 35 name ACK
+A 34 arguments 35
+R 32 arguments 34
+R 32 block -1
+S 32 call_operator .
+A 31 body 32
+R 30 body 31
+R 29 receiver 30
+N 38 ArgumentsNode
+N 39 IntegerNode
+I 39 value 0
+A 38 arguments 39
+R 29 arguments 38
+R 29 block -1
+S 29 call_operator .
+R 17 right 29
+R 16 predicate 17
+N 40 StatementsNode
+N 41 LocalVariableWriteNode
+S 41 name cookie
+N 42 CallNode
+S 42 name tcp_syncookie_gen
+R 42 receiver -1
+R 42 arguments -1
+R 42 block -1
+S 42 call_operator .
+I 42 vcall 1
+R 41 value 42
+N 43 IfNode
+N 44 CallNode
+S 44 name <
+N 45 LocalVariableReadNode
+S 45 name cookie
+R 44 receiver 45
+N 46 ArgumentsNode
+N 47 IntegerNode
+I 47 value 0
+A 46 arguments 47
+R 44 arguments 46
+R 44 block -1
+S 44 call_operator .
+R 43 predicate 44
+N 48 StatementsNode
+N 49 ConstantReadNode
+S 49 name XDP_ABORTED
+A 48 body 49
+R 43 statements 48
+N 50 IfNode
+N 51 CallNode
+S 51 name <
+N 52 CallNode
+S 52 name tcp_reply_synack
+R 52 receiver -1
+N 53 ArgumentsNode
+N 54 LocalVariableReadNode
+S 54 name cookie
+A 53 arguments 54
+R 52 arguments 53
+R 52 block -1
+S 52 call_operator .
+R 51 receiver 52
+N 55 ArgumentsNode
+N 56 IntegerNode
+I 56 value 0
+A 55 arguments 56
+R 51 arguments 55
+R 51 block -1
+S 51 call_operator .
+R 50 predicate 51
+N 57 StatementsNode
+N 58 ConstantReadNode
+S 58 name XDP_ABORTED
+A 57 body 58
+R 50 statements 57
+N 59 ElseNode
+N 60 StatementsNode
+N 61 ConstantReadNode
+S 61 name XDP_TX
+A 60 body 61
+R 59 statements 60
+R 50 subsequent 59
+R 43 subsequent 50
+A 40 body 41,43
+R 16 statements 40
+N 62 IfNode
+N 63 CallNode
+S 63 name ==
+N 64 ParenthesesNode
+N 65 StatementsNode
+N 66 CallNode
+S 66 name &
+N 67 LocalVariableReadNode
+S 67 name flags
+R 66 receiver 67
+N 68 ArgumentsNode
+N 69 ConstantPathNode
+N 70 ConstantPathNode
+N 71 ConstantReadNode
+S 71 name TCP
+R 70 parent 71
+S 70 name Flag
+R 69 parent 70
+S 69 name ACK
+A 68 arguments 69
+R 66 arguments 68
+R 66 block -1
+S 66 call_operator .
+A 65 body 66
+R 64 body 65
+R 63 receiver 64
+N 72 ArgumentsNode
+N 73 IntegerNode
+I 73 value 0
+A 72 arguments 73
+R 63 arguments 72
+R 63 block -1
+S 63 call_operator .
+R 62 predicate 63
+N 74 StatementsNode
+N 75 ConstantReadNode
+S 75 name XDP_DROP
+A 74 body 75
+R 62 statements 74
+N 76 IfNode
+N 77 CallNode
+S 77 name ==
+N 78 CallNode
+S 78 name payload_len
+N 79 CallNode
+S 79 name l4
+N 80 CallNode
+S 80 name pkt
+R 80 receiver -1
+R 80 arguments -1
+R 80 block -1
+S 80 call_operator .
+I 80 vcall 1
+R 79 receiver 80
+R 79 arguments -1
+R 79 block -1
+S 79 call_operator .
+R 78 receiver 79
+R 78 arguments -1
+R 78 block -1
+S 78 call_operator .
+R 77 receiver 78
+N 81 ArgumentsNode
+N 82 IntegerNode
+I 82 value 0
+A 81 arguments 82
+R 77 arguments 81
+R 77 block -1
+S 77 call_operator .
+R 76 predicate 77
+N 83 StatementsNode
+N 84 IfNode
+N 85 CallNode
+S 85 name <
+N 86 CallNode
+S 86 name tcp_syncookie_check
+R 86 receiver -1
+R 86 arguments -1
+R 86 block -1
+S 86 call_operator .
+I 86 vcall 1
+R 85 receiver 86
+N 87 ArgumentsNode
+N 88 IntegerNode
+I 88 value 0
+A 87 arguments 88
+R 85 arguments 87
+R 85 block -1
+S 85 call_operator .
+R 84 predicate 85
+N 89 StatementsNode
+N 90 ConstantReadNode
+S 90 name XDP_DROP
+A 89 body 90
+R 84 statements 89
+N 91 ElseNode
+N 92 StatementsNode
+N 93 CallNode
+S 93 name flow_set
+R 93 receiver -1
+N 94 ArgumentsNode
+N 95 SymbolNode
+S 95 value conn
+N 96 SymbolNode
+S 96 value state
+N 97 IntegerNode
+I 97 value 1
+A 94 arguments 95,96,97
+R 93 arguments 94
+R 93 block -1
+S 93 call_operator .
+N 98 ConstantReadNode
+S 98 name XDP_DROP
+A 92 body 93,98
+R 91 statements 92
+R 84 subsequent 91
+A 83 body 84
+R 76 statements 83
+N 99 IfNode
+N 100 CallNode
+S 100 name payload_starts
+R 100 receiver -1
+N 101 ArgumentsNode
+N 102 StringNode
+S 102 content GET%20/health%20
+I 102 fzl 1
+A 101 arguments 102
+R 100 arguments 101
+R 100 block -1
+S 100 call_operator .
+R 99 predicate 100
+N 103 StatementsNode
+N 104 IfNode
+N 105 CallNode
+S 105 name <
+N 106 CallNode
+S 106 name tcp_reply_data
+R 106 receiver -1
+N 107 ArgumentsNode
+N 108 CallNode
+S 108 name ack
+N 109 CallNode
+S 109 name tcp
+N 110 CallNode
+S 110 name pkt
+R 110 receiver -1
+R 110 arguments -1
+R 110 block -1
+S 110 call_operator .
+I 110 vcall 1
+R 109 receiver 110
+R 109 arguments -1
+R 109 block -1
+S 109 call_operator .
+R 108 receiver 109
+R 108 arguments -1
+R 108 block -1
+S 108 call_operator .
+N 111 CallNode
+S 111 name +
+N 112 CallNode
+S 112 name seq
+N 113 CallNode
+S 113 name tcp
+N 114 CallNode
+S 114 name pkt
+R 114 receiver -1
+R 114 arguments -1
+R 114 block -1
+S 114 call_operator .
+I 114 vcall 1
+R 113 receiver 114
+R 113 arguments -1
+R 113 block -1
+S 113 call_operator .
+R 112 receiver 113
+R 112 arguments -1
+R 112 block -1
+S 112 call_operator .
+R 111 receiver 112
+N 115 ArgumentsNode
+N 116 CallNode
+S 116 name payload_len
+N 117 CallNode
+S 117 name l4
+N 118 CallNode
+S 118 name pkt
+R 118 receiver -1
+R 118 arguments -1
+R 118 block -1
+S 118 call_operator .
+I 118 vcall 1
+R 117 receiver 118
+R 117 arguments -1
+R 117 block -1
+S 117 call_operator .
+R 116 receiver 117
+R 116 arguments -1
+R 116 block -1
+S 116 call_operator .
+A 115 arguments 116
+R 111 arguments 115
+R 111 block -1
+S 111 call_operator .
+N 119 StringNode
+S 119 content HTTP/1.0%20200%20OK%0D%0AContent-Length:%203%0D%0A%0D%0AOK%0A
+I 119 fzl 1
+A 107 arguments 108,111,119
+R 106 arguments 107
+R 106 block -1
+S 106 call_operator .
+R 105 receiver 106
+N 120 ArgumentsNode
+N 121 IntegerNode
+I 121 value 0
+A 120 arguments 121
+R 105 arguments 120
+R 105 block -1
+S 105 call_operator .
+R 104 predicate 105
+N 122 StatementsNode
+N 123 ConstantReadNode
+S 123 name XDP_ABORTED
+A 122 body 123
+R 104 statements 122
+N 124 ElseNode
+N 125 StatementsNode
+N 126 CallNode
+S 126 name flow_set
+R 126 receiver -1
+N 127 ArgumentsNode
+N 128 SymbolNode
+S 128 value conn
+N 129 SymbolNode
+S 129 value state
+N 130 IntegerNode
+I 130 value 3
+A 127 arguments 128,129,130
+R 126 arguments 127
+R 126 block -1
+S 126 call_operator .
+N 131 ConstantReadNode
+S 131 name XDP_TX
+A 125 body 126,131
+R 124 statements 125
+R 104 subsequent 124
+A 103 body 104
+R 99 statements 103
+N 132 IfNode
+N 133 CallNode
+S 133 name payload_starts
+R 133 receiver -1
+N 134 ArgumentsNode
+N 135 StringNode
+S 135 content GET%20/health%20
+I 135 fzl 1
+A 134 arguments 135
+R 133 arguments 134
+R 133 block -1
+S 133 call_operator .
+R 132 predicate 133
+N 136 StatementsNode
+N 137 ConstantReadNode
+S 137 name XDP_DROP
+A 136 body 137
+R 132 statements 136
+N 138 IfNode
+N 139 CallNode
+S 139 name payload_starts
+R 139 receiver -1
+N 140 ArgumentsNode
+N 141 StringNode
+S 141 content GET%20/ping%20
+I 141 fzl 1
+A 140 arguments 141
+R 139 arguments 140
+R 139 block -1
+S 139 call_operator .
+R 138 predicate 139
+N 142 StatementsNode
+N 143 IfNode
+N 144 CallNode
+S 144 name <
+N 145 CallNode
+S 145 name tcp_reply_data
+R 145 receiver -1
+N 146 ArgumentsNode
+N 147 CallNode
+S 147 name ack
+N 148 CallNode
+S 148 name tcp
+N 149 CallNode
+S 149 name pkt
+R 149 receiver -1
+R 149 arguments -1
+R 149 block -1
+S 149 call_operator .
+I 149 vcall 1
+R 148 receiver 149
+R 148 arguments -1
+R 148 block -1
+S 148 call_operator .
+R 147 receiver 148
+R 147 arguments -1
+R 147 block -1
+S 147 call_operator .
+N 150 CallNode
+S 150 name +
+N 151 CallNode
+S 151 name seq
+N 152 CallNode
+S 152 name tcp
+N 153 CallNode
+S 153 name pkt
+R 153 receiver -1
+R 153 arguments -1
+R 153 block -1
+S 153 call_operator .
+I 153 vcall 1
+R 152 receiver 153
+R 152 arguments -1
+R 152 block -1
+S 152 call_operator .
+R 151 receiver 152
+R 151 arguments -1
+R 151 block -1
+S 151 call_operator .
+R 150 receiver 151
+N 154 ArgumentsNode
+N 155 CallNode
+S 155 name payload_len
+N 156 CallNode
+S 156 name l4
+N 157 CallNode
+S 157 name pkt
+R 157 receiver -1
+R 157 arguments -1
+R 157 block -1
+S 157 call_operator .
+I 157 vcall 1
+R 156 receiver 157
+R 156 arguments -1
+R 156 block -1
+S 156 call_operator .
+R 155 receiver 156
+R 155 arguments -1
+R 155 block -1
+S 155 call_operator .
+A 154 arguments 155
+R 150 arguments 154
+R 150 block -1
+S 150 call_operator .
+N 158 StringNode
+S 158 content HTTP/1.0%20200%20OK%0D%0AContent-Length:%203%0D%0A%0D%0AOK%0A
+I 158 fzl 1
+A 146 arguments 147,150,158
+R 145 arguments 146
+R 145 block -1
+S 145 call_operator .
+R 144 receiver 145
+N 159 ArgumentsNode
+N 160 IntegerNode
+I 160 value 0
+A 159 arguments 160
+R 144 arguments 159
+R 144 block -1
+S 144 call_operator .
+R 143 predicate 144
+N 161 StatementsNode
+N 162 ConstantReadNode
+S 162 name XDP_ABORTED
+A 161 body 162
+R 143 statements 161
+N 163 ElseNode
+N 164 StatementsNode
+N 165 ConstantReadNode
+S 165 name XDP_TX
+A 164 body 165
+R 163 statements 164
+R 143 subsequent 163
+A 142 body 143
+R 138 statements 142
+N 166 IfNode
+N 167 CallNode
+S 167 name !=
+N 168 ParenthesesNode
+N 169 StatementsNode
+N 170 CallNode
+S 170 name &
+N 171 LocalVariableReadNode
+S 171 name flags
+R 170 receiver 171
+N 172 ArgumentsNode
+N 173 ConstantPathNode
+N 174 ConstantPathNode
+N 175 ConstantReadNode
+S 175 name TCP
+R 174 parent 175
+S 174 name Flag
+R 173 parent 174
+S 173 name FIN
+A 172 arguments 173
+R 170 arguments 172
+R 170 block -1
+S 170 call_operator .
+A 169 body 170
+R 168 body 169
+R 167 receiver 168
+N 176 ArgumentsNode
+N 177 IntegerNode
+I 177 value 0
+A 176 arguments 177
+R 167 arguments 176
+R 167 block -1
+S 167 call_operator .
+R 166 predicate 167
+N 178 StatementsNode
+N 179 IfNode
+N 180 CallNode
+S 180 name <
+N 181 CallNode
+S 181 name tcp_reply_header
+R 181 receiver -1
+N 182 ArgumentsNode
+N 183 CallNode
+S 183 name ack
+N 184 CallNode
+S 184 name tcp
+N 185 CallNode
+S 185 name pkt
+R 185 receiver -1
+R 185 arguments -1
+R 185 block -1
+S 185 call_operator .
+I 185 vcall 1
+R 184 receiver 185
+R 184 arguments -1
+R 184 block -1
+S 184 call_operator .
+R 183 receiver 184
+R 183 arguments -1
+R 183 block -1
+S 183 call_operator .
+N 186 CallNode
+S 186 name +
+N 187 CallNode
+S 187 name seq
+N 188 CallNode
+S 188 name tcp
+N 189 CallNode
+S 189 name pkt
+R 189 receiver -1
+R 189 arguments -1
+R 189 block -1
+S 189 call_operator .
+I 189 vcall 1
+R 188 receiver 189
+R 188 arguments -1
+R 188 block -1
+S 188 call_operator .
+R 187 receiver 188
+R 187 arguments -1
+R 187 block -1
+S 187 call_operator .
+R 186 receiver 187
+N 190 ArgumentsNode
+N 191 IntegerNode
+I 191 value 1
+A 190 arguments 191
+R 186 arguments 190
+R 186 block -1
+S 186 call_operator .
+N 192 CallNode
+S 192 name |
+N 193 ConstantPathNode
+N 194 ConstantPathNode
+N 195 ConstantReadNode
+S 195 name TCP
+R 194 parent 195
+S 194 name Flag
+R 193 parent 194
+S 193 name FIN
+R 192 receiver 193
+N 196 ArgumentsNode
+N 197 ConstantPathNode
+N 198 ConstantPathNode
+N 199 ConstantReadNode
+S 199 name TCP
+R 198 parent 199
+S 198 name Flag
+R 197 parent 198
+S 197 name ACK
+A 196 arguments 197
+R 192 arguments 196
+R 192 block -1
+S 192 call_operator .
+A 182 arguments 183,186,192
+R 181 arguments 182
+R 181 block -1
+S 181 call_operator .
+R 180 receiver 181
+N 200 ArgumentsNode
+N 201 IntegerNode
+I 201 value 0
+A 200 arguments 201
+R 180 arguments 200
+R 180 block -1
+S 180 call_operator .
+R 179 predicate 180
+N 202 StatementsNode
+N 203 ConstantReadNode
+S 203 name XDP_ABORTED
+A 202 body 203
+R 179 statements 202
+N 204 ElseNode
+N 205 StatementsNode
+N 206 ConstantReadNode
+S 206 name XDP_TX
+A 205 body 206
+R 204 statements 205
+R 179 subsequent 204
+A 178 body 179
+R 166 statements 178
+N 207 ElseNode
+N 208 StatementsNode
+N 209 ConstantReadNode
+S 209 name XDP_DROP
+A 208 body 209
+R 207 statements 208
+R 166 subsequent 207
+R 138 subsequent 166
+R 132 subsequent 138
+R 99 subsequent 132
+R 76 subsequent 99
+R 62 subsequent 76
+R 16 subsequent 62
+A 11 body 12,16
+R 10 body 11
+R 10 receiver -1
+N 210 DefNode
+S 210 name xdp__slice_oneshot
+R 210 parameters -1
+N 211 StatementsNode
+N 212 IfNode
+N 213 CallNode
+S 213 name <
+N 214 CallNode
+S 214 name tcp_synack_cookie
+R 214 receiver -1
+R 214 arguments -1
+R 214 block -1
+S 214 call_operator .
+I 214 vcall 1
+R 213 receiver 214
+N 215 ArgumentsNode
+N 216 IntegerNode
+I 216 value 0
+A 215 arguments 216
+R 213 arguments 215
+R 213 block -1
+S 213 call_operator .
+R 212 predicate 213
+N 217 StatementsNode
+N 218 ConstantReadNode
+S 218 name XDP_ABORTED
+A 217 body 218
+R 212 statements 217
+N 219 ElseNode
+N 220 StatementsNode
+N 221 ConstantReadNode
+S 221 name XDP_TX
+A 220 body 221
+R 219 statements 220
+R 212 subsequent 219
+A 211 body 212
+R 210 body 211
+R 210 receiver -1
+N 222 CallNode
+S 222 name puts
+R 222 receiver -1
+N 223 ArgumentsNode
+N 224 StringNode
+S 224 content [174]%20pure-XDP%20TCP%20slice%20builtins
+I 224 fzl 1
+A 223 arguments 224
+R 222 arguments 223
+R 222 block -1
+S 222 call_operator .
+A 1 body 2,4,6,8,10,210,222
+R 0 statements 1

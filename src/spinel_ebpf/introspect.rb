@@ -38,6 +38,112 @@ module SpinelEbpf
       end
     end
 
+    # The `def xdp_tail__<name>` of this unit, IN FILE ORDER -- which
+    # is the slot order, because libbpf iterates programs in ELF section order
+    # and the loader assigns slots as it iterates. Text-scanned like the rest of
+    # `describe`; the reactor has no `on :xdp_tail` spelling, so the flat `def`
+    # is the whole surface.
+    # Comments are stripped first, and that is not cosmetic here: a commented-out
+    # `def xdp_tail__<name>` is not compiled, so counting it would shift every
+    # slot number in the table and the table would disagree with the codegen.
+    # (Measured while writing this: the fixture's own header sentence contains
+    # `tail_call_to(slot)` and was reported as a computed slot.)
+    def tail_call_targets(source)
+      strip_comments(source).scan(/^\s*def\s+(xdp_tail__\w+)/).flatten
+    end
+
+    # The literal slots this source jumps to. A computed slot is reported
+    # separately -- it is exactly the case nothing can check.
+    def tail_call_slots(source)
+      strip_comments(source).scan(/(?<![\w.])tail_call_to\s*\(\s*(\d+)\s*\)/).flatten.map(&:to_i).uniq
+    end
+
+    def strip_comments(source)
+      source.each_line.map { |l| l.chomp.sub(/#.*\z/, "") }.join("\n")
+    end
+
+    # The host -> kernel command channel, as this source spells it.
+    # Comments are stripped for the reason measured above (a header sentence that
+    # merely MENTIONS a call would otherwise be read as code -- and the two
+    # committed examples both mention `user_ringbuf_drain` in their headers).
+    #
+    # Three things are collected because three things can be wrong and only one
+    # of them is a compile error:
+    #   :cb     the callback (0 or 1; 2 is refused by the codegen)
+    #   :drains the handlers that call user_ringbuf_drain -- how OFTEN commands
+    #           are picked up, which is the author's choice and not checkable
+    #   :push   whether anything in this file pushes (the FFI may live elsewhere,
+    #           so its absence is a note, not an error)
+    def user_ringbuf_facts(source)
+      s = strip_comments(source)
+      cb = s.scan(/^\s*def\s+user_ringbuf__(\w+)/).flatten.first
+      cb ||= "cmd_handler" if s =~ /(?<![\w.])on\s+:user_cmd\b/
+      drains = []
+      cur = nil
+      s.each_line do |l|
+        cur = $1 if l =~ /^\s*def\s+(\w+)/
+        cur = "on :#{$1}" if l =~ /^\s*on\s+:(\w+)/
+        drains << (cur || "(top level)") if l =~ /(?<![\w.])user_ringbuf_drain\b/
+      end
+      { cb: cb, drains: drains.uniq,
+        push: s.include?("sp_bpf_user_cmd_push") }
+    end
+
+    # The argument texts this source passes to `worker_select`, and
+    # what they say about which REUSEPORT_SOCKARRAY slots can ever be picked.
+    # Comments are stripped for the reason measured above (a header sentence that
+    # merely MENTIONS the call would otherwise be read as code).
+    #
+    # Two shapes are decidable and one is not:
+    #   `worker_select(reuseport_hash % N)` (N literal) -> slots 0..N-1
+    #   `worker_select(N)`                  (N literal) -> that one slot
+    #   anything else                                   -> unknown
+    # The point of printing it is that the OTHER end of the correspondence --
+    # how many workers call sp_bpf_reuseport_register -- is a runtime fact the
+    # codegen never learns, and a mismatch is silent in both directions.
+    def worker_select_args(source)
+      strip_comments(source)
+        .scan(/(?<![\w.])worker_select\s*\(\s*([^)]*)\)/).flatten.map(&:strip)
+    end
+
+    # `arg` may be a local, because the dominant idiom is two lines:
+    #   idx = reuseport_hash % 4
+    #   worker_select(idx)
+    # -- which is what BOTH the fixture and the public example write, so a
+    # scanner that only understands the inlined form would answer "cannot tell"
+    # for every real probe. One hop of resolution is done, and ONLY when the name
+    # is assigned exactly once in the file: a reassigned local is a genuinely
+    # open question and saying so is better than picking an assignment.
+    # `resolved` is carried through to the output so the reader can see this was
+    # read off the text, not computed by the codegen.
+    def reuseport_reach(arg, source = nil)
+      k = reuseport_reach_direct(arg)
+      return k + [false] unless k[0] == :unknown
+      return k + [false] unless source && arg =~ /\A[a-z_]\w*\z/
+      asg = strip_comments(source).scan(/^\s*#{Regexp.escape(arg)}\s*=\s*(.+?)\s*$/).flatten
+      return k + [false] unless asg.size == 1
+      k2 = reuseport_reach_direct(asg[0])
+      k2[0] == :unknown ? k + [false] : k2 + [true]
+    end
+
+    def reuseport_reach_direct(arg)
+      if (m = arg.match(/\Areuseport_hash\s*%\s*(\d+)\z/))  then [:modulo, m[1].to_i]
+      elsif arg =~ /\A\d+\z/                                 then [:literal, arg.to_i]
+      else                                                          [:unknown, nil]
+      end
+    end
+
+    # Does the probe's own userspace half do the two things nothing else can do
+    # for it? Both are ordinary `ffi_func` calls in the same file, so a text scan
+    # sees them -- and their ABSENCE is the difference between "the program picks
+    # workers" and "the program is loaded and never fires" / "every pick falls
+    # back to the kernel".
+    def reuseport_userspace_calls(source)
+      code = strip_comments(source)
+      { register: code.include?("sp_bpf_reuseport_register"),
+        attach:   code.include?("sp_bpf_reuseport_attach") }
+    end
+
     def builtin_domains(source)
       code = source.each_line.map { |l| l.chomp.sub(/#.*\z/, "") }.join("\n")
       names = SpinelEbpf::Capabilities.all_builtins.select do |b|
@@ -411,6 +517,160 @@ module SpinelEbpf
         end
       end
 
+      # Tail-call dispatch. The slot numbers in `tail_call_to(N)` and the
+      # declaration order of `def xdp_tail__<name>` are bound by NOTHING in the
+      # source: the loader writes each target into the slot matching its position
+      # in the file, and a jump into a slot nobody filled does not fail -- it
+      # falls through and the caller keeps running. The code generator refuses a
+      # literal slot outside the range, but it cannot see a literal that is in
+      # range and points at the WRONG target, so the correspondence has to be
+      # readable somewhere. Here.
+      targets = tail_call_targets(source)
+      jumps   = tail_call_slots(source)
+      # A COMPUTED slot has to open this section too. Measured while writing it:
+      # gating on `targets + literal jumps` left `tail_call_to(n)` with no targets
+      # printing nothing at all -- which is the one probe shape the code generator
+      # cannot refuse (the slot is not a literal) and the one most in need of a
+      # warning.
+      computed = strip_comments(source)
+                 .scan(/(?<![\w.])tail_call_to\s*\(\s*([^)\s]+)\s*\)/).flatten
+                 .reject { |a| a =~ /\A\d+\z/ }
+      unless targets.empty? && jumps.empty? && computed.empty?
+        out << "\ntail-call dispatch (slot numbers come from declaration order):\n"
+        if targets.empty?
+          out << "  ! there is a `tail_call_to` but not one `def xdp_tail__<name>` --\n"
+          out << "    the jump table stays empty, so every jump falls through, silently.\n"
+        else
+          targets.each_with_index do |t, i2|
+            hit = jumps.include?(i2)
+            out << format("  slot %-3d %-30s %s\n", i2, t,
+                          hit ? "<- tail_call_to(#{i2})" :
+                                "(nothing in this source jumps here -- only another unit, or a manual populate, reaches it)")
+          end
+        end
+        out << "  Reordering the targets, or inserting one between them, **renumbers all of them**.\n" \
+               "  What follows is not an error but a jump to a different program, or to none,\n" \
+               "  so comparing this table against your `tail_call_to(N)` is the only check there is.\n"
+        unless computed.empty?
+          out << format("  ! %d slot(s) are computed (%s) -- those cannot be range-checked at compile time.\n",
+                        computed.size, computed.uniq.join(", "))
+        end
+      end
+
+      # The host-to-kernel command channel. What this section is for is the pair
+      # of numbers that live in two files and that no gate compiles together (the
+      # map name and the 8-byte record), plus the one design choice the code
+      # generator deliberately does NOT make for the author: where the ring is
+      # drained, which is what sets command latency.
+      urb = user_ringbuf_facts(source)
+      if urb[:cb] || !urb[:drains].empty?
+        out << "\nhost -> kernel command channel (USER_RINGBUF):\n"
+        out << format("  callback   user_ringbuf__%s(value)  <- once per record\n", urb[:cb]) if urb[:cb]
+        if urb[:drains].empty?
+          out << "  ! no handler calls `user_ringbuf_drain` (the code generator refuses this)\n"
+        else
+          out << format("  drained in %s\n", urb[:drains].join(" / "))
+          out << "    => how **often** commands are picked up is exactly how often that hook fires:\n" \
+                 "      once per packet under XDP, once per call under a kprobe. It is not synthesised\n" \
+                 "      because that is a design decision.\n"
+        end
+        out << "  record     **a fixed 8 bytes** (the callback reads sizeof(__s64) with bpf_dynptr_read)\n"
+        out << "  to send    `module M ; ffi_func :sp_bpf_user_cmd_push, [:int64], :int ; end` then\n" \
+               "             `M.sp_bpf_user_cmd_push(v)`  (0 = ok / -2 = no ring in this unit / -5 = full)\n"
+        out << "  ! a hand-rolled pusher sending fewer than 8 bytes makes **the callback fire and the\n" \
+               "    count rise while only the value stays 0** (bpf_dynptr_read returns -E2BIG and gives\n" \
+               "    up silently, measured). A check that looks only at the count passes this failure.\n"
+        out << "  ! **kernel floor 6.1**. If nothing needs to change while the probe runs,\n" \
+               "    `param :name, default: N` (floor 5.2, set once before load and then frozen) travels\n" \
+               "    further.\n"
+        unless urb[:push]
+          out << "  ! nothing in this source calls `sp_bpf_user_cmd_push` -- if nobody pushes, the\n" \
+                 "    callback never runs (the drain just returns 0 records, and that is silent).\n" \
+                 "    Ignore this if the push happens in another file or another process.\n"
+        end
+      end
+
+      # The pure-XDP TCP slice. This section exists for one fact that has no other
+      # way of reaching the reader: **the method body is thrown away**. Nothing
+      # downstream says so -- the compile succeeds, the program loads, the slice
+      # works -- so an author who puts logic in that body watches it have no
+      # effect with no diagnostic anywhere. It is the only attach kind in the
+      # affordance whose body is discarded, and the reason `describe` names the
+      # surprising thing first rather than the machinery.
+      #
+      # The rest is the hardcoded contract: the port, the path, and the fact that
+      # userspace holds no socket -- which is what makes `strace` on this probe
+      # show no data-plane syscalls at all.
+      slices = source.scan(/^\s*def\s+(xdp__tcp_slice__\w+)/).flatten
+      unless slices.empty?
+        out << "\npure-XDP TCP slice:\n"
+        slices.each { |m| out << format("  handler    %s   -> SEC(\"xdp\"), whose body is the single line spnl_tcp_slice_main(ctx)\n", m) }
+        out << "  ! **the body is not used** -- whatever you write inside `def #{slices.first}` never\n" \
+               "    appears in the generated C. It is a marker, not a handler, so putting logic there\n" \
+               "    **does nothing and warns about nothing**. To write branches, use an ordinary\n" \
+               "    `def xdp__<name>` with the seven builtins (tcp_synack_cookie / tcp_syncookie_check /\n" \
+               "    payload_starts / tcp_reply_data and the rest).\n"
+        out << "  listens on **port 8080, fixed**, and answers **only `GET /health `**\n"
+        out << "  replies    HTTP/1.0 200 OK with the body \"OK\", sent back directly with XDP_TX\n"
+        out << "  state      bpf_conntab (LRU_HASH, 65536): sequence numbers and state per 4-tuple.\n" \
+               "             Overflowing is **not an error** -- the oldest connection is evicted silently\n" \
+               "             and stops being answered (so 65536 is the concurrency ceiling, and going\n" \
+               "             over it shows up as a falling success rate)\n"
+        out << "  observe    bpf_ts_counters (ARRAY, 17) -- `bpftool map dump name bpf_ts_counters`.\n" \
+               "             It drains no ring buffer, so it is outside the channel balance report\n"
+        out << "  ! the kernel does not listen on that port. Userspace holds no socket, so there is no\n" \
+               "    accept, no read and no write -- that is the claim. The other side of it: **stop this\n" \
+               "    probe and :8080 answers nobody**, because there is no userspace to fall back to.\n"
+        out << "  ! the target interface comes from SPNL_XDP_IFACE (lo by default). On an interface\n" \
+               "    that already has an XDP program, this fails with EBUSY rather than replacing it.\n"
+      end
+
+      # SO_REUSEPORT worker selection. Three facts this section exists for, none
+      # of which the code generator can settle:
+      #   1. how many slots the author's arithmetic can reach,
+      #   2. whether anything registers a socket into those slots,
+      #   3. whether anything attaches the program to a reuseport group at all.
+      # (2) and (3) are refused by NOTHING on purpose: the FFI calls may live in
+      # another file, and the affordance gate's own probe for `worker_select` is
+      # a bare handler with no userspace half -- refusing would make an advertised
+      # builtin fail its own gate (the same reasoning that keeps a lone tail-call
+      # target legal).
+      wsel = worker_select_args(source)
+      unless wsel.empty?
+        out << "\nSO_REUSEPORT worker selection (userspace fills the slots):\n"
+        wsel.each do |arg|
+          kind, n, via = reuseport_reach(arg, source)
+          hop = via ? " (from the single assignment to `#{arg}`)" : ""
+          case kind
+          when :modulo
+            out << format("  worker_select(%s) -> reaches the %d slots 0..%d%s\n", arg, n, n - 1, hop)
+            out << format("    => call `sp_bpf_reuseport_register(listen_fd, i)` for **all %d of i = 0..%d**.\n",
+                          n, n - 1)
+          when :literal
+            out << format("  worker_select(%s) -> pinned to **slot %d alone**%s: it does not read the hash,\n",
+                          arg, n, hop)
+            out << "    so every connection goes to the same worker (a pin, not a spread)\n"
+          else
+            out << format("  worker_select(%s) -> which slots it reaches is **not decidable at compile time** " \
+                          "(a runtime value, several assignments, or a name from another unit)\n", arg)
+          end
+        end
+        out << "  Naming a slot nobody registered **is not an error** -- the kernel quietly falls back\n" \
+               "  to its own 5-tuple spread. So getting the worker count wrong leaves you with some\n" \
+               "  connections following the program's choice and the rest following the kernel's, and\n" \
+               "  nothing in the output tells the two apart.\n"
+        u = reuseport_userspace_calls(source)
+        unless u[:attach]
+          out << "  ! nothing in this source calls `sp_bpf_reuseport_attach` -- the program is loaded\n" \
+                 "    and **never fires once** (the SO_REUSEPORT listening socket is created by the probe\n" \
+                 "    itself, so the loader cannot attach it). Ignore this if another file calls it.\n"
+        end
+        unless u[:register]
+          out << "  ! nothing in this source calls `sp_bpf_reuseport_register` -- every slot is empty, so\n" \
+                 "    every `worker_select` falls back to the default spread (silently, again).\n"
+        end
+      end
+
       # Which capability domains does this unit touch?
       doms = builtin_domains(source)
       out << "\ncapability domains:\n"
@@ -467,10 +727,21 @@ module SpinelEbpf
       fkeys = SpinelEbpf::CommonFilter.scan_source(source)
       handlers = source.scan(/^\s*def\s+([a-z_0-9]+__[A-Za-z_0-9]*)/).flatten
       out << "\nin-kernel common filter (one declaration, injected at the head of every attach handler):\n"
+        has_timer = source.match?(/^\s*on\s+:timer\b/)
       if fkeys.empty?
         out << "  (none) this probe is **not narrowed** -- events from every process and every cgroup come out.\n"
         out << "         To narrow it, put `filter_by :pid, :comm` (or similar) at the top level. Keys: " \
                "#{SpinelEbpf::CommonFilter::KEYS.map(&:name).join(' ')}.\n"
+        # If this probe has a timer, the advice above **does not apply to this
+        # source**: a bpf_timer callback is not process context, so the common
+        # filter's own gate refuses the declaration outright. Do not leave
+        # `describe` recommending a spelling that cannot be written here.
+        if has_timer
+          out << "         ! except that **this probe has an `on :timer`, so `filter_by` cannot be used** --\n"
+          out << "           a timer callback carries no \"whose event is this\", so the gate refuses the\n"
+          out << "           declaration at compile time. To narrow it, split the timer into its own probe,\n"
+          out << "           or filter by hand inside the handler using `param`.\n"
+        end
       else
         fkeys.each do |f|
           known, unknown = f[:keys].partition { |k| SpinelEbpf::CommonFilter::KEYS_BY_NAME.key?(k) }

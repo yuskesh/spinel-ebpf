@@ -1,0 +1,54 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/177_payload_starts_not_literal.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 ConstantWriteNode
+S 4 name XDP_DROP
+N 5 IntegerNode
+I 5 value 1
+R 4 value 5
+N 6 DefNode
+S 6 name xdp__slice
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name prefix_code
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 9 StatementsNode
+N 10 IfNode
+N 11 CallNode
+S 11 name payload_starts
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 LocalVariableReadNode
+S 13 name prefix_code
+A 12 arguments 13
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 14 StatementsNode
+N 15 ConstantReadNode
+S 15 name XDP_DROP
+A 14 body 15
+R 10 statements 14
+N 16 ElseNode
+N 17 StatementsNode
+N 18 ConstantReadNode
+S 18 name XDP_PASS
+A 17 body 18
+R 16 statements 17
+R 10 subsequent 16
+A 9 body 10
+R 6 body 9
+R 6 receiver -1
+A 1 body 2,4,6
+R 0 statements 1

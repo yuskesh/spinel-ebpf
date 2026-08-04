@@ -1,0 +1,122 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/165_timer_filter_by.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 CallNode
+S 2 name filter_by
+R 2 receiver -1
+N 3 ArgumentsNode
+N 4 SymbolNode
+S 4 value pid
+A 3 arguments 4
+R 2 arguments 3
+R 2 block -1
+S 2 call_operator .
+N 5 InstanceVariableWriteNode
+S 5 name @opens
+N 6 IntegerNode
+I 6 value 0
+R 5 value 6
+N 7 InstanceVariableWriteNode
+S 7 name @ticks
+N 8 IntegerNode
+I 8 value 0
+R 7 value 8
+N 9 ModuleNode
+N 10 ConstantReadNode
+S 10 name Mixed
+R 9 constant_path 10
+N 11 StatementsNode
+N 12 CallNode
+S 12 name include
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 ConstantPathNode
+N 15 ConstantReadNode
+S 15 name BPF
+R 14 parent 15
+S 14 name EventLoop
+A 13 arguments 14
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+N 16 CallNode
+S 16 name on
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 SymbolNode
+S 18 value kprobe
+N 19 StringNode
+S 19 content do_sys_openat2
+I 19 fzl 1
+A 17 arguments 18,19
+R 16 arguments 17
+N 20 BlockNode
+N 21 StatementsNode
+N 22 InstanceVariableWriteNode
+S 22 name @opens
+N 23 CallNode
+S 23 name +
+N 24 InstanceVariableReadNode
+S 24 name @opens
+R 23 receiver 24
+N 25 ArgumentsNode
+N 26 IntegerNode
+I 26 value 1
+A 25 arguments 26
+R 23 arguments 25
+R 23 block -1
+S 23 call_operator .
+R 22 value 23
+A 21 body 22
+R 20 body 21
+R 16 block 20
+S 16 call_operator .
+N 27 CallNode
+S 27 name on
+R 27 receiver -1
+N 28 ArgumentsNode
+N 29 SymbolNode
+S 29 value timer
+N 30 KeywordHashNode
+N 31 AssocNode
+N 32 SymbolNode
+S 32 value every
+R 31 key 32
+N 33 CallNode
+S 33 name seconds
+N 34 IntegerNode
+I 34 value 1
+R 33 receiver 34
+R 33 arguments -1
+R 33 block -1
+S 33 call_operator .
+R 31 value 33
+A 30 elements 31
+A 28 arguments 29,30
+R 27 arguments 28
+N 35 BlockNode
+N 36 StatementsNode
+N 37 InstanceVariableWriteNode
+S 37 name @ticks
+N 38 CallNode
+S 38 name +
+N 39 InstanceVariableReadNode
+S 39 name @ticks
+R 38 receiver 39
+N 40 ArgumentsNode
+N 41 IntegerNode
+I 41 value 1
+A 40 arguments 41
+R 38 arguments 40
+R 38 block -1
+S 38 call_operator .
+R 37 value 38
+A 36 body 37
+R 35 body 36
+R 27 block 35
+S 27 call_operator .
+A 11 body 12,16,27
+R 9 body 11
+A 1 body 2,5,7,9
+R 0 statements 1

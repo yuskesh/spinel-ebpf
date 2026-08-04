@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# spinel-ebpf — wrapper around matz/spinel that adds eBPF partition codegen.
+# spinel-ebpf -- wrapper around matz/spinel that adds eBPF partition codegen.
 #
 # Modes:
 #   spinel-ebpf compile foo.rb                  # eBPF-mixed (default)
@@ -37,6 +37,11 @@ require "spinel_ebpf/param"
 require "spinel_ebpf/common_filter"
 require "spinel_ebpf/keep_filter"
 require "spinel_ebpf/instrument"
+# the codegen <-> loader seam. Generated from src/codegen_c/loader_contract.h
+# by `make -C src/codegen_c loader-contract`; build_glue_c interpolates these so the
+# glue holds no map-name literal, no hand-typed strncmp length and no hand-typed
+# record width. tools/loader_gate.rb fails when the committed file is stale.
+require "spinel_ebpf/loader_contract_gen"
 
 VERSION = "0.0.1"
 PROJECT_ROOT = File.expand_path("..", __dir__)
@@ -107,7 +112,7 @@ def c_spinel
   # `make`) over the legacy `build/spinel` path. The latter is a stale fossil on
   # current upstream (no Makefile rule builds it) and lagged real fixes (e.g. the
   # FFI `:binstr` return lowering), which made spinel-ebpf emit wrong C while the
-  # upstream test harness — which uses bin/spinel — passed. SPINEL_C_BIN overrides.
+  # upstream test harness -- which uses bin/spinel -- passed. SPINEL_C_BIN overrides.
   cands = [ENV["SPINEL_C_BIN"],
            File.join(SPINEL_DIR, "bin", "spinel"),
            File.join(SPINEL_DIR, "build", "spinel")].compact
@@ -119,7 +124,7 @@ end
 # the codegen TU with -DSPNL_INPROCESS). It reads the analyzed Compiler struct
 # directly and emits both the SPINEL-IR (.ir, via cc_build_ir_text) and the
 # .bpf.c (via the ported codegen) with NO `--emit-ir`. Returns the path, or nil
-# when it can't be built (objects absent / non-Linux host — compile is Linux-only
+# when it can't be built (objects absent / non-Linux host -- compile is Linux-only
 # anyway), in which case callers fall back to the legacy --emit-ir + Ruby codegen.
 def inproc_codegen_bin
   return @inproc_bin if defined?(@inproc_bin)
@@ -239,7 +244,7 @@ def cmd_compile(argv)
       opts[:ebpf_dispatch] = true
     }
     op.on("--instrument",
-          "auto-instrument the target — build it (noinline) + a sidecar uprobe agent (rate)") {
+          "auto-instrument the target -- build it (noinline) + a sidecar uprobe agent (rate)") {
       opts[:instrument] = true
     }
     op.on("--instrument-only LIST", "comma-separated method names to instrument") { |l|
@@ -253,7 +258,7 @@ def cmd_compile(argv)
       opts[:instrument_duration] = n
     }
     op.on("--instrument-dump",
-          "one-shot mode — observe then dump per-method hist to stderr (default: /metrics server)") {
+          "one-shot mode -- observe then dump per-method hist to stderr (default: /metrics server)") {
       opts[:instrument_dump] = true
     }
     op.on("--instrument-port N", Integer,
@@ -348,7 +353,7 @@ def cmd_compile(argv)
     warn "[spinel-ebpf] use_plugin :#{name} -> #{m.root}/plugin.toml (abi #{m.abi_version})" if opts[:verbose]
     m
   end
-  # build-time arbiter — declared plugins must not conflict
+  # build-time arbiter -- declared plugins must not conflict
   # (plugins may not claim the same namespace). No-op for a single plugin.
   begin
     SpinelEbpf::Plugin.arbitrate!(manifests)
@@ -433,7 +438,7 @@ def cmd_compile(argv)
   # with --ebpf-dispatch, collect the :ebpf top-level methods eligible for
   # transparent dispatch and ask spinel to emit them as extern declarations.
   # Without --ebpf-dispatch, spinel keeps its default (static inline body) and
-  # main calls the native version locally — no BPF round-trip.
+  # main calls the native version locally -- no BPF round-trip.
   extern_methods = opts[:ebpf_dispatch] ? SpinelEbpf::DispatchShim.eligible_method_names(result) : nil
   if opts[:ebpf_dispatch] && (extern_methods.nil? || extern_methods.empty?)
     warn "[spinel-ebpf] --ebpf-dispatch: no eligible :ebpf methods (need top-level + non-attach + non-builtin)"
@@ -558,7 +563,7 @@ end
 #   3. generate a sidecar uprobe agent (Instrument.generate_agent) and build
 #      it through the normal compile pipeline (consumer DSL + uprobe codegen).
 # Output is two binaries; the agent attaches to the target via SPNL_UPROBE_BINARY
-# (sidecar model — single-binary self-attach is S4). Default agent is a long-lived
+# (sidecar model -- single-binary self-attach is S4). Default agent is a long-lived
 # Prometheus /metrics server (S3); --instrument-dump gives the S2 one-shot dump.
 # authoritative method -> C symbol map via upstream `--emit-symbol-map`.
 def instrument_symbol_map(target_input, build_dir)
@@ -617,7 +622,7 @@ def cmd_instrument(target_input, opts)
   agent_bin = File.expand_path(File.join(build_dir, "#{base}_agent"))
   puts "[spinel-ebpf] instrument: agent -> #{agent_bin}"
   puts
-  puts "Run (sidecar — start the agent first so the uprobes attach before the target runs):"
+  puts "Run (sidecar -- start the agent first so the uprobes attach before the target runs):"
   if mode == :metrics
     puts "  SPNL_UPROBE_BINARY=#{target_bin} SPINEL_HTTP_PORT=#{port} #{agent_bin} &"
     puts "  #{target_bin}                 # exercise the target"
@@ -629,7 +634,7 @@ def cmd_instrument(target_input, opts)
   0
 end
 
-# single self-attaching binary — the workload + the agent compiled into
+# single self-attaching binary -- the workload + the agent compiled into
 # one unit. The workload methods are forced native + noinline (--self-targets) so
 # their sp_<name> symbols survive; the uprobes self-attach to /proc/self/exe at
 # the own pid. The workload runs in-process (firing the self-uprobes), then the
@@ -699,7 +704,7 @@ BPF_ISA_ARENA = "v3"
 
 # the `clang -target bpf -c <bpf.c> -o <bpf.o>` argv, factored so both
 # build_binary (via run!) and `spinel-ebpf check` (via Open3.capture3) drive the
-# identical command. Pure (no side effects) — reads bpf_c only to decide -mcpu.
+# identical command. Pure (no side effects) -- reads bpf_c only to decide -mcpu.
 def bpf_clang_argv(clang, bpf_c, bpf_o, build_dir)
   arch_macro = RbConfig::CONFIG["host_cpu"] =~ /aarch64|arm64/ ? "-D__TARGET_ARCH_arm64" : "-D__TARGET_ARCH_x86"
     # <bpf/usdt.bpf.h> transitively pulls in <linux/errno.h> -> <asm/errno.h>,
@@ -771,7 +776,7 @@ end
 # Returns the binary path, or nil when it can't be built here (non-Linux host,
 # missing cc / libbpf-dev). Cached at build/spnl_load_check with an mtime check
 # and a runnability preflight (build/ is bind-mounted, so a host-built binary can
-# be un-execable in the container and vice-versa — mirror tools/golden.rb).
+# be un-execable in the container and vice-versa -- mirror tools/golden.rb).
 def load_check_bin
   return @load_check_bin if defined?(@load_check_bin)
   src = File.join(PROJECT_ROOT, "tools/spnl_load_check.c")
@@ -785,7 +790,7 @@ def load_check_bin
     return @load_check_bin = nil unless ok
   end
   # Preflight: no-arg run prints usage and exits 2. system returns nil only when
-  # exec itself failed (wrong-platform ELF) — treat that as unavailable.
+  # exec itself failed (wrong-platform ELF) -- treat that as unavailable.
   return @load_check_bin = nil if system(out, out: File::NULL, err: File::NULL).nil?
   @load_check_bin = out
 rescue StandardError
@@ -794,9 +799,9 @@ end
 
 # amp-m7 --build. Unlike the Linux --build (single binary), amp-m7 emits
 # TWO artifacts (M7 and A55 are separate cores):
-#   <base>.blob     — the Thumb blob (single-pass; helper call -> AMP_HELPER_SLOT(id),
+#   <base>.blob     -- the Thumb blob (single-pass; helper call -> AMP_HELPER_SLOT(id),
 #                     no firmware nm). id 1 = amp_emit, id 2 = amp_ktime.
-#   <base>.manifest — abi_version / ivars_size / triggers (from codegen, via the
+#   <base>.manifest -- abi_version / ivars_size / triggers (from codegen, via the
 #                     manifest dumper) + service.name / otlp.endpoint (deployment
 #                     config, NOT baked into the blob).
 def build_amp(base, build_dir, opts)
@@ -900,7 +905,7 @@ end
 
 # turn the cryptic `undefined reference to eu_search_tree_init' link failure
 # into an actionable message. elfutils < 0.195 installs a libelf.a whose elf_begin.o
-# references eu_search_tree_* / eu_tsearch but ships no definition — the defining
+# references eu_search_tree_* / eu_tsearch but ships no definition -- the defining
 # objects live in the internal libeu.a, which upstream marks `noinst` so no distro
 # packages it (NOT a Debian-specific quirk). 0.195 merges them via libelf_a_LIBADD.
 # Only aborts when the breakage is POSITIVELY detected; a missing nm or an archive
@@ -1386,10 +1391,10 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
 
   # SPNL_STATIC=1: fully static binary (libbpf/elf/z/c statically linked). The
   # eBPF .bpf.o is CO-RE so it relocates against the *target* kernel's BTF at
-  # load — a static build therefore runs on another arm64 host (e.g. a board)
+  # load -- a static build therefore runs on another arm64 host (e.g. a board)
   # without matching its glibc/libbpf. Used for cross-deploy benchmarking.
   static_flag = ENV["SPNL_STATIC"] == "1" ? ["-static"] : []
-  # static libbpf.a pulls in ZSTD (compressed BTF) — add it explicitly (after
+  # static libbpf.a pulls in ZSTD (compressed BTF) -- add it explicitly (after
   # -lbpf so the static linker resolves the reference). Harmless when dynamic.
   static_libs = ENV["SPNL_STATIC"] == "1" ? ["-lzstd"] : []
   # a static link needs a libelf.a that CARRIES the elfutils libeu objects.
@@ -1437,7 +1442,7 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
   out_bin
 end
 
-# Generated _glue.c — auto-loads/attaches BPF in a constructor, cleans up in destructor.
+# Generated _glue.c -- auto-loads/attaches BPF in a constructor, cleans up in destructor.
 # `base` is the user-facing unit name (used only for the .skel.h include path);
 # `skel_name` is the sanitized C identifier prefix produced by bpftool gen skeleton.
 # `with_dispatch`: when true, the skeleton pointer is given external
@@ -1449,20 +1454,28 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                  with_otlp: false)
   storage = with_dispatch ? "" : "static "
 
+  # every token this heredoc shares with the generated .bpf.c comes from
+  # src/codegen_c/loader_contract.h via loader_contract_gen.rb -- map names,
+  # program-name prefixes (with their strncmp lengths), ELF section names, the
+  # width of the record sp_bpf_user_cmd_push moves and the PROG_ARRAY slot base.
+  # tools/loader_gate.rb refuses a name-carrying site here that is not declared.
+  lc = SpinelEbpf::LoaderContract
+
   # OTLP push FFI shims. Reads the per-unit emit ringbuf / keyed-hist via the
   # loaded skeleton's obj and hands it to the generic exporter (otlp_agent.c). Emitted only
-  # when the unit uses it (so non-OTLP glue is unchanged). Map names come from the
-  # code generator's own naming helpers, so the glue never re-spells them by hand.
-  _hist_map  = SpinelEbpf::CodegenBpf::HISTOGRAM_KEYED_MAP_NAME
-  _emit4_map = SpinelEbpf::CodegenBpf.emit_n_map_name(skel_name, 4)
-  _int_map   = SpinelEbpf::CodegenBpf.emit_int_map_name(skel_name)
-  _str_map   = SpinelEbpf::CodegenBpf.emit_str_map_name(skel_name)
-  _conn_map  = SpinelEbpf::CodegenBpf.emit_conn_map_name(skel_name)
-  _dns_map   = SpinelEbpf::CodegenBpf.emit_dns_map_name(skel_name)
-  _l7_map    = SpinelEbpf::CodegenBpf.emit_l7_map_name(skel_name)
-  _http_map  = SpinelEbpf::CodegenBpf.emit_http_map_name(skel_name)
-  _redis_map = SpinelEbpf::CodegenBpf.emit_redis_map_name(skel_name)
-  _offcpu_map = SpinelEbpf::CodegenBpf.emit_offcpu_map_name(skel_name)
+  # when the unit uses it (so non-OTLP glue is unchanged). Map names come from a single
+  # source (the naming helpers/constants shared with the codegen) rather than being
+  # transcribed here in the glue.
+  _hist_map  = lc::MAP_HIST_KEYED
+  _emit4_map = "#{skel_name}#{lc::SUFFIX_EMIT4}"
+  _int_map   = "#{skel_name}#{lc::SUFFIX_EMIT_INT}"
+  _str_map   = "#{skel_name}#{lc::SUFFIX_EMIT_STR}"
+  _conn_map  = "#{skel_name}#{lc::SUFFIX_CONN}"
+  _dns_map   = "#{skel_name}#{lc::SUFFIX_DNS}"
+  _l7_map    = "#{skel_name}#{lc::SUFFIX_L7}"
+  _http_map  = "#{skel_name}#{lc::SUFFIX_HTTP}"
+  _redis_map = "#{skel_name}#{lc::SUFFIX_REDIS}"
+  _offcpu_map = "#{skel_name}#{lc::SUFFIX_OFFCPU}"
   otlp_push_shim = with_otlp ? <<~SHIM : ""
     /* OTLP metrics push (resolves the ffi_func :spnl_otlp_push). */
     extern int spnl_otlp_push_obj(struct bpf_object *obj, const char *map_name, const char *endpoint);
@@ -1489,7 +1502,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         if (!_spnl_skel || !endpoint) return -1;
         return spnl_otlp_trace_push_obj(_spnl_skel->obj, "#{_emit4_map}", endpoint);
     }
-    /* OTLP logs push — drain the per-unit emit ringbuf (int / str) as LogRecords. */
+    /* OTLP logs push -- drain the per-unit emit ringbuf (int / str) as LogRecords. */
     extern int spnl_otlp_log_push_obj(struct bpf_object *obj, const char *map_name, int is_str, const char *endpoint);
     int spnl_otlp_log_push(const char *endpoint)
     {
@@ -1565,7 +1578,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     int spnl_rec_offcpu_drain(int timeout_ms)
     {
         if (!_spnl_skel) return -1;
-        return spnl_rec_offcpu_drain_obj(_spnl_skel->obj, "#{_offcpu_map}", "bpf_stacks", timeout_ms);
+        return spnl_rec_offcpu_drain_obj(_spnl_skel->obj, "#{_offcpu_map}", "#{lc::MAP_STACKS}", timeout_ms);
     }
     /* L7 latency spans: drains the l7 ringbuf into spans carrying process, peer and
        duration. The span duration is a real request/response round trip (send to
@@ -1602,7 +1615,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     int spnl_otlp_offcpu_span_push(const char *endpoint)
     {
         if (!_spnl_skel || !endpoint) return -1;
-        return spnl_otlp_offcpu_span_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "bpf_stacks", endpoint);
+        return spnl_otlp_offcpu_span_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "#{lc::MAP_STACKS}", endpoint);
     }
     /* Multi-source request tree: correlates the off-CPU request window (the parent)
        with DNS and connection records (the children) by thread group id and time
@@ -1612,7 +1625,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     int spnl_otlp_request_tree_push(const char *endpoint)
     {
         if (!_spnl_skel || !endpoint) return -1;
-        return spnl_otlp_request_tree_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "#{_dns_map}", "#{_conn_map}", "bpf_stacks", endpoint);
+        return spnl_otlp_request_tree_push_obj(_spnl_skel->obj, "#{_offcpu_map}", "#{_dns_map}", "#{_conn_map}", "#{lc::MAP_STACKS}", endpoint);
     }
     /* Cross-layer correlation: looks up L3/L4 metrics for an accepted client fd by
        deriving the same 4-tuple key the tracepoint used, so userspace can join what
@@ -1970,7 +1983,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         const char *probe;
         int pid;          /* -1 = system-wide */
     };
-    /* reactor perf_event handler — Hz frequency carried inline so
+    /* reactor perf_event handler -- Hz frequency carried inline so
      * each handler can sample at its own rate. */
     struct spnl_reactor_perf_event {
         const char *prog_name;
@@ -2024,7 +2037,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     static int              _spnl_tcx_link_count = 0;
 
     /* SOCK_OPS attach state. cgroup attach uses bpf_prog_attach (no
-     * bpf_link in the older API) — so the destructor detaches via
+     * bpf_link in the older API) -- so the destructor detaches via
      * bpf_prog_detach2. */
     #define SPNL_SOCKOPS_MAX 4
     static int _spnl_sockops_cgroup_fd = -1;
@@ -2045,7 +2058,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     static int _spnl_is_xdp_tail_prog(struct bpf_program *prog)
     {
         const char *name = bpf_program__name(prog);
-        return name && strncmp(name, "xdp_tail__", 10) == 0;
+        return name && strncmp(name, "#{lc::PREFIX_XDP_TAIL}", #{lc::PREFIX_XDP_TAIL_LEN}) == 0;
     }
 
     static void _spnl_xdp_attach_all(void)
@@ -2164,7 +2177,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
 
         int cg_fd = open(cg_path, O_RDONLY | O_DIRECTORY);
         if (cg_fd < 0) {
-            fprintf(stderr, "[spinel-ebpf] sockops: open(%s): %s — sockops programs not attached\\n",
+            fprintf(stderr, "[spinel-ebpf] sockops: open(%s): %s -- sockops programs not attached\\n",
                     cg_path, strerror(errno));
             return;
         }
@@ -2197,16 +2210,16 @@ def build_glue_c(base, skel_name, with_dispatch: false,
      * source/declaration order (libbpf preserves ELF section order). */
     static void _spnl_prog_array_populate(void)
     {
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "spnl_prog_array");
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_PROG_ARRAY}");
         if (!map) return;
         int map_fd = bpf_map__fd(map);
         if (map_fd < 0) return;
 
-        __u32 slot = 0;
+        __u32 slot = #{lc::PROG_ARRAY_SLOT_BASE};
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *name = bpf_program__name(prog);
-            if (!name || strncmp(name, "xdp_tail__", 10) != 0) continue;
+            if (!name || strncmp(name, "#{lc::PREFIX_XDP_TAIL}", #{lc::PREFIX_XDP_TAIL_LEN}) != 0) continue;
             int prog_fd = bpf_program__fd(prog);
             int err = bpf_map_update_elem(map_fd, &slot, &prog_fd, BPF_ANY);
             if (err) {
@@ -2467,7 +2480,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         int uprobe_count = 0;
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *sec = bpf_program__section_name(prog);
-            if (sec && (strcmp(sec, "uprobe") == 0 || strcmp(sec, "uretprobe") == 0))
+            if (sec && (strcmp(sec, "#{lc::SEC_UPROBE}") == 0 || strcmp(sec, "#{lc::SEC_URETPROBE}") == 0))
                 uprobe_count++;
         }
         if (uprobe_count == 0) return;
@@ -2490,7 +2503,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                 retprobe = rt->retprobe;
                 /* per-handler pid wins; if unset, fall back to env. */
                 pid      = (rt->pid >= 0) ? rt->pid : env_pid;
-            } else if (strcmp(sec, "uprobe") == 0 && strncmp(name, "uprobe__", 8) == 0) {
+            } else if (strcmp(sec, "#{lc::SEC_UPROBE}") == 0 && strncmp(name, "#{lc::PREFIX_UPROBE}", #{lc::PREFIX_UPROBE_LEN}) == 0) {
                 retprobe = 0;
                 func     = name + 8;
                 if (!env_binary || !*env_binary) {
@@ -2503,7 +2516,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                     binary = env_binary;
                     pid    = env_pid;
                 }
-            } else if (strcmp(sec, "uretprobe") == 0 && strncmp(name, "uretprobe__", 11) == 0) {
+            } else if (strcmp(sec, "#{lc::SEC_URETPROBE}") == 0 && strncmp(name, "#{lc::PREFIX_URETPROBE}", #{lc::PREFIX_URETPROBE_LEN}) == 0) {
                 retprobe = 1;
                 func     = name + 11;
                 if (!env_binary || !*env_binary) {
@@ -2516,7 +2529,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             } else {
                 continue;
             }
-            /* Go return-probe — attach one uprobe per RET offset of func
+            /* Go return-probe -- attach one uprobe per RET offset of func
              * (uretprobe is unusable on Go). func_name resolves the function start;
              * func_offset = each RET's offset within it. */
             if (rt && rt->go_ret) {
@@ -2530,7 +2543,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                 int attached = 0;
                 for (int r = 0; r < nr && _spnl_uprobe_link_count < SPNL_UPROBE_MAX; r++) {
                     /* ret_offs[r] is an ABSOLUTE file offset (resolved via .symtab or .gopclntab),
-                     * so attach with func_name=NULL — works on stripped binaries too. */
+                     * so attach with func_name=NULL -- works on stripped binaries too. */
                     LIBBPF_OPTS(bpf_uprobe_opts, gopts, .retprobe = 0);
                     struct bpf_link *glink = bpf_program__attach_uprobe_opts(
                         prog, pid, binary, ret_offs[r], &gopts);
@@ -2592,7 +2605,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *name = bpf_program__name(prog);
             const char *sec  = bpf_program__section_name(prog);
-            if (!name || !sec || strcmp(sec, "kprobe.multi") != 0) continue;
+            if (!name || !sec || strcmp(sec, "#{lc::SEC_KPROBE_MULTI}") != 0) continue;
             const struct spnl_kprobe_multi *e = NULL;
             for (int i = 0; i < _spnl_kmultis_count; i++)
                 if (strcmp(_spnl_kmultis[i].prog_name, name) == 0) { e = &_spnl_kmultis[i]; break; }
@@ -2632,7 +2645,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         int usdt_count = 0;
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *sec = bpf_program__section_name(prog);
-            if (sec && strcmp(sec, "usdt") == 0)
+            if (sec && strcmp(sec, "#{lc::SEC_USDT}") == 0)
                 usdt_count++;
         }
         if (usdt_count == 0) return;
@@ -2644,8 +2657,8 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             const char *sec  = bpf_program__section_name(prog);
             const char *name = bpf_program__name(prog);
             if (!sec || !name) continue;
-            if (strcmp(sec, "usdt") != 0) continue;
-            if (strncmp(name, "usdt__", 6) != 0) continue;
+            if (strcmp(sec, "#{lc::SEC_USDT}") != 0) continue;
+            if (strncmp(name, "#{lc::PREFIX_USDT}", #{lc::PREFIX_USDT_LEN}) != 0) continue;
 
             int pid;
             const char *binary;
@@ -2665,7 +2678,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                     continue;
                 }
                 const char *rest = name + 6;
-                const char *sep  = strstr(rest, "__");
+                const char *sep  = strstr(rest, "#{lc::SEPARATOR_USDT}");
                 if (!sep) {
                     fprintf(stderr, "[spinel-ebpf] malformed USDT prog name %s\\n", name);
                     continue;
@@ -2710,7 +2723,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     } _spnl_perf_links[SPNL_PERF_MAX_CPUS * 4];   /* up to 4 perf progs */
     static int _spnl_perf_link_count = 0;
 
-    /* perf_event_open() wrapper — kernel doesn't expose this as a libc
+    /* perf_event_open() wrapper -- kernel doesn't expose this as a libc
      * function, so call via syscall(). */
     static int _spnl_perf_event_open(struct perf_event_attr *attr,
                                      pid_t pid, int cpu, int group_fd,
@@ -2721,7 +2734,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
 
     /* attach SEC("perf_event") programs. Per-handler Hz comes from
      * the reactor table; flat-form (no table entry) falls back to
-     * $SPNL_PERF_HZ (default 49 — bcc convention, picked to avoid
+     * $SPNL_PERF_HZ (default 49 -- bcc convention, picked to avoid
      * alignment with 50/60 Hz tick rates). One perf event per online CPU. */
     static void _spnl_perf_event_attach_all(void)
     {
@@ -2729,7 +2742,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         int pe_count = 0;
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *sec = bpf_program__section_name(prog);
-            if (sec && strcmp(sec, "perf_event") == 0)
+            if (sec && strcmp(sec, "#{lc::SEC_PERF_EVENT}") == 0)
                 pe_count++;
         }
         if (pe_count == 0) return;
@@ -2746,7 +2759,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *sec  = bpf_program__section_name(prog);
             const char *name = bpf_program__name(prog);
-            if (!sec || !name || strcmp(sec, "perf_event") != 0) continue;
+            if (!sec || !name || strcmp(sec, "#{lc::SEC_PERF_EVENT}") != 0) continue;
 
             int hz = env_hz;
             const struct spnl_reactor_perf_event *rt = _spnl_lookup_reactor_pe(name);
@@ -2799,7 +2812,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         struct bpf_program *prog;
         bpf_object__for_each_program(prog, _spnl_skel->obj) {
             const char *name = bpf_program__name(prog);
-            if (!name || strncmp(name, "spnl_timer_arm_", 15) != 0) continue;
+            if (!name || strncmp(name, "#{lc::PREFIX_TIMER_ARM}", #{lc::PREFIX_TIMER_ARM_LEN}) != 0) continue;
             int prog_fd = bpf_program__fd(prog);
             if (prog_fd < 0) continue;
             LIBBPF_OPTS(bpf_test_run_opts, opts);
@@ -2832,7 +2845,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         if (!cg_path || !*cg_path) cg_path = "/sys/fs/cgroup";
         int cg_fd = open(cg_path, O_RDONLY | O_DIRECTORY);
         if (cg_fd < 0) {
-            fprintf(stderr, "[spinel-ebpf] cgroup: open(%s): %s — cgroup_sock_addr not attached\\n",
+            fprintf(stderr, "[spinel-ebpf] cgroup: open(%s): %s -- cgroup_sock_addr not attached\\n",
                     cg_path, strerror(errno));
             return;
         }
@@ -2936,7 +2949,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                 else if (bpf_map__type(_m) == BPF_MAP_TYPE_PERCPU_ARRAY) {
                     const char *_mn = bpf_map__name(_m);
                     size_t _ml = _mn ? strlen(_mn) : 0;
-                    if (_ml >= 5 && strcmp(_mn + _ml - 5, "_lost") == 0)
+                    if (_ml >= #{lc::SUFFIX_LOST_LEN} && strcmp(_mn + _ml - #{lc::SUFFIX_LOST_LEN}, "#{lc::SUFFIX_LOST}") == 0)
                         spnl_lost_bind(bpf_map__fd(_m));
                 }
             }
@@ -2968,7 +2981,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     static int _spnl_blocklist_fd(void)
     {
         if (!_spnl_skel) return -1;
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_blocklist");
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_BLOCKLIST}");
         if (!map) return -2;
         return bpf_map__fd(map);
     }
@@ -2994,15 +3007,15 @@ def build_glue_c(base, skel_name, with_dispatch: false,
      *   end
      * and the kernel_cache directive calls sp_kc_set(path, body) at startup. We
      * resolve `path` to its slot (declaration order = XDP match_route slots),
-     * build the full HTTP/1.0 response (framing the body), zero-pad to 256 bytes —
-     * the bpf_kc_resp[slot] map value — so the XDP slice serves it. Returns -2 when
+     * build the full HTTP/1.0 response (framing the body), zero-pad to 256 bytes --
+     * the bpf_kc_resp[slot] map value -- so the XDP slice serves it. Returns -2 when
      * the program has no kernel_cache (map absent), -4 for an undeclared path,
      * <0 on overflow / errors. */
     #{kc_paths_decl}
     int sp_kc_set(const char *path, const char *body)
     {
         if (!_spnl_skel) return -1;
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp");
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP}");
         if (!map) return -2;
         int slot = -1;
         for (int i = 0; i < _spnl_kc_npaths; i++) {
@@ -3022,11 +3035,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
          * adjust_tail-GROWN frames, e.g. nxp_enetc4), and precompute the payload's
          * partial TCP checksum (sum of 16-bit words in the kernel's native/LE order,
          * see below) so the slice can checksum the variable-length payload via a FIXED 20-byte header
-         * bpf_csum_diff seeded with this — no variable-length bpf_csum_diff (which
+         * bpf_csum_diff seeded with this -- no variable-length bpf_csum_diff (which
          * the verifier rejects). Both maps are optional (older .bpf.o => CAP path). */
-        struct bpf_map *lmap = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp_len");
+        struct bpf_map *lmap = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP_LEN}");
         if (lmap) { __u32 _ln = (__u32)n; bpf_map_update_elem(bpf_map__fd(lmap), &k, &_ln, BPF_ANY); }
-        struct bpf_map *cmap = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_kc_resp_csum");
+        struct bpf_map *cmap = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP_CSUM}");
         if (cmap) {
             /* Match the kernel's csum_partial word order (native/LE on arm64):
              * 16-bit words read little-endian, trailing odd byte = low byte. */
@@ -3059,7 +3072,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     static int _spnl_cidr_blocklist_fd(void)
     {
         if (!_spnl_skel) return -1;
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_cidr_block");
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_CIDR_BLOCK}");
         if (!map) return -2;
         return bpf_map__fd(map);
     }
@@ -3081,6 +3094,65 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         return bpf_map_delete_elem(fd, &k);
     }
 
+    /* host -> kernel command channel (USER_RINGBUF). Ruby side:
+     *   module Cmd
+     *     ffi_func :sp_bpf_user_cmd_push, [:int64], :int
+     *   end
+     *   Cmd.sp_bpf_user_cmd_push(9999)
+     *
+     * The original USER_RINGBUF work stopped one layer short of this (glue
+     * extensions were kept demand-driven) and shipped a standalone push_one.c
+     * instead, leaving a hand-written libbpf client as the only way to reach the
+     * ring. This is that missing half.
+     *
+     * TWO LITERALS ARE SHARED WITH THE CODEGEN and nothing compiles both:
+     *   1. the map name "bpf_user_cmds" (templates/user_ringbuf.template.c)
+     *   2. the RECORD SIZE -- 8 bytes, because the generated callback reads
+     *      exactly `sizeof(__s64)` with bpf_dynptr_read.
+     * A drift in (1) makes every push return -2 (loud: the caller gets an error
+     * code). A drift in (2) is SILENT in one direction: measured, a short record
+     * still fires the callback and still counts, but bpf_dynptr_read returns
+     * -E2BIG and the value arrives as 0. That is why this reserves a fixed 8 and
+     * why nothing here lets the caller choose a size.
+     * tests/spinel_ebpf/user_ringbuf_test.rb pins both literals against the
+     * template, because -- as measured twice -- this heredoc is compiled by no
+     * gate in the tree.
+     *
+     * The handle is cached: user_ring_buffer__new mmaps the ring, so making one
+     * per push would be a syscall pair per command and would defeat the batching
+     * that is the point of the map (the host/kernel channel exists to batch). */
+    static struct user_ring_buffer *_spnl_user_cmds_rb;
+    static int _spnl_user_cmds_init(void)
+    {
+        if (_spnl_user_cmds_rb) return 0;
+        if (!_spnl_skel) return -1;
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_USER_CMDS}");
+        if (!map) return -2;                       /* unit has no `user_ringbuf_drain` */
+        int fd = bpf_map__fd(map);
+        if (fd < 0) return -3;
+        _spnl_user_cmds_rb = user_ring_buffer__new(fd, NULL);
+        return _spnl_user_cmds_rb ? 0 : -4;
+    }
+    int sp_bpf_user_cmd_push(long long value)
+    {
+        int rc = _spnl_user_cmds_init();
+        if (rc) return rc;
+        /* 8 bytes: the size the generated callback reads. Not a parameter. */
+        /* the record width is declared once, in loader_contract.h, and the
+         * kernel callback reads exactly that many bytes. A short reservation is
+         * silent at run time (measured: the callback fires, the count is right,
+         * and only the value is 0), so the size comes from the declaration and the
+         * static assert ties this local's type to the same number -- the one half
+         * of the seam a compiler can see. */
+        long long *slot = user_ring_buffer__reserve(_spnl_user_cmds_rb, #{lc::MAP_USER_CMDS_BYTES});
+        _Static_assert(sizeof(*slot) == #{lc::MAP_USER_CMDS_BYTES},
+                       "bpf_user_cmds record width disagrees with loader_contract.h");
+        if (!slot) return -5;                      /* ring full -- visible to the caller */
+        *slot = value;
+        user_ring_buffer__submit(_spnl_user_cmds_rb, slot);
+        return 0;
+    }
+
     /* SO_REUSEPORT sockarray management. Each worker process calls
      * sp_bpf_reuseport_register(listen_fd, my_idx) to put its own listening
      * socket into the SOCKARRAY at index `my_idx`. Then one worker (idx 0
@@ -3089,7 +3161,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
     static int _spnl_reuseport_map_fd(void)
     {
         if (!_spnl_skel) return -1;
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "bpf_worker_socks");
+        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_WORKER_SOCKS}");
         if (!map) return -2;
         return bpf_map__fd(map);
     }
@@ -3181,7 +3253,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
 
     /* streaming event output. Drains every emit ringbuf
      * (<unit>_events / _str_events / _pair_events) and prints each event as it
-     * arrives — the foundation for bcc-style snoop/trace tools. The Ruby main
+     * arrives -- the foundation for bcc-style snoop/trace tools. The Ruby main
      * declares it and calls it instead of sleep:
      *   module Stream
      *     ffi_func :spnl_stream, [:int], :int   # arg = seconds (0 = forever)
@@ -3227,11 +3299,11 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
             ring_buffer_sample_fn cb;
-            if      (strstr(nm, "_str_events"))   cb = _spnl_stream_str_cb;
-            else if (strstr(nm, "_pair_events"))  cb = _spnl_stream_pair_cb;
-            else if (strstr(nm, "_emit3_events")) cb = _spnl_stream_emit3_cb;
-            else if (strstr(nm, "_emit4_events")) cb = _spnl_stream_emit4_cb;
-            else if (strstr(nm, "_events"))       cb = _spnl_stream_int_cb;
+            if      (strstr(nm, "#{lc::SUFFIX_EMIT_STR}"))   cb = _spnl_stream_str_cb;
+            else if (strstr(nm, "#{lc::SUFFIX_EMIT_PAIR}"))  cb = _spnl_stream_pair_cb;
+            else if (strstr(nm, "#{lc::SUFFIX_EMIT3}")) cb = _spnl_stream_emit3_cb;
+            else if (strstr(nm, "#{lc::SUFFIX_EMIT4}")) cb = _spnl_stream_emit4_cb;
+            else if (strstr(nm, "#{lc::SUFFIX_EMIT_INT}"))       cb = _spnl_stream_int_cb;
             else continue;
             int fd = bpf_map__fd(map);
             /* Register before polling: a channel that never fires has to be
@@ -3295,7 +3367,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         bpf_object__for_each_map(map, _spnl_skel->obj) {
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
-            if (!strstr(nm, "_l7stream_events")) continue;
+            if (!strstr(nm, "#{lc::SUFFIX_L7STREAM}")) continue;
             int fd = bpf_map__fd(map);
             /* Register the channel before polling: "drained nothing" has to be
                distinguishable from "never drained". Every path that reads a
@@ -3345,9 +3417,9 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         bpf_object__for_each_map(map, _spnl_skel->obj) {
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
-            if (!strstr(nm, "_events") || strstr(nm, "_str_events") ||
-                strstr(nm, "_pair_events") || strstr(nm, "_emit3_events") ||
-                strstr(nm, "_emit4_events")) continue;
+            if (!strstr(nm, "#{lc::SUFFIX_EMIT_INT}") || strstr(nm, "#{lc::SUFFIX_EMIT_STR}") ||
+                strstr(nm, "#{lc::SUFFIX_EMIT_PAIR}") || strstr(nm, "#{lc::SUFFIX_EMIT3}") ||
+                strstr(nm, "#{lc::SUFFIX_EMIT4}")) continue;
             int fd = bpf_map__fd(map);
             /* Register the channel before polling: "drained nothing" has to be
                distinguishable from "never drained". Every path that reads a
@@ -3389,7 +3461,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         bpf_object__for_each_map(map, _spnl_skel->obj) {
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
-            if (!strstr(nm, "_pair_events")) continue;
+            if (!strstr(nm, "#{lc::SUFFIX_EMIT_PAIR}")) continue;
             int fd = bpf_map__fd(map);
             /* Register the channel before polling: "drained nothing" has to be
                distinguishable from "never drained". Every path that reads a
@@ -3423,9 +3495,9 @@ def build_glue_c(base, skel_name, with_dispatch: false,
             if (bpf_map__type(map) != BPF_MAP_TYPE_RINGBUF) continue;
             const char *nm = bpf_map__name(map);
             ring_buffer_sample_fn cb;
-            if (strstr(nm, "_pair_events")) cb = _spnl_collect_pair_cb;
-            else if (strstr(nm, "_events") && !strstr(nm, "_str_events") &&
-                     !strstr(nm, "_emit3_events") && !strstr(nm, "_emit4_events"))
+            if (strstr(nm, "#{lc::SUFFIX_EMIT_PAIR}")) cb = _spnl_collect_pair_cb;
+            else if (strstr(nm, "#{lc::SUFFIX_EMIT_INT}") && !strstr(nm, "#{lc::SUFFIX_EMIT_STR}") &&
+                     !strstr(nm, "#{lc::SUFFIX_EMIT3}") && !strstr(nm, "#{lc::SUFFIX_EMIT4}"))
                 cb = _spnl_collect_int_cb;
             else continue;
             int fd = bpf_map__fd(map);
@@ -3468,7 +3540,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                                             stacks_map_name, stderr);
     }
 
-    /* memleak report — group the outstanding-allocation HASH by stack id
+    /* memleak report -- group the outstanding-allocation HASH by stack id
      * and print the top `top_n` leaking stacks (symbolized). */
     int spnl_dump_leaks(const char *allocs_map_name, const char *stacks_map_name, int top_n)
     {
@@ -3477,7 +3549,7 @@ def build_glue_c(base, skel_name, with_dispatch: false,
                                    stacks_map_name, top_n, stdout);
     }
 
-    /* deadlock report — flag lock-order inversions (a->b AND b->a). */
+    /* deadlock report -- flag lock-order inversions (a->b AND b->a). */
     int spnl_dump_deadlocks(const char *edges_map_name, int top_n)
     {
         if (!_spnl_skel || !edges_map_name) return -1;
@@ -3602,13 +3674,13 @@ end
 # stopping at the first failing stage, and return {stage, ok, error, detail} for
 # each. This closes the AI-authoring read-write-fix-verify loop:
 # the AI gets a machine-readable "here is the one thing to fix next", including a
-# clean *kernel verifier* verdict (the second, kernel-side harness) — the piece
+# clean *kernel verifier* verdict (the second, kernel-side harness) -- the piece
 # the pre-compile checks don't reach.
 #
 # `check` is a light path: it stops at the .bpf.o and load-only verification. It
 # does NOT link the full binary (no glue.c / runtime / OTLP), does NOT attach, and
 # does NOT run the workload. Stages gracefully *skip* (ok:null + reason) where the
-# environment can't run them — notably the verifier on a host with no kernel/BTF.
+# environment can't run them -- notably the verifier on a host with no kernel/BTF.
 def cmd_check(argv)
   opts = { json: false, output_dir: nil, verbose: false }
   parser = OptionParser.new do |op|
@@ -3764,11 +3836,11 @@ def check_stage_clang(build_dir, ctx)
   SpinelEbpf::Check.ok_stage("clang", detail: "wrote #{File.basename(bpf_o)}")
 end
 
-# Stage 4: load-only kernel verification (libbpf bpf_object__load — the second,
+# Stage 4: load-only kernel verification (libbpf bpf_object__load -- the second,
 # kernel-side harness). No kernel/BTF -> skip. On rejection, surface the verifier
 # verdict + a trimmed log tail.
 def check_stage_verifier(ctx)
-  # Kernel/BTF is the most fundamental precondition — report it first so a host
+  # Kernel/BTF is the most fundamental precondition -- report it first so a host
   # without a kernel (e.g. macOS) cleanly says "no kernel/BTF" regardless of what
   # upstream produced.
   unless SpinelEbpf::Check.verifier_available?
@@ -3878,7 +3950,7 @@ when "--version", "-V"
   exit 0
 when "--help", "-h", nil
   puts <<~HELP
-    spinel-ebpf #{VERSION}  —  Ruby AOT + eBPF partition compiler wrapper
+    spinel-ebpf #{VERSION}  --  Ruby AOT + eBPF partition compiler wrapper
 
     Usage:
       spinel-ebpf compile <file.rb> [--ebpf-mixed | --native-only] [-o DIR]
@@ -3901,7 +3973,7 @@ when "--help", "-h", nil
       SPINEL_DIR        Path to deps/spinel (default: $project/deps/spinel)
       SPINEL_EBPF_MODE  Override default mode: "ebpf-mixed" or "native-only"
       SPNL_STATIC=1     Link a fully static binary (--build). Runs on a host with no
-                        matching glibc/libbpf/libelf — even a different libc.
+                        matching glibc/libbpf/libelf -- even a different libc.
       SPNL_STATIC_ELF_DIR
                         Directory holding a libelf.a that carries the elfutils libeu
                         objects (elfutils >= 0.195). Needed with SPNL_STATIC=1 when the
