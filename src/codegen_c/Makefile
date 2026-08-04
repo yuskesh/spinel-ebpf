@@ -5,6 +5,7 @@
 #   make golden     # build + run the golden-snapshot regression gate
 #   make templates  # regenerate templates_gen.h from templates/*.template.c (commit it)
 #   make mirror     # regenerate the userspace record mirror from record_schema.h (commit it)
+#   make loader-contract # regenerate the codegen<->loader seam from loader_contract.h (commit it)
 #   make gate       # record-contract gate: artifacts fresh + evolution append-only
 #   make clean
 
@@ -20,6 +21,9 @@ PCTX_OUT := $(ROOT)/src/runtime/amp/probe_ctx_gen.h
 PCTX_JSON := $(ROOT)/src/spinel_ebpf/probe_ctx_schema_gen.json
 MIRROR_OUT := $(ROOT)/src/runtime/otlp/record_mirror_gen.h
 SCHEMA_JSON := $(ROOT)/src/spinel_ebpf/record_schema_gen.json
+LOADER_GEN := $(ROOT)/tools/gen_loader_contract.c
+LOADER_RB  := $(ROOT)/src/spinel_ebpf/loader_contract_gen.rb
+LOADER_JSON := $(ROOT)/src/spinel_ebpf/loader_contract_gen.json
 
 # templates_gen.h is a committed derived artifact (embedded fixed BPF C helpers);
 # the build only depends on the committed header, so regen is an explicit step.
@@ -29,7 +33,7 @@ $(BIN): spinel_ebpf_cc.c templates_gen.h record_schema.h
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
 
-.PHONY: templates mirror gate golden oracle clean probe-ctx
+.PHONY: templates mirror loader-contract gate golden oracle clean probe-ctx
 templates: $(TEMPLATES)
 	@ruby $(ROOT)/tools/embed_templates.rb
 
@@ -60,6 +64,7 @@ probe-ctx: probe_ctx_schema.h $(PCTX_GEN)
 # moves the baseline (reviewable diff, like tests/golden/).
 gate:
 	@ruby $(ROOT)/tools/record_gate.rb
+	@ruby $(ROOT)/tools/loader_gate.rb
 
 golden: $(BIN)
 	@ruby $(ROOT)/tools/golden.rb
@@ -69,3 +74,15 @@ oracle: $(BIN)   # historical Ruby-parity check (not a gate; see tools/cgen_orac
 
 clean:
 	rm -f $(BIN)
+
+# The codegen <-> loader seam. One declaration (loader_contract.h) from which the
+# LOADER's half is generated -- bin/spinel-ebpf interpolates these constants
+# instead of writing map names, strncmp lengths and record widths as literals
+# inside a 2,200-line heredoc that nothing compiles. Committed derived
+# artifacts, like `mirror`; tools/loader_gate.rb fails when they go stale.
+loader-contract: loader_contract.h $(LOADER_GEN)
+	@mkdir -p $(OUT)
+	@$(CC) $(CFLAGS) -o $(OUT)/gen_loader_contract $(LOADER_GEN)
+	@$(OUT)/gen_loader_contract        > $(LOADER_RB)
+	@$(OUT)/gen_loader_contract --json > $(LOADER_JSON)
+	@echo "wrote $(LOADER_RB) $(LOADER_JSON)"

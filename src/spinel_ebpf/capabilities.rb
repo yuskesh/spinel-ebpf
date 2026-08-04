@@ -132,6 +132,7 @@ module SpinelEbpf
           iter_task depth_inc depth_dec path_counter_inc
           kfield kptr emit_kfield_str kfield_str_eq
           attached_index attached_symbol_eq
+          user_ringbuf_drain
         ].freeze,
         attach_kinds: %i[
           kprobe kprobe_multi kretprobe tracepoint raw_tp fentry fexit
@@ -153,6 +154,10 @@ module SpinelEbpf
           pkt_l4_sport pkt_l4_dport pkt_tcp_flags pkt_l4_payload_len
           pkt_ip6_src_hi pkt_ip6_src_lo pkt_ip6_dst_hi pkt_ip6_dst_lo
           pkt_tcp_seq pkt_tcp_ack
+          pkt_dynptr_byte_at
+          tail_call_to
+          tcp_syncookie_gen tcp_syncookie_check tcp_synack_cookie
+          tcp_reply_header tcp_reply_synack tcp_reply_data payload_starts
           emit_connect sock_owner_set
           blocklist_match cidr_blocklist_match
           sock_addr_ip4 sock_addr_port
@@ -175,9 +180,10 @@ module SpinelEbpf
           qdisc_watchdog_schedule qdisc_bstats_update
           queue_push queue_pop
           sock_ops_op sock_ops_state
+          reuseport_hash worker_select
         ].freeze,
         attach_kinds: %i[
-          xdp tc_ingress tc_egress
+          xdp xdp_tail tc_ingress tc_egress
           sk_reuseport sk_msg sk_skb_verdict sk_skb_parser sock_ops
           cgroup_connect4 cgroup_bind4 sk_lookup socket_filter flow_dissector
           tcp_cc qdisc
@@ -977,11 +983,29 @@ module SpinelEbpf
       "sock_owner_set"   => [1, %w[sk],               "record socket to {pid, comm} at connect time, so the process can be recovered in softirq context"],
       "blocklist_match"  => [1, %w[ip],               "a use-neutral predicate: whether an address is in an exact-match set, in host order. A match means deny for a blocklist or allow for an allowlist; the return value decides. Seed the set from userspace by declaring `ffi_func :sp_bpf_blocklist_add, [:uint32], :int` in a `module` (a class will not do) and calling `M.sp_bpf_blocklist_add(0x0a000001)` at top level with an integer literal"],
       "cidr_blocklist_match" => [1, %w[ip],           "a use-neutral predicate: whether an address falls in a set of CIDRs, by longest-prefix match, in host order. It is likewise use-neutral -- a match means deny for a blocklist or allow for an allowlist; the return value decides. Seed the set from userspace by declaring `ffi_func :sp_bpf_cidr_blocklist_add, [:uint32,:uint32], :int` in a `module` (a class will not do) and calling `M.sp_bpf_cidr_blocklist_add(0x7f000000, 8)` at top level with an integer address and prefix length. Calling it again at run time updates the set, and `_del` works the same way"],
+"pkt_dynptr_byte_at" => [1, %w[off],            "read one byte of the XDP frame at a **runtime offset** (0-255, or -1 when the offset is out of range or the context is not XDP). It is built on bpf_dynptr_from_xdp plus bpf_dynptr_slice: the dynptr carries the bounds check, so the caller does not write `data + off > data_end` (the pkt_* readers do not need one either, because their offsets are fixed). The TC equivalent is skb_load_byte(off)"],
+"tail_call_to"     => [1, %w[slot],             "**transfer control** to the program in this unit's PROG_ARRAY at `slot` (bpf_tail_call: it does not return, so the caller never resumes). Slots follow the **declaration order** of `def xdp_tail__<name>` -- 0, 1, ... -- and the loader writes each program's fd into the matching slot. WARNING: **failure is not loud**. A jump into an empty slot returns no error; it silently falls through and the next statement runs, which is why the idiom is to put `XDP_PASS` after the call. An integer literal outside the range of declared targets **dies at compile time**, but a computed slot (`tail_call_to(n)`) cannot be checked. The kernel allows 33 levels of nesting. The reason to split at all is that the 1M-instruction budget is **per program**"],
+"user_ringbuf_drain" => [0, [],                 "pick up commands sent **host -> kernel**. Drains every record queued in this unit's `bpf_user_cmds` ring (USER_RINGBUF, 256 KB) in **FIFO order**, calling this unit's `def user_ringbuf__<name>(value)` once per record. It may be called **anywhere** (measured LOAD_OK in all 12 program types), so there is no context gate. WARNING: **you choose where to drain** -- which hook picks the commands up is what sets command latency, so it is never synthesised (in `def xdp__<name>` that is once per packet; in `def kprobe__<func>`, once per call). A callback with no drain, a drain with no callback, and two callbacks all **die at compile time**. WARNING: **the record is a fixed 8 bytes**, and the sender is the glue's `sp_bpf_user_cmd_push(value)` (declare `ffi_func :sp_bpf_user_cmd_push, [:int64], :int` in a `module M`). A hand-rolled pusher sending fewer than 8 bytes makes **the callback fire and the count rise while the value stays 0** -- bpf_dynptr_read returns -E2BIG and gives up silently (measured). WARNING: **kernel floor 6.1**, so unlike `param` (.rodata, 5.2) it raises the portability contract. Against `param`: `param` is set once before load and then frozen; this one carries values **any number of times while running**, in order, in batches"],
       "cpumap_redirect"  => [1, %w[cpu],              "redirect into a CPU map"],
+# The pure-XDP TCP slice builtins. All seven are XDP-only (the helpers
+# rewrite and RESIZE the frame through `struct xdp_md`), and all seven
+# return __s64 so `< 0` is the error check every example uses.
+"tcp_syncookie_gen"   => [0, [],                 "build a **stateless SYN cookie** for this SYN (bpf_tcp_raw_gen_syncookie_ipv4). A non-negative result carries the **cookie in its low 32 bits (the SYN-ACK sequence number) and the MSS above that**; an error or a non-TCP packet gives a negative one. WARNING: **it grows the frame to a 60-byte TCP header before returning**, because the kfunc requires that 60 bytes be readable regardless of the real header length. The grow is not an optimisation, it is the precondition for calling at all: without it the program **does not load** (`invalid access to packet, off=34 size=60`) -- which is the shape the retired Ruby generator emitted, so that form had never loaded either. The widened frame is shrunk back to 14+20+24 by its only consumer, `tcp_reply_synack(cookie)`. **To do both steps in one call, use `tcp_synack_cookie`**, which never exposes the intermediate state"],
+"tcp_syncookie_check" => [0, [],                 "**validate the cookie** carried back by the handshake ACK (bpf_tcp_raw_check_syncookie_ipv4). Non-negative means genuine -- this is the third packet of a handshake whose SYN-ACK you sent -- and negative means forged. WARNING: **it does not touch the frame**: the kfunc does not require TCP_MAXLEN, so no grow is needed and the ACK passes through intact (that is the asymmetry with `gen`). WARNING: once validated, that ACK must **not** be handed to the kernel: there is no listen socket, so the stack answers with an RST and the connection dies. Consume it with `XDP::DROP`"],
+"tcp_reply_header"    => [3, %w[seq ack flags],  "turn the current packet into a **TCP reply with no payload** (swap MAC/IP/ports, set the sequence, acknowledgement and flag byte, doff=5, recompute both checksums, resize to 14+20+20). `seq` and `ack` are numbers in **host order**; `flags` is the TCP flag byte (`TCP::Flag::FIN | TCP::Flag::ACK` and so on). Returns 0 or -1, and the caller returns `XDP::TX`. This is for FIN-ACKs and bare ACKs -- to answer with a body, use `tcp_reply_data`"],
+"tcp_reply_synack"    => [1, %w[cookie],         "turn the current SYN into a **SYN-ACK carrying an MSS option** (pass the return value of `tcp_syncookie_gen` straight in: the sequence comes from its low half and the MSS from its high half). The acknowledgement is the received sequence plus one, doff=6 (a 24-byte header), and the frame is resized to 14+20+24 at the end. Returns 0 or -1, and the caller returns `XDP::TX`. WARNING: this call is what shrinks the frame `tcp_syncookie_gen` widened, so **once you call gen you must call this**, or a frame with a 60-byte header goes out on the wire"],
+"tcp_synack_cookie"   => [0, [],                 "do the whole SYN -> SYN-ACK step in **one call** (grow to 60, generate the cookie, build the SYN-ACK with its MSS, shrink). Same result as `tcp_syncookie_gen` plus `tcp_reply_synack`, **without the widened intermediate frame ever being visible**. Returns 0 or -1, and the caller returns `XDP::TX`. This is the one the public example uses"],
+"tcp_reply_data"      => [3, %w[seq ack payload], "turn the current packet into a **reply with a body** (swap, set sequence and acknowledgement, FIN|PSH|ACK, doff=5, write the body, checksum, resize to 14+20+20+len). `payload` must be a **compile-time string literal** -- it is burned in as a const byte array whose length fixes every size in the generated header -- and is capped at 1024 bytes. Returns 0 or -1, and the caller returns `XDP::TX`. WARNING: **the body has to fit in the received frame**, since the frame is shrunk at the end, so a reply longer than the request line cannot be written. Repeating the same literal still emits one helper (up to 8 distinct ones per unit)"],
+"payload_starts"      => [1, %w[prefix],         "whether the current packet's **TCP payload begins with a literal** (1 or 0). `prefix` must be a **compile-time string literal** of at most 64 bytes, and is **unrolled into one comparison per byte** -- no loop and no bounded read, so it is cheap for the verifier, which is the ahead-of-time compiler paying off directly. WARNING: **it does not touch the frame**. Repeating the same literal still emits one helper (up to 8 distinct ones per unit)"],
       "xsk_redirect"     => [1, %w[qid],              "redirect into an AF_XDP socket map"],
       "dev_redirect"     => [1, %w[idx],              "redirect into a device map"],
       "sock_ops_op"      => [0, [],                   "ctx->op (sock_ops)"],
       "sock_ops_state"   => [0, [],                   "ctx->args[1] (sock_ops state)"],
+# SO_REUSEPORT worker selection. The pair is one feature -- reading the
+# hash without steering is a filter, steering without the hash is a pin;
+# both are legitimate, which is why they are separate builtins.
+"reuseport_hash"   => [0, [],                   "**the kernel's own 5-tuple hash** of this SYN (sk_reuseport_md->hash). This is the input a consistent hash is built from: the same 4-tuple always hashes the same, so `reuseport_hash % N` pins a connection to one worker (cache locality across keep-alive). **The result is non-negative** (the field is a __u32), so `% N` lowers to the unsigned form and passes the verifier for a literal N (`% 4` becomes `&3`, `% 3` an unsigned BPF_MOD). WARNING: **when N is a runtime value (a map, or a `param`) clang fails with `unsupported signed division`** -- that message comes from clang, not from spinel-ebpf"],
+"worker_select"    => [1, %w[idx],              "**steer** this connection to the socket in slot `idx` of the REUSEPORT_SOCKARRAY (bpf_sk_select_reuseport). What lands in a slot is **decided by userspace**: each worker calls `sp_bpf_reuseport_register(listen_fd, idx)`, and one of them calls `sp_bpf_reuseport_attach(listen_fd, \"sk_reuseport__<name>\")` to attach the program to the group (both are existing FFI entry points). WARNING: **selecting an empty slot does not fail**. The helper returns -ENOENT, the code generator discards it, and the kernel **quietly falls back to its own 5-tuple spread** -- so \"the program picked this worker\" and \"the program picked nothing\" are indistinguishable in anything the probe emits. Keeping the number of registered workers in step with your own `% N` is the author's job (`spinel-ebpf describe` prints how many slots your arithmetic reaches)"],
       "sock_addr_ip4"    => [0, [],                   "the destination IPv4 address of a connect or bind, in host order"],
       "sock_addr_port"   => [0, [],                   "the destination port of a connect or bind, in host order"],
       # Reading a `struct sock *` by name, from any context. Every value is in **host
@@ -1071,27 +1095,29 @@ module SpinelEbpf
     # `why` says why demotion was chosen over porting.
     # ===================================================================
     WITHDRAWN = {
-      "reuseport_hash" => { ctx: :sk_reuseport, arity: 0,
-                            why: "Without its other half, worker_select -- which needs a REUSEPORT_SOCKARRAY map and glue-side socket registration -- reading the hash does not let you choose a worker. Parity with nginx was reached with the kernel's own SO_REUSEPORT selection; BPF-side selection was an opt-in extra on top" },
-      "worker_select"  => { ctx: :sk_reuseport, arity: 1,
-                            why: "Needs a REUSEPORT_SOCKARRAY map declaration plus the userspace plumbing that registers sockets into it. The builtin alone does nothing" },
-      "tail_call_to"   => { ctx: :xdp, arity: 1,
-                            why: "Needs both a PROG_ARRAY map and the xdp_tail__ attach kind, and that attach kind is itself unported -- measured: it does not become SEC(\"xdp\"). xdp_tail is now in WITHDRAWN_ATTACH, so the generator refuses it loudly" },
+# `reuseport_hash` and `worker_select` were withdrawn here and have since
+# been ported, together with the REUSEPORT_SOCKARRAY they index. The glue
+# half (sp_bpf_reuseport_register / sp_bpf_reuseport_attach) had in fact
+# never been lost, which is the part the stated reason got wrong.
+# `tail_call_to` was withdrawn here and has since been ported together with
+# the two halves it needs: the `xdp_tail__` attach kind and the PROG_ARRAY.
       "xdp_match_health" => { ctx: :xdp, arity: 0,
                               why: "Part of the XDP_TX static-response path, a large piece including compile-time checksum precomputation. It was also measured to top out around 35-50% reliability for structural reasons, and was superseded by the pure-XDP TCP slice" },
       "xdp_reply_health" => { ctx: :xdp, arity: 0,
                               why: "As above: the XDP_TX static-response path, superseded by the TCP slice" },
-      "pkt_dynptr_byte_at" => { ctx: :xdp, arity: 1,
-                                why: "bpf_dynptr_from_xdp plus bpf_dynptr_slice. The pkt_* and skb_load_* builtins already offer the same read, and the one place it would have simplified was left alone at the time for size and risk, so on its own it adds little" },
-      "tcp_syncookie_gen"   => { ctx: :xdp, arity: 0, why: "Needs the whole pure-XDP TCP slice bundle -- some 470 lines of emitted state machine -- together with the xdp__tcp_slice__ attach kind, which is itself unported" },
-      "tcp_syncookie_check" => { ctx: :xdp, arity: 0, why: "As above: part of the TCP slice bundle" },
-      "tcp_reply_header"    => { ctx: :xdp, arity: 3, why: "As above: part of the TCP slice bundle" },
-      "tcp_reply_synack"    => { ctx: :xdp, arity: 1, why: "As above: part of the TCP slice bundle" },
-      "tcp_synack_cookie"   => { ctx: :xdp, arity: 0, why: "As above: part of the TCP slice bundle" },
-      "tcp_reply_data"      => { ctx: :xdp, arity: 3, why: "As above: part of the TCP slice bundle", example: 'tcp_reply_data(seq, ack, "HTTP/1.0 200 OK")' },
-      "payload_starts"      => { ctx: :xdp, arity: 1, why: "As above: part of the TCP slice bundle", example: 'payload_starts("GET ")' },
-      "user_ringbuf_drain"  => { ctx: :kprobe, arity: 0,
-                                 why: "Needs a USER_RINGBUF map together with the user_ringbuf__ callback attach kind, and that attach kind is itself unported -- measured. user_ringbuf is now in WITHDRAWN_ATTACH, so the generator refuses it loudly" },
+# `pkt_dynptr_byte_at` was withdrawn here and has since been ported, along
+# with its chain spelling `pkt.byte_at(off)`. The stated reason was that
+# the pkt_* and skb_load_* readers already cover the same read; what they
+# do not cover is a runtime offset, which is what this one is for.
+# The seven TCP-slice builtins (tcp_syncookie_gen and _check,
+# tcp_reply_header and _synack, tcp_synack_cookie, tcp_reply_data,
+# payload_starts) were withdrawn here as a set, because the
+# `xdp__tcp_slice__` attach kind they belong with was withdrawn. They have
+# since been ported as a set, together with that attach kind.
+# `user_ringbuf_drain` was withdrawn here and has since been ported with
+# the two halves it needs -- the USER_RINGBUF map and the SEC-less
+# `user_ringbuf__` callback -- plus the loader half that had never existed
+# at all, `sp_bpf_user_cmd_push`.
     }.freeze
 
     # ===================================================================
@@ -1116,30 +1142,20 @@ module SpinelEbpf
     # a method name or the reactor form.
     # ===================================================================
     WITHDRAWN_ATTACH = {
-      xdp_tcp_slice: {
-        method_prefix: "xdp__tcp_slice__<name>", sec: "xdp",
-        probe: "def xdp__tcp_slice__probe",
-        why: "The pure-XDP TCP slice is a package: some 470 lines of emitted state machine plus seven builtins (the tcp_syncookie_*, tcp_reply_*, tcp_synack_cookie and payload_starts family, all withdrawn above). It was lost whole in the move to the C generator. Bringing it back is downstream of deciding whether to redo the kernel-side static response at all",
-        instead: "Write an ordinary `def xdp__<name>` -- SEC(\"xdp\") with the pkt_* or pkt.* accessors -- and terminate the connection in userspace",
-      }.freeze,
-      xdp_tail: {
-        method_prefix: "xdp_tail__<name>", sec: "xdp",
-        probe: "def xdp_tail__probe",
-        why: "A tail-call target only means anything together with a PROG_ARRAY and the tail_call_to builtin, which is withdrawn above. The glue side that populates the program array survived, but nothing emits the spnl_prog_array map any more",
-        instead: "Fold the branches into a single `def xdp__<name>`. The one-million instruction budget is per program, and splitting was only ever a way to get more of it",
-      }.freeze,
-      user_ringbuf: {
-        method_prefix: "user_ringbuf__<name>(value)", sec: "(a callback; no SEC)",
-        probe: "def user_ringbuf__cmd(value)",
-        why: "The host-to-kernel command channel is three pieces at once: a USER_RINGBUF map, the emission of a SEC-less callback, and the user_ringbuf_drain builtin, which is withdrawn above. None of the three exist in the C generator",
-        instead: "Pass configuration in with `param :name, default: N`, or through an ordinary HASH map written from userspace",
-      }.freeze,
-      timer: {
-        method_prefix: "on :timer, every: N.<unit> (spnl_timer__<name>)", sec: "syscall",
-        probe: "module R\n  include BPF::EventLoop\n  on :timer, every: 1.seconds do\n",
-        why: "Needs a bpf_timer map, an arming program, and a callback that re-arms itself. The glue side survived and still looks for spnl_timer_arm_*, but nothing emits it. **This is the worst-shaped of the five**: the C reactor table has no :timer entry and unknown kinds are skipped, so the body does not merely fail to attach -- it never appears in the output at all. And because the advertised SEC is \"syscall\", which is exactly the string a silently degraded method gets, an audit that only compares SECs sees nothing wrong",
-        instead: "Do periodic work in the userspace drain loop (`loop { sleep n; ... }`), which is how every exporter in this tree already works",
-      }.freeze,
+# EMPTY, and that is the finished state, not a gap.
+#
+# Four kinds passed through here: :timer, :xdp_tail, :user_ringbuf and --
+# last of them -- :xdp_tcp_slice. Every attach kind this code generator
+# advertises is now implemented, which is the claim that could not be made
+# about any of them when the audit found them silently dead.
+#
+# Nothing is invented to keep the record non-empty. The gate no longer
+# aborts when this table is empty, and the withdrawn-sugar and
+# withdrawn-map inventories emptied the same way, without a replacement.
+# Keeping an inventory armed by leaving something broken in the shipped
+# product is precisely the pressure that split the negative control off it:
+# the controls that used to live off this table are synthesised now
+# (tools/affordance_gate.rb --section attach self-check).
     }.freeze
 
     # Assemble every builtin's signature, from the explicit table plus the generated families.
@@ -1198,11 +1214,42 @@ module SpinelEbpf
         "parent_path_eq"   => { secs: DPATH_OK_SECS },
         "cpumap_redirect"  => { kinds: %i[xdp] },
         "xsk_redirect"     => { kinds: %i[xdp] },
+        # The helper's first parameter is a `struct xdp_md *`
+        # (bpf_dynptr_from_xdp). TC has bpf_dynptr_from_skb, but that side was never
+        # shipped and TC already reads bytes with skb_load_byte, so
+        # the gate is XDP-only -- the same mask the C codegen enforces.
+        "pkt_dynptr_byte_at" => { kinds: %i[xdp] },
+        # A tail call lands in a program of the CALLER's own type, and
+        # `spnl_prog_array` only ever holds this unit's `def xdp_tail__<name>` --
+        # XDP programs. `xdp_tail` is itself an XDP kind here (a target may jump
+        # onward, up to the kernel's 33-deep limit), so the one mask covers both
+        # spellings of a dispatcher.
+        "tail_call_to"     => { kinds: %i[xdp xdp_tail] },
         "dev_redirect"     => { kinds: %i[xdp] },
+        # The seven TCP-slice builtins. XDP-only because they
+        # rewrite and RESIZE the raw frame (bpf_xdp_adjust_tail) through
+        # `struct xdp_md`, and the two syncookie ones bottom out in kfuncs whose
+        # first parameter is an XDP packet pointer. `xdp_tcp_slice` is NOT in the
+        # mask: that kind's body is discarded, so a builtin written in it would
+        # be silently dropped -- which is the one context where "allowed" would
+        # be a lie. (The load status of each builtin per program type was measured.)
+        "tcp_syncookie_gen"   => { kinds: %i[xdp] },
+        "tcp_syncookie_check" => { kinds: %i[xdp] },
+        "tcp_reply_header"    => { kinds: %i[xdp] },
+        "tcp_reply_synack"    => { kinds: %i[xdp] },
+        "tcp_synack_cookie"   => { kinds: %i[xdp] },
+        "tcp_reply_data"      => { kinds: %i[xdp] },
+        "payload_starts"      => { kinds: %i[xdp] },
         "sock_addr_ip4"    => { kinds: %i[cgroup_connect4 cgroup_bind4] },
         "sock_addr_port"   => { kinds: %i[cgroup_connect4 cgroup_bind4] },
         "sock_ops_op"      => { kinds: %i[sock_ops] },
         "sock_ops_state"   => { kinds: %i[sock_ops] },
+        # `struct sk_reuseport_md` and bpf_sk_select_reuseport exist for
+        # exactly one program type. The gate is on the kind NAME rather than the
+        # C codegen's AttachKind because sk_reuseport shares AK_SK_VERDICT with
+        # six other hooks, each with a different ctx struct.
+        "reuseport_hash"   => { kinds: %i[sk_reuseport] },
+        "worker_select"    => { kinds: %i[sk_reuseport] },
         "iter_task"        => { kinds: %i[iter_task] },
         # Only a multi-symbol handler HAS a "which symbol" question. In a
         # 1-to-1 handler the attach point is the method name, so the codegen
@@ -1325,6 +1372,10 @@ module SpinelEbpf
       "path_starts_with" => 'path_starts_with(file, "/etc/secret/")',
       "path_contains"  => 'path_contains(file, "/.ssh/")',
       "parent_path_eq" => 'parent_path_eq("/usr/bin/curl")',
+# The payload and the prefix are unrolled at compile time, so each has to be a
+# literal -- a positional placeholder would be a call that does not compile.
+"payload_starts" => 'payload_starts("GET /health ")',
+"tcp_reply_data" => 'tcp_reply_data(seq, ack, "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nOK\n")',
       # A capability is passed as its bit number through a constant; the CAP:: path and
       # the flat CAP_ name are the same value. A namespace key is a symbol literal,
       # which selects a kernel struct member at compile time.
@@ -1426,8 +1477,10 @@ module SpinelEbpf
         members: %w[req_start emit_l7],
         note: "The L7 round-trip pair: the first records the start on send, the second emits the round-trip span once the data has reached the application. See required_sets.l7_latency." }.freeze,
       { name: "pkt_fields",
-        members: PKT_FIELD_BUILTINS,
-        note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.* chain accessors, such as pkt.l4.proto, yield the same values." }.freeze,
+members: (PKT_FIELD_BUILTINS + %w[pkt_dynptr_byte_at]),
+note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.* chain accessors, such as pkt.l4.proto, yield the same values. " \
+      "**pkt_dynptr_byte_at(off) is the odd one out**: it takes one argument, its offset is a runtime value, it is XDP-only, and it returns a byte (0-255) or -1. " \
+      "Read a fixed place in a header with the fixed-offset readers; read an arbitrary place with the dynptr." }.freeze,
       { name: "tcp_sock_accessors",
         members: (TCP_SOCK_READER_BUILTINS + TCP_SOCK_WRITER_BUILTINS + TCP_SOCK_ADDER_BUILTINS),
         note: "tcp_sock fields inside a congestion-control context: a reader takes the socket, a writer takes a socket and a value, an adder a socket and a delta. The dot accessors, such as sk.snd_cwnd, yield the same values." }.freeze,
@@ -1468,6 +1521,14 @@ module SpinelEbpf
       { kind: :sock_ops,      method_prefix: "sock_ops__<name>",         sec: "sockops",               ctx_type: "struct bpf_sock_ops *", args_convention: "no declared parameters; read the context with sock_ops_op and sock_ops_state", context_note: "Observing TCP state, attached to a cgroup ($SPNL_CGROUP_PATH) by the generated glue. The return value is not a verdict; the wrapper returns 0" },
       { kind: :cgroup_connect4, method_prefix: "cgroup__connect4__<name>", sec: "cgroup/connect4",     ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with sock_addr_ip4 and sock_addr_port", context_note: "controls outbound connect; return 1 to allow, 0 to deny" },
       { kind: :cgroup_bind4,  method_prefix: "cgroup__bind4__<name>",    sec: "cgroup/bind4",          ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with the sock_addr_* builtins", context_note: "controls bind; return 1 to allow, 0 to deny" },
+      { kind: :xdp_tail,      method_prefix: "xdp_tail__<name>",         sec: "xdp",                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters (a tail call carries none); read the packet with the pkt_* builtins", context_note: "a tail-call TARGET. The emitted program is an ordinary SEC(\"xdp\") one; what differs is **only how the loader treats it** -- it is not attached to an interface, its fd is written into `spnl_prog_array` at the **slot matching its declaration order** (0, 1, ...) by `_spnl_prog_array_populate`. The caller uses `tail_call_to(slot)`, from a plain `def xdp__<name>` or from another `def xdp_tail__<name>` (the kernel allows 33 levels). **The motive is that the one-million instruction budget is per program**, which makes this the only way to split an XDP program. WARNING: **failure is silent** -- a jump into an empty slot just falls through, so if the slot numbers and the declaration order drift apart the result is not \"it jumped to the wrong program\" but \"it did not jump and execution continued\". An integer literal slot is range-checked at compile time; a computed one is not. `spinel-ebpf describe` prints the slot-to-method table. WARNING: a unit that declares targets nobody jumps to is **legal** (the map is emitted and the loader populates it), so that \"I have not written the dispatcher yet\" is not refused. WARNING: **the kernel floor is not \"4.2\"** -- bpf_tail_call and PROG_ARRAY themselves are 4.2, but the generated dispatcher makes its tail call from inside `<name>_inner`, a BPF-to-BPF **subprogram** (confirmed in the kernel's own translated dump). A tail call from a subprogram is a later, separate capability that each architecture's JIT has to support, and **its floor was not measured**, so the portability contract reports 4.2 as the feature's floor and declares the shape's floor unknown on its own line (it does work on 7.1.5/aarch64). The effective floor is at least SEC(\"xdp\")'s **5.9**" },
+      { kind: :xdp_tcp_slice, method_prefix: "xdp__tcp_slice__<name>",  sec: "xdp", ctx_type: "struct xdp_md *", args_convention: "**no declared parameters, and the body is not used either** -- the method body is a marker the code generator replaces wholesale", body: :discarded, emits: "spnl_tcp_slice_main", context_note: "**an HTTP reply that never touches the kernel TCP stack**: no listening socket is created on port 8080, and the SYN, the handshake ACK, the GET and the FIN are all completed in XDP. `bpf_tcp_raw_gen_syncookie_ipv4` establishes the three-way handshake statelessly, a 4-tuple-keyed `bpf_conntab` (LRU_HASH) holds ESTABLISHED / RESP_SENT / CLOSED, and `GET /health ` is answered with `HTTP/1.0 200 OK` over XDP_TX. Retransmission handling is included (a repeated GET in RESP_SENT resends the response; a repeated FIN in CLOSED resends the FIN-ACK), as is a per-state time-to-live `bpf_timer`. WARNING: **the body is discarded** -- the `XDP_PASS` in `def xdp__tcp_slice__health; XDP_PASS; end` appears nowhere in the generated C. Writing logic there **does nothing and produces no diagnostic** (since a marker's definition does not depend on its spelling, refusing non-markers was judged to produce more false positives). WARNING: **port 8080 and `/health` are fixed**. WARNING: **one slice per unit** -- the generated symbol names are fixed, so a second one dies at compile time. WARNING: there is no `on :xdp_tcp_slice` reactor form (there would be no body to synthesise). WARNING: **its `bpf_timer` is a different mechanism from `on :timer`**: that one arms a single timer in an array slot once at load time; this one arms a **per-connection timer embedded in the LRU_HASH value** from BPF, and the callback deletes its own entry. All they share is `struct bpf_timer` and the 5.15 floor" },
+      { kind: :timer,         method_prefix: "on :timer, every: N.<unit> (reactor form only; the synthesised name is spnl_timer__main)", sec: "syscall", ctx_type: "__u64 * (the arming program only; the callback takes (void *map, int *key, struct spnl_timer_value *v))", args_convention: "no declared parameters. **The interval is a compile-time constant** -- an integer literal with a unit, such as `every: 5.seconds`, `500.ms` or `1000.ns`; neither an expression nor a `param` will do, because the value is folded into bpf_timer_start", context_note: "three things are emitted: `spnl_timer_map` (an ARRAY with one slot), a SEC-less callback `spnl_timer_cb_main` (the handler body plus a re-arm of itself), and `SEC(\"syscall\") spnl_timer_arm_main`, which the glue fires exactly once at load time through `bpf_prog_test_run`. WARNING: **one timer per unit** (the callback name is fixed, so a second one dies at compile time). WARNING: **the return value is ignored** -- the verifier requires a literal `return 0` in the callback. WARNING: it is **not process context**, so reading the current task (`has_cap`, `pid` and the like) is refused and it cannot coexist with `filter_by`: both would end up pointing at whichever task happens to be on the CPU. Kernel floor **5.15** (bpf_timer)" },
+      { kind: :user_ringbuf,  method_prefix: "user_ringbuf__<name>(value) / on :user_cmd do |cmd| ... end", sec: nil,
+        emits: "static long spnl_user_ringbuf_cb_<name>(struct bpf_dynptr *dynptr, void *_uctx)",
+        ctx_type: "struct bpf_dynptr * (the record) + void * (unused)",
+        args_convention: "**exactly one** declared parameter -- the value the host pushed. The first 8 bytes of the record are read with `bpf_dynptr_read`",
+        context_note: "the host-to-kernel command channel, and **the only attach kind that emits no program at all**: what comes out is a `static` callback with no SEC, no context and no userspace-visible name, which `bpf_user_ringbuf_drain` calls once per pending record. It is therefore **not attached to anything** -- it runs only when some handler in the same unit calls `user_ringbuf_drain`, and where that call sits is what sets command latency, so it is never synthesised. WARNING: a callback with no drain, a drain with no callback, and two callbacks in one unit all **die at compile time**. WARNING: **a record is a fixed 8 bytes**; send with the glue's `sp_bpf_user_cmd_push(value)`, because a hand-rolled pusher sending fewer makes the callback fire and the count rise while only the value stays 0. Kernel floor **6.1** (USER_RINGBUF), which is higher than the 5.2 base -- `param` travels further when nothing needs to change while the probe runs" },
       { kind: :iter_task,     method_prefix: "iter__task__<name>",       sec: "iter/task",             ctx_type: "struct bpf_iter__task *", args_convention: "no declared parameters; iter_task() yields the task pointer", context_note: "enumerating tasks, driven from userspace by the generated glue" },
       { kind: :raw_tp,        method_prefix: "raw_tp__<event>",          sec: "raw_tp/<event>",        ctx_type: "struct bpf_raw_tracepoint_args *", args_convention: "ctx->args[i]", context_note: "a raw tracepoint, with lower overhead" },
       { kind: :socket_filter, method_prefix: "socket_filter__<name>",    sec: "socket",                ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "the classic SO_ATTACH_BPF filter; the return value is how many bytes to keep" },
@@ -1479,7 +1540,7 @@ module SpinelEbpf
       { kind: :xdp,           method_prefix: "xdp__<name>",              sec: "xdp",                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters; use the pkt_* builtins or the pkt.* accessors", context_note: "returns XDP_PASS, XDP_DROP, XDP_TX or XDP_REDIRECT; the interface comes from SPNL_XDP_IFACE" },
       { kind: :tc_ingress,    method_prefix: "tc__ingress__<name>",      sec: "tcx/ingress",           ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
       { kind: :tc_egress,     method_prefix: "tc__egress__<name>",       sec: "tcx/egress",            ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
-      { kind: :sk_reuseport,  method_prefix: "sk_reuseport__<name>",     sec: "sk_reuseport",          ctx_type: "struct sk_reuseport_md *", args_convention: "no declared parameters", context_note: "SO_REUSEPORT socket selection; returns SK_PASS or SK_DROP, which leaves the choice to the kernel default. Note that the context-reading and selection builtins are withdrawn, so a BPF program cannot name the worker itself" },
+      { kind: :sk_reuseport,  method_prefix: "sk_reuseport__<name>",     sec: "sk_reuseport",          ctx_type: "struct sk_reuseport_md *", args_convention: "no declared parameters", context_note: "decides **which listening socket** a SYN arriving at an SO_REUSEPORT group is handed to. Returning `SK_PASS` accepts the decision (which, if `worker_select` was never called, is the **kernel's own 5-tuple spread**); `SK_DROP` drops the SYN. With `reuseport_hash` and `worker_select` implemented, a BPF program can name the worker itself. Attaching is setsockopt(SO_ATTACH_REUSEPORT_EBPF): the probe's own userspace half calls the glue's `sp_bpf_reuseport_attach(listen_fd, \"sk_reuseport__<name>\")`. It is not auto-attached, because the listening socket is the probe's to create and the loader knows nothing about it. WARNING: **a failed selection is silent** (see worker_select)" },
       { kind: :sk_msg,        method_prefix: "sk_msg__<name>",           sec: "sk_msg",                ctx_type: "struct sk_msg_md *", args_convention: "no declared parameters", context_note: "A sockmap program, attached with BPF_SK_MSG_VERDICT. Measured: **spinel-ebpf does not create the sockmap itself** -- neither SOCKMAP nor SOCKHASH appears anywhere in the generator -- so the map it attaches to must be provided by userspace" },
       { kind: :sk_skb_verdict, method_prefix: "sk_skb__verdict__<name>", sec: "sk_skb/stream_verdict", ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream verdict. As above, the sockmap itself must be provided by userspace" },
       { kind: :sk_skb_parser, method_prefix: "sk_skb__parser__<name>",   sec: "sk_skb/stream_parser",  ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream parser. As above, the sockmap itself must be provided by userspace" },
@@ -2115,6 +2176,69 @@ module SpinelEbpf
         probe_kind: :builtin,
         role: "one scalar per task",
         when_full: "It has no max_entries: storage is allocated per task and freed when the task exits. A failed allocation is null-checked and becomes a no-op", }.freeze,
+{ id: :user_ringbuf,
+  map: "bpf_user_cmds",
+  type: "USER_RINGBUF",
+  declared_as: :maps,
+  max_entries: "262144",
+  created_by: %w[user_ringbuf user_ringbuf_drain],
+  probe: "user_ringbuf",
+  probe_kind: :attach,
+  role: "the **host -> kernel** command channel, and the only general-purpose one. Userspace writes (libbpf reserve/submit, or the glue's `sp_bpf_user_cmd_push`); `user_ringbuf_drain` reads, calling `def user_ringbuf__<name>(value)` once per record. **FIFO order is guaranteed**, which writing a HASH map directly does not give you",
+  when_full: "**the push fails** -- `user_ring_buffer__reserve` returns NULL and the glue's `sp_bpf_user_cmd_push` **returns -5**. That is the opposite of a kernel ring buffer, which drops silently: here the overflow is visible to the sender. But **it is the calling Ruby that sees the return value**, so discarding the result of `M.sp_bpf_user_cmd_push(v)` restores the same silence. Note that max_entries is a **byte count** (a 256 KB ring), not a number of records. Note also that **one record is a fixed 8 bytes**: a hand-rolled pusher sending a shorter one makes the callback fire and the count rise while bpf_dynptr_read returns -E2BIG, so **only the value stays 0** (measured)",
+  note: "neither of the two `created_by` surfaces compiles on its own -- a unit with only the callback dies with \"nothing drains it\", and a unit with only the drain dies with \"there is no callback to call\". So whenever this map exists, both halves are present. (The PROG_ARRAY is the deliberate opposite: there, either half alone is legal.)", }.freeze,
+{ id: :tcp_slice_conntab,
+  map: "bpf_conntab",
+  type: "LRU_HASH",
+  declared_as: :maps,
+  max_entries: "65536",
+  key: "struct spnl_tcp_slice_key",
+  value: "struct spnl_tcp_slice_state",
+  created_by: %w[xdp_tcp_slice],
+  probe: "xdp_tcp_slice",
+  probe_kind: :attach,
+  role: "the pure-XDP TCP slice's **connection table**: per 4-tuple, the post-handshake sequence numbers and a state (1 = established, 2 = response sent, 3 = closed). **Userspace never touches it** -- it is written and cleared by the XDP program and by the per-connection `bpf_timer` embedded in the value",
+  when_full: "**being an LRU, it does not fail** -- the oldest connection's entry is evicted silently. The next packet of an evicted connection is treated as having no state, so **a GET goes unanswered and a FIN gets no FIN-ACK**; the client retransmits and eventually times out. 65536 is therefore the ceiling on concurrent connections, and exceeding it shows up as a falling success rate rather than as an error",
+  note: "key = the 4-tuple (source and destination address, source and destination port); value = server sequence, client sequence, MSS, state and an embedded `struct bpf_timer`. Time-to-live (30s established, 30s response-sent, 60s closed) clears entries automatically, so steady-state occupancy tracks concurrent connections, not cumulative ones", }.freeze,
+{ id: :tcp_slice_counters,
+  map: "bpf_ts_counters",
+  type: "ARRAY",
+  declared_as: :maps,
+  max_entries: "17",
+  key: "__u32",
+  value: "__u64",
+  created_by: %w[xdp_tcp_slice],
+  probe: "xdp_tcp_slice",
+  probe_kind: :attach,
+  role: "the slice's **observation counters**, keyed by slot number: SYNs received, SYN-ACKs sent, cookies validated, data replies, FINs, RSTs, drops, passes, aborts, timer firings and so on. Read them with `bpftool map dump name bpf_ts_counters`",
+  when_full: "**it cannot overflow**: a fixed 17-slot array indexed by literals the code generator emits. The counters themselves use `__sync_fetch_and_add`, so nothing is lost",
+  note: "a probe that never calls spnl_emit* still has this map, so \"it is running but nobody is watching\" is observable from outside. Because it drains no ring buffer, it is outside the scope of the channel balance report", }.freeze,
+{ id: :prog_array,
+  map: "spnl_prog_array",
+  type: "PROG_ARRAY",
+  declared_as: :maps,
+  max_entries: "32",
+  key_size: "sizeof(__u32)",
+  value_size: "sizeof(__u32)",
+  created_by: %w[xdp_tail tail_call_to],
+  probe: "xdp_tail",
+  probe_kind: :attach,
+  role: "the jump table for tail calls. Slot i is the i-th `def xdp_tail__<name>` in **declaration order**; the values are program fds, written by the loader (`_spnl_prog_array_populate`). Neither the probe nor any userspace code touches it",
+  when_full: "**it cannot overflow** -- max_entries is the larger of the target count and 32, so everything declared fits. The danger runs the other way: **a `tail_call_to` into an empty slot returns no error and falls through silently**, and the caller carries on with the next statement. So the failure is not \"it jumped somewhere else\" but \"it did not jump\", and nothing observes that. An integer literal slot is range-checked at compile time; a computed one cannot be",
+  note: "either of the two `created_by` surfaces alone still produces the map: a unit with only targets would leave them unreachable if the loader had nothing to populate, and a unit that only jumps needs the map to compile at all", }.freeze,
+{ id: :reuseport_sockarray,
+  map: "bpf_worker_socks",
+  type: "REUSEPORT_SOCKARRAY",
+  declared_as: :maps,
+  max_entries: "64",
+  key: "__u32",
+  value: "__u64",
+  created_by: %w[worker_select],
+  probe: "worker_select",
+  probe_kind: :builtin,
+  role: "the SO_REUSEPORT worker table. Slot i is the listening socket of the worker that called `sp_bpf_reuseport_register(listen_fd, i)`. **The probe's own userspace half writes it** (the glue exposes the FFI that hands over the map fd); the code generator does not know how many workers there are",
+  when_full: "**it cannot overflow** (a fixed 64 entries, and the indices an author uses are below that). The danger runs the other way: **a `worker_select` into an empty slot does not fail** -- the helper returns -ENOENT, that is discarded, and the kernel **quietly falls back to its own 5-tuple spread**, so \"the program chose\" and \"the program did not choose\" are indistinguishable in the probe's output. If fewer workers register than the N in your `% N`, that difference in SYNs silently takes the default",
+  note: "a unit that uses only `reuseport_hash` does **not** get this map: a program that merely reads the hash (to drop SYNs by hash, say) never indexes the table, and building a table that is populated and never read would be worse than not having one", }.freeze,
       { id: :xskmap,
         map: "bpf_xskmap",
         type: "XSKMAP",
@@ -2127,6 +2251,20 @@ module SpinelEbpf
         probe_kind: :builtin,
         role: "AF_XDP sockets; userspace populates it",
         when_full: "An xsk_redirect to an unregistered index returns **XDP_PASS**, so the packet goes straight through. The generator passes that as the flags, which differs from the device and CPU maps", }.freeze,
+
+{ id: :timer_slot,
+  map: "spnl_timer_map",
+  type: "ARRAY",
+  declared_as: :maps,
+  max_entries: "1",
+  key: "__u32",
+  value: "struct spnl_timer_value",
+  created_by: %w[timer],
+  probe: "timer",
+  probe_kind: :attach,
+  role: "the single bpf_timer behind `on :timer`: one array slot whose value is a `struct { struct bpf_timer t; }`",
+  when_full: "**there is no room to overflow** -- one timer per unit means one slot, and a second `on :timer` dies at compile time. Two units in one program would each declare their own map under the same name, but this tree builds one unit per binary, so that does not arise",
+  note: "**there is nothing useful to read here from userspace**: the contents are kernel timer state, and reading the value does not tell you the period. The period lives in the generated C, in the bpf_timer_start arguments, and `spinel-ebpf describe` prints it", }.freeze,
 
       # --- below this line: maps that never appear under `SEC(".maps")` ------
       # Reading the generated C, none of these look like maps, yet all of them exist in
@@ -2244,24 +2382,19 @@ module SpinelEbpf
     # caught.
 
     WITHDRAWN_MAPS = {
-      "PROG_ARRAY" => {
-        went_with: "the xdp_tail attach kind and the tail_call_to builtin",
-        why: "A PROG_ARRAY is the table a tail call jumps through. Both the destination " \
-             "(xdp_tail) and the caller (tail_call_to) are withdrawn, so having only the " \
-             "map leaves nothing that could be written",
-      }.freeze,
-      "USER_RINGBUF" => {
-        went_with: "the user_ringbuf attach kind and the user_ringbuf_drain builtin",
-        why: "The host-to-kernel command channel. Both the callback (the SEC-less " \
-             "user_ringbuf__* handler) and the drain are withdrawn. Use param, which is " \
-             "backed by .rodata, or an ordinary HASH map instead",
-      }.freeze,
-      "REUSEPORT_SOCKARRAY" => {
-        went_with: "the worker_select and reuseport_hash builtins",
-        why: "The worker-selection table for SO_REUSEPORT. The builtins that choose are " \
-             "withdrawn, so an sk_reuseport program can only leave the choice to the " \
-             "kernel default",
-      }.freeze,
+# EMPTY, and that is the finished state.
+#
+# PROG_ARRAY, USER_RINGBUF and REUSEPORT_SOCKARRAY each passed through
+# here. None of them was ever missing as a map type: each was withdrawn
+# because the surfaces that would create it -- the tail-call target and
+# `tail_call_to`, the SEC-less callback and `user_ringbuf_drain`,
+# `worker_select` -- had been withdrawn, leaving a map nothing could ask
+# for. All three sets of surfaces have since been ported, so the reason is
+# gone with them.
+#
+# Leaving something withdrawn to keep this table non-empty would be keeping
+# the gate armed by keeping the product broken. Detecting an absent map is
+# the synthesised self-check's job instead.
     }.freeze
 
     # What the Ruby subset does and does not accept. The rejected list mirrors the
@@ -2287,7 +2420,8 @@ module SpinelEbpf
         "the pkt.* chain accessors (pkt.l4.proto, pkt.len and so on): the same fifteen readers as the flat pkt_* names. " \
         "These were measured to be dead in the production generator -- no fixture used the chain form, and a golden test that " \
         "never builds a comparison cannot fail one, so they stayed advertised for a year -- and have since been ported. " \
-        "Only the one-argument form pkt.byte_at(off) remains withdrawn, since the builtin behind it was withdrawn",
+        "The one-argument form pkt.byte_at(off) forwards to pkt_dynptr_byte_at rather than to a reader: XDP-only, runtime offset. " \
+        "It was withdrawn along with that builtin and has since been ported back; the two spellings are again gated as equivalent",
         "NOTE: every \"alternative spelling\" above appears in the surface-sugar table as a machine-readable **claim of equivalence**. " \
         "Their being prose and nothing else is exactly what let them drift. The affordance gate measures on every run whether the two " \
         "spellings really produce the same C",
@@ -2383,7 +2517,8 @@ module SpinelEbpf
     # `def <prefix><target>` -- the synthesised method name is exactly that. For uprobe,
     # uretprobe, the Go return probe and USDT the target cannot go in a method name, so
     # `<prefix><N>` is synthesised in declaration order; writing that name flat is
-    # equivalent. The two withdrawn kinds, :timer and :user_cmd, are absent from this list.
+    # equivalent. `:timer` is absent because it has no flat spelling at all: its
+    # interval arrives as a keyword, so the reactor form is the only one.
     SUGAR_REACTOR = [
       { on: "on :xdp",                                          flat: "xdp__main",          params: [], ret: "XDP_PASS" },
       { on: "on :sock_ops",                                     flat: "sock_ops__main",     params: [], ret: "0" },
@@ -2399,6 +2534,17 @@ module SpinelEbpf
       { on: 'on :go_uret, "/usr/bin/app:main.handle"',          flat: "uprobe__react0",     params: %w[ret], ret: "0" },
       { on: 'on :usdt, "/usr/lib/libfoo.so", "libfoo", "throw"', flat: "usdt__react__0",    params: %w[obj], ret: "0" },
       { on: "on :perf_event, hz: 99",                           flat: "perf_event__main",   params: [], ret: "0" },
+      # The one reactor kind whose handler is NOT a program, so it
+      # cannot stand alone -- a USER_RINGBUF callback with no `user_ringbuf_drain`
+      # is refused at compile time (a `static` function with no caller; the host
+      # could push forever with nothing on the other end). The companion below is
+      # therefore part of the CLAIM, not scaffolding the gate invented: both
+      # spellings carry the same drain site, and the two must still reach the same
+      # C. It doubles as evidence that `on :xdp` and `def xdp__main` agree in the
+      # same unit -- which is the equivalence the row above already asserts.
+      { on: "on :user_cmd",                                     flat: "user_ringbuf__cmd_handler", params: %w[cmd], ret: "0",
+        companion_sugar: "\n\n  on :xdp do\n    user_ringbuf_drain\n    XDP_PASS\n  end",
+        companion_flat:  "\n\ndef xdp__main\n  user_ringbuf_drain\n  XDP_PASS\nend" },
     ].freeze
 
     # The one-off sugars that do not belong to any family above.
@@ -2417,6 +2563,16 @@ module SpinelEbpf
       { id: :dot_add, family: "receiver dot accessor (tcp_cc)",
         form: :stmt, shape: :tcp_cc, equiv: :identical,
         sugar: "sk.snd_cwnd += 1", flat: "tcp_sock_snd_cwnd_add(sk, 1)" },
+# The one pkt.* chain member that is NOT in SUGAR_PKT_CHAIN, because that
+# family is derived by replacing dots with underscores and this one's flat
+# spelling is a different word (`pkt_dynptr_byte_at`, not `pkt_byte_at`)
+# and takes an argument. It is still the same claim: two spellings, one C.
+# It was the only withdrawn-sugar entry until the builtin came back.
+{ id: :pkt_chain_pkt_byte_at, family: "pkt.* chain accessor",
+  form: :expr, shape: :xdp, equiv: :identical,
+  sugar: "pkt.byte_at(14)", flat: "pkt_dynptr_byte_at(14)",
+  note: "the chain's only one-argument member. Its flat name is not `pkt_byte_at`, so it is " \
+        "not covered by the machine derivation (dot to underscore) and is listed here on its own" },
       { id: :kptr_dot, family: "kptr binding + dot accessor",
         form: :stmt, shape: :kprobe_sk, equiv: :compiles,
         sugar: "t = kptr(sk, \"sock\")\n  n = t.sk_sndbuf",
@@ -2430,15 +2586,20 @@ module SpinelEbpf
     # Withdrawn sugar. This is also **the gate's negative control**, on the same reasoning
     # as the withdrawn builtins and attach kinds: a gate that only checks "everything
     # advertised works" stays green forever once it degenerates.
-    WITHDRAWN_SUGAR = {
-      "pkt.byte_at(0)" => {
-        family: "pkt.* chain accessor", shape: :xdp,
-        why: "The one-argument form of the chain was the only one that forwarded to " \
-             "`pkt_dynptr_byte_at` rather than to a pkt_* reader, and that builtin is " \
-             "withdrawn: neither bpf_dynptr_from_xdp nor bpf_dynptr_slice exists in the C generator",
-        instead: "Another pkt.* reader such as pkt.l4.proto, or skb_load_byte(off) under TC",
-      }.freeze,
-    }.freeze
+# Withdrawn sugar. EMPTY, and that is the finished state.
+#
+# The only entry was ever `pkt.byte_at(off)`, the one chain member that
+# forwards to a builtin rather than to a reader; it came back when that
+# builtin did. Emptying it exposed a structural coupling worth naming:
+# **restoring things consumes negative controls**, because a gate that
+# proves it can still detect absence by compiling something known-absent
+# runs out of material exactly when the product gets healthy. The gate no
+# longer reads this table for that purpose. Absence detection in the sugar
+# section is synthesised instead (a chain member nobody implements must be
+# refused; a deliberately mismatched pair must come back "diverged"), so an
+# empty inventory is simply an empty inventory. The gate notes it in one
+# line and exits 0.
+WITHDRAWN_SUGAR = {}.freeze
 
     # Flatten the families and the one-offs into a single list. The gate and any audit
     # read only this.
@@ -2467,10 +2628,12 @@ module SpinelEbpf
         blk = r[:params].empty? ? "" : " |#{r[:params].join(', ')}|"
         sig = r[:params].empty? ? "" : "(#{r[:params].join(', ')})"
         kind = r[:on][/on :([a-z_]+)/, 1]
+        # `companion_*`: a handler that cannot legally stand alone brings its
+        # partner along in BOTH spellings. Empty for every other kind.
         out << { id: :"reactor_#{kind}", family: "reactor DSL (on :kind)",
                  form: :attach, equiv: :identical,
-                 sugar: "module ProbeK\n  include BPF::EventLoop\n\n  #{r[:on]} do#{blk}\n<BODY>\n  end\nend",
-                 flat:  "def #{r[:flat]}#{sig}\n<BODY>\nend", ret: r[:ret] }
+                 sugar: "module ProbeK\n  include BPF::EventLoop\n\n  #{r[:on]} do#{blk}\n<BODY>\n  end#{r[:companion_sugar]}\nend",
+                 flat:  "def #{r[:flat]}#{sig}\n<BODY>\nend#{r[:companion_flat]}", ret: r[:ret] }
       end
       (out + SUGAR_SINGLES).freeze
     end

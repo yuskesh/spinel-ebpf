@@ -58,9 +58,14 @@
 13_locals	ok	
 140_cpumap_redirect	ok	
 141_sock_ops	ok	
+142_tail_call_dispatch	ok	
+143_user_ringbuf_channel	ok	
+144_tcp_slice	ok	
+145_timer_event_loop	ok	
 146_pkt_chain	ok	
 147_dsl_class_xdp	ok	
 148_dsl_module_xdp	ok	
+149_pkt_dynptr_byte_at	ok	
 14_calls	ok	
 150_cap_ns_filetype	ok	
 153_attach_multi_expand	ok	
@@ -68,7 +73,11 @@
 155_attach_multi_auto	ok	
 15_times_loop	ok	
 161_attach_multi_params	ok	
+162_timer_with_handlers	ok	
+168_reuseport_select	ok	
 16_closure	ok	
+173_user_cmd_reactor	ok	
+174_tcp_slice_builtins	ok	
 17_kprobe	ok	
 18_tp_args	ok	
 19_emit_str	ok	

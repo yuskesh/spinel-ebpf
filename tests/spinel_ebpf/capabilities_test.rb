@@ -290,7 +290,31 @@ class CapabilitiesTest < Minitest::Test
     CAP::ATTACH_KINDS.each do |a|
       assert a[:method_prefix], "#{a[:kind]} has no method_prefix"
       assert a[:args_convention], "#{a[:kind]} has no args_convention"
-      assert a[:sec], "#{a[:kind]} has no sec (the affordance gate uses it as the expected value)"
+      # Exactly one of the two promises. `sec:` is a program SEC; `emits:`
+      # is a C symbol, for the one kind that emits no program at all (a
+      # USER_RINGBUF callback). Writing "syscall" there would have been worse
+      # than useless: that is the exact string a silently degraded attach kind
+      # produces, so a SEC comparison would have been satisfied by the very
+      # failure it exists to catch.
+      assert a[:sec] || a[:emits],
+             "#{a[:kind]} has neither sec nor emits (the affordance gate uses one as the expected value)"
+      # Only a kind that declares `body: :discarded` may carry **both**. The
+      # gate's second stage asks whether the body an author wrote reached the
+      # output, and for a kind that throws the body away that question has no
+      # answer -- so the affordance names what to look for instead, which is the
+      # second use of `emits:`. Carrying both WITHOUT declaring the discard stays
+      # forbidden: the gate would have no way to decide which one to read.
+      if a[:sec] && a[:emits]
+        assert_equal :discarded, a[:body],
+                     "#{a[:kind]} claims both sec and emits but does not declare body: :discarded"
+      end
+      # And the other direction: a kind that says it discards the body has to
+      # supply the thing to look for in its place.
+      if a[:body] == :discarded
+        assert a[:emits], "#{a[:kind]} declares body: :discarded but has no emits (the gate's second stage would have nothing to look for)"
+        assert_match(/body/, a[:args_convention].to_s + a[:context_note].to_s,
+                     "#{a[:kind]} discards the body without saying so to a human reader")
+      end
     end
   end
 
@@ -309,11 +333,17 @@ class CapabilitiesTest < Minitest::Test
                  "the same kind is both advertised and withdrawn"
   end
 
-  # A withdrawn attach kind says **why** and **what to write instead**. Removing it
-  # silently is not allowed -- the same contract WITHDRAWN (builtins) carries.
+  # A withdrawn attach kind says **why** and **what to write instead**. Removing
+  # one silently is not allowed -- the same contract the withdrawn builtins carry.
+  #
+  # Being non-empty is no longer required. Porting the demoted surfaces back
+  # empties this set, so requiring otherwise would be pressure to **leave a lie in
+  # the shipped affordance** just to keep the gate armed -- putting an invented
+  # name into the artifact readers depend on, for the gate's convenience.
+  # Detection power moved to the self-checks in tools/affordance_gate.rb (which
+  # corrupt a live claim in memory) and to the correspondence with
+  # CC_WITHDRAWN_ATTACH in the C generator.
   def test_withdrawn_attach_entries_carry_reason_and_alternative
-    refute_empty CAP::WITHDRAWN_ATTACH,
-                 "an empty standing negative control leaves the gate unable to detect the regression"
     CAP::WITHDRAWN_ATTACH.each do |kind, w|
       assert w[:method_prefix], "#{kind}: no method_prefix"
       assert w[:probe], "#{kind}: no probe (a gate cannot write the minimal program without one)"
@@ -1464,12 +1494,33 @@ class CapabilitiesTest < Minitest::Test
       assert_includes %w[identical compiles], s["equiv"], "#{s['id']}: equiv is unclear"
     end
 
-    # A withdrawn spelling is published too -- nothing disappears silently, the same
-    # convention the withdrawn builtins and attach kinds follow.
+    # `pkt.byte_at(off)` is the chain's only one-argument member, and its flat
+    # name is not `pkt_byte_at`, so it is not covered by the derivation rule
+    # above. It was withdrawn once and ported back, so **that it is back** is
+    # measured explicitly.
+    ba = sugar.find { |s| s["sugar"] == "pkt.byte_at(14)" }
+    refute_nil ba, "pkt.byte_at is not among the sugar claims (it is a surface that was ported back)"
+    assert_equal "pkt_dynptr_byte_at(14)", ba["flat"]
+    assert_equal "identical", ba["equiv"]
+    assert_includes CAP.all_builtins, "pkt_dynptr_byte_at",
+                    "the chain side came back but the flat side is not advertised"
+
+    # Withdrawn spellings are published too: nothing disappears silently, the
+    # same convention the withdrawn builtins and attach kinds follow.
+    #
+    # **The non-empty requirement was dropped.** It rested on the same assumption
+    # as the gate's old abort -- that the withdrawn set doubles as the negative
+    # control -- and that assumption was separated out precisely because it made
+    # fixing things weaken the gate (detection power now belongs to synthesised
+    # self-checks). The last entry has since been ported back, so **empty is the
+    # correct answer here**. What is left is the shape: an entry that exists
+    # carries `instead`, and an entry that came back is gone.
     wd = doc["withdrawn_sugar"]
     refute_nil wd, "withdrawn_sugar is missing from the affordance"
-    assert wd.key?("pkt.byte_at(0)"), "the withdrawal of pkt.byte_at is not readable"
-    refute_nil wd["pkt.byte_at(0)"]["instead"]
+    refute wd.key?("pkt.byte_at(0)"), "pkt.byte_at was ported back, so it must not remain in the withdrawn record"
+    refute wd.key?("on :user_cmd do |cmd| ... end"),
+           "on :user_cmd was ported back, so it must not remain in the withdrawn record"
+    wd.each_value { |v| refute_nil v["instead"] }
   end
 
   # The `to_span` resolution rule is published MACHINE-READABLY, the same way the
@@ -1529,7 +1580,13 @@ class CapabilitiesTest < Minitest::Test
     lost = maps.find { |m| m["id"] == "ringbuf_lost" }
     assert_equal true, lost["per_cpu"]
     assert_match(/per-CPU/, lost["note"])
-    refute_empty a.fetch("withdrawn_maps")
+    # `withdrawn_maps` is now **empty**, because the map types came back with the
+    # surfaces that create them. The old non-empty assertion treated the withdrawn
+    # inventory as a negative control, and that assumption has been dropped, so
+    # what is required here is only that the key is published.
+    wm = a.fetch("withdrawn_maps")
+    refute_nil wm, "withdrawn_maps is missing from the affordance"
+    refute wm.key?("USER_RINGBUF"), "USER_RINGBUF was ported back, so it must not remain in the withdrawn record"
   end
 
   # The four forms that never appear in `SEC(".maps")` -- struct_ops, .rodata,

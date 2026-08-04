@@ -603,6 +603,35 @@ static int g_uses_http_l7 = 0;     /* unit uses http_req_start/http_resp_stash/h
 static int g_uses_offcpu = 0;      /* unit uses offcpu_* -> off-CPU-during-request correlation */
 static int g_uses_dns_lat = 0;     /* unit uses dns_req_start/dns_resp_stash/dns_emit -> DNS RTT (txid-keyed) */
 static int g_uses_redis_l7 = 0;    /* unit uses redis_req_start/redis_resp_stash/redis_emit -> Redis L7 RED */
+static int g_uses_dynptr = 0;      /* unit uses pkt_dynptr_byte_at / pkt.byte_at -> emit the dynptr helper */
+/* how many `def xdp_tail__<name>` this unit declares. Counted in the
+ * pre-scan (before any body is lowered) because `tail_call_to(<literal>)` is
+ * checked against it: the loader populates exactly slots 0..N-1, and a tail call
+ * into an unpopulated slot FALLS THROUGH silently. A literal outside the range
+ * is therefore a program that always takes the fallback path, decidable here. */
+static int g_n_tail_targets = 0;
+/* `on :timer, every: N.<unit>`. The interval is a compile-time
+ * constant (it is baked into bpf_timer_start twice -- the arm program and the
+ * callback's re-arm), so it travels as codegen state, not as an argument. MVP is
+ * one timer per unit, which is why a single slot is enough; a second `on :timer`
+ * is refused in cc_synthesize_reactor rather than allowed to collide on the
+ * fixed callback name. */
+static int g_uses_timer = 0;
+static long long g_timer_ns = 0;
+static const char *g_timer_name = "main";   /* suffix of spnl_timer_{cb,arm}_<name> */
+/* USER_RINGBUF host->kernel command channel. One callback per unit
+ * (the drain call names it by symbol, so a second `def user_ringbuf__<name>`
+ * would leave the first one unreferenced -- refused in cc_user_ringbuf_gate
+ * rather than silently dropped, the same call made for a second timer).
+ *
+ * Filled by the pre-scan that runs before any body is lowered, which is what
+ * makes DECLARATION ORDER irrelevant: the retired oracle set this while emitting
+ * the callback, so a `user_ringbuf_drain` lowered earlier in the file found it
+ * empty and died -- which forced the author to declare `on :user_cmd` above
+ * `on :xdp` to work around it. */
+static int g_uses_user_ringbuf = 0;
+static const char *g_user_ringbuf_cb = NULL;   /* suffix of spnl_user_ringbuf_cb_<name> */
+static int g_user_ringbuf_drained = 0;         /* some handler calls user_ringbuf_drain */
 static int g_if_counter = 0;   /* fresh temp counter (`fresh`), reset per method */
 static const Method *g_method = NULL;  /* method being lowered (for ivar map scope) */
 static Lines *g_body = NULL;   /* current method's line accumulator (Ruby @lines) */
@@ -1060,19 +1089,87 @@ static void cc_flow_add_field(int mi, const char *f) {
   if (g_flow_nf[mi] < MAX_FLOW_FIELDS) g_flow_fields[mi][g_flow_nf[mi]++] = strdup(f);
 }
 
+/* the pure-XDP TCP slice. Two surfaces, one family:
+ *
+ *   (a) `def xdp__tcp_slice__<name>` -- the BUNDLE. The body is a marker; the
+ *       codegen replaces the whole method with a state machine (conntab +
+ *       counters + csum/swap/build helpers + spnl_tcp_slice_main) and a thin
+ *       SEC("xdp") wrapper. Hardcoded to :8080 and "GET /health ".
+ *   (b) the seven BUILTINS below -- the same machine written by hand in Ruby,
+ *       one `def xdp__<name>` with an if/elsif state machine. The seven were
+ *       withdrawn as a set because (a) was withdrawn; they come back as a set.
+ *
+ * Both are per-unit, not per-method: the helpers are `static __noinline` with
+ * fixed names, so a unit emits at most one of each. The two literal-bearing
+ * builtins (payload_starts / tcp_reply_data) get one helper per DISTINCT
+ * literal, indexed by first appearance -- exactly the Ruby ctx.payload_matchers
+ * / ctx.reply_bodies arrays this is a port of. */
+static int g_uses_tcp_slice     = 0;   /* any xdp__tcp_slice__<name> exists */
+static int g_syncookie_gen      = 0;   /* Roadmap #3: tcp_syncookie_gen used */
+static int g_syncookie_check    = 0;   /* Roadmap #3: tcp_syncookie_check used */
+static int g_uses_tcp_reply     = 0;   /* Roadmap #4: tcp_reply_header used */
+static int g_uses_tcp_synack    = 0;   /* Roadmap #4b: tcp_reply_synack used */
+static int g_uses_synack_cookie = 0;   /* Roadmap #4b': tcp_synack_cookie used */
+#define MAX_SLICE_LITERALS 8
+static char *g_payload_prefixes[MAX_SLICE_LITERALS]; static int g_n_payload = 0;
+static char *g_reply_bodies[MAX_SLICE_LITERALS];     static int g_n_reply   = 0;
+/* Quote a literal for the COMMENT above a generated matcher, the way the Ruby
+ * emitter did (`prefix.inspect[0, 40]`). Only the escapes a request prefix can
+ * actually contain; anything unprintable becomes \xNN so the comment stays on
+ * one line and stays ASCII. Truncated to 40 characters like the original.
+ * This is documentation, not code -- the compare itself is byte-numeric. */
+static char *cc_c_string_literal(const char *s) {
+  Buf b; memset(&b, 0, sizeof b);
+  buf_puts(&b, "\"");
+  for (size_t i = 0; s[i] && i < 38; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if      (c == '"')  buf_puts(&b, "\\\"");
+    else if (c == '\\') buf_puts(&b, "\\\\");
+    else if (c == '\r') buf_puts(&b, "\\r");
+    else if (c == '\n') buf_puts(&b, "\\n");
+    else if (c == '\t') buf_puts(&b, "\\t");
+    else if (c < 0x20 || c >= 0x7f) buf_printf(&b, "\\x%02X", c);
+    else buf_printf(&b, "%c", c);
+  }
+  buf_puts(&b, "\"");
+  return b.p ? b.p : strdup("\"\"");
+}
+
+/* Intern a literal into one of the two tables; the returned index IS the helper
+ * id burned into the emitted symbol (spnl_payload_match<N> / spnl_reply_data<N>). */
+static int cc_slice_lit_idx(char **tab, int *n, const char *lit, const char *who) {
+  for (int i = 0; i < *n; i++) if (!strcmp(tab[i], lit)) return i;
+  if (*n >= MAX_SLICE_LITERALS)
+    die(msprintf("%s: at most %d distinct literals per unit -- each one becomes its own "
+                 "__noinline helper, and past that the program stops being verifier-cheap. "
+                 "Split the probe, or branch on a shorter prefix first.\n  The extra one is",
+                 who, MAX_SLICE_LITERALS), lit);
+  tab[*n] = strdup(lit);
+  return (*n)++;
+}
+
 /* attach types (full defs below) -- declared here so cc_lower_expr can resolve a
  * pkt_* builtin's ctx kind (xdp vs tc) from the method being lowered. */
 typedef enum { AK_NONE, AK_KPROBE, AK_KRETPROBE, AK_TRACEPOINT, AK_FENTRY, AK_FEXIT, AK_XDP, AK_TC,
                AK_SK_VERDICT, AK_UPROBE, AK_URETPROBE, AK_USDT, AK_LSM, AK_FMOD_RET,
                AK_ITER_TASK, AK_RAW_TP, AK_PERF_EVENT, AK_SOCK_OPS,
-               AK_KPROBE_MULTI } AttachKind;
+               AK_KPROBE_MULTI, AK_TIMER,
+               AK_USER_RINGBUF } AttachKind;
 /* ctx_prefixed: the inner takes the kernel ctx as its first arg (xdp/tc, for pkt_*).
  * verdict: the wrapper propagates the inner's int return (XDP_ / TC_ACT_ values).
- * iter_guard: emit `if (!ctx->task) return 0;` (bpf_iter NULL terminator).
- * usdt: emit bpf_usdt_arg prologue + pull in usdt.bpf.h. */
+ * iter_guard: emit `if (!ctx->task) return 0;` (the bpf_iter NULL terminator).
+ * usdt: emit bpf_usdt_arg prologue + pull in usdt.bpf.h.
+ * xdp_tail: this handler is a tail-call TARGET. `kind` is AK_XDP on
+ *   purpose: it is an XDP program in every sense the codegen cares about (same
+ *   SEC, same ctx, same verdict, same pkt_* builtins), and every context gate in
+ *   this file asks cc_detect_attach what it is lowering. A separate AttachKind
+ *   would have made all of them answer "not XDP" about an XDP program. The one
+ *   thing that differs is LOADER behaviour (registered into the PROG_ARRAY
+ *   instead of attached to an interface), and the loader decides that from the
+ *   program NAME, not from anything the codegen emits. */
 typedef struct { AttachKind kind; char *sec; const char *ctx_type; const char *kname;
                  int ctx_prefixed; int verdict; const char *tp_struct;
-                 int iter_guard; int usdt;
+                 int iter_guard; int usdt; int xdp_tail; int tcp_slice;
                  char *tp_cat; char *tp_event; } Attach;   /* named tracepoint field extraction */
 static AttachKind cc_detect_attach(const char *name, Attach *a);
 
@@ -1123,17 +1220,24 @@ static int cc_pkt_chain_name(AST *ast, int nid, char *out, size_t outsz) {
   return 0;
 }
 
+/* Only reached when the leaf took NO arguments: `pkt.byte_at(off)` with an
+ * argument list is routed to the dynptr emitter above (which owns the arity
+ * message), the same way the fifteen no-arg readers are routed to
+ * cc_emit_pkt_call. So a bare `pkt.byte_at` is a missing offset, not an
+ * unknown reader, now that the builtin this forwards to is implemented. */
 static void cc_die_bad_pkt_chain(const char *joined, int had_args) {
-  if (had_args && !strncmp(joined, "pkt_byte_at", 11))
-    die("`pkt.byte_at(off)` is not available: it lowered to the `pkt_dynptr_byte_at` builtin, "
-        "which was withdrawn (bpf_dynptr_from_xdp/bpf_dynptr_slice did not survive the port "
-        "to the C codegen; it is recorded in Capabilities::WITHDRAWN).\n"
-        "  Read the header fields with the other pkt.* readers (pkt.l4.proto, pkt.ip4.src, ...), "
-        "or skb_load_byte(off) in a tc__ handler", joined);
+  (void)had_args;
+  if (!strcmp(joined, "pkt_byte_at"))
+    die("`pkt.byte_at` needs the byte offset: `pkt.byte_at(off)`. It is the one member of the "
+        "pkt.* chain that takes an argument -- it lowers to the `pkt_dynptr_byte_at` builtin "
+        "-- not to a pkt_* reader.\n"
+        "  Write it as `pkt.byte_at(14)` -- or spell it flat: `pkt_dynptr_byte_at(14)`",
+        joined);
   char *msg = msprintf(
     "`%s` is not a packet reader. The pkt.* chain accessor is exactly the flat pkt_* "
     "readers with dots: pkt.len / pkt.eth.proto / pkt.l4.{proto,sport,dport,payload_len} / "
     "pkt.ip4.{src,dst} / pkt.ip6.{src_hi,src_lo,dst_hi,dst_lo} / pkt.tcp.{flags,seq,ack}.\n"
+    "  The one member that takes an argument is pkt.byte_at(off).\n"
     "  `spinel-ebpf capabilities --json` lists both spellings (surface_sugar).\n"
     "  You wrote (flattened)",
     joined);
@@ -1188,6 +1292,11 @@ enum { CC_CTX_XDP = 1, CC_CTX_TC_INGRESS = 2, CC_CTX_TC_EGRESS = 4 };
 /* The skb read/write/checksum family all goes through
  * bpf_skb_{load,store}_bytes / bpf_l{3,4}_csum_replace, which the kernel offers
  * to `struct __sk_buff` programs only -- XDP has an xdp_md, not an skb. */
+/* why the seven TCP-slice builtins are XDP-only. They rewrite the frame in
+ * place through `struct xdp_md` pointers and resize it with bpf_xdp_adjust_tail;
+ * a TC classifier has an skb and neither of those applies to it. */
+#define CC_XDP_ONLY_WHY "it rewrites and resizes the raw frame through `struct xdp_md` " \
+                        "(bpf_xdp_adjust_tail), which a TC classifier's skb cannot supply"
 #define CC_SKB_WHY "it reads or rewrites `struct __sk_buff`, and XDP runs before " \
                    "an skb exists (its ctx is a struct xdp_md)"
 
@@ -1208,8 +1317,14 @@ static void cc_require_pkt_ctx(const char *who, int allow, const char *why) {
   if (allow & CC_CTX_XDP)        strcat(forms, "\n    def xdp__<name>          (or `on :xdp`, `class X < BPF::XDP`)");
   if (allow & CC_CTX_TC_INGRESS) strcat(forms, "\n    def tc__ingress__<name>  (or `on :tc_ingress`)");
   if (allow & CC_CTX_TC_EGRESS)  strcat(forms, "\n    def tc__egress__<name>   (or `on :tc_egress`)");
+  /* `allow == CC_CTX_XDP` used to fall through to "an XDP or TC program",
+   * which is false for the two XDP-only builtins (pkt_dynptr_byte_at, and now
+   * tail_call_to) -- it invites the author to try TC, where the list two lines
+   * below already says they cannot. The list was always right; the sentence was
+   * not. */
   const char *where = (allow == CC_CTX_TC_INGRESS) ? "a TC ingress classifier"
                     : (allow == CC_CTX_TC)         ? "a TC classifier"
+                    : (allow == CC_CTX_XDP)        ? "an XDP program"
                                                    : "an XDP or TC program";
   char *msg = msprintf("%s is only available inside %s, because %s.\n  Contexts that can supply it:%s"
                        /* ASCII only, deliberately: `check --json` reads this message back, and a
@@ -1220,6 +1335,55 @@ static void cc_require_pkt_ctx(const char *who, int allow, const char *why) {
                        "that names a C identifier or a helper number instead of the hook you chose.)"
                        "\n  You wrote it in", who, where, why, forms);
   die(msg, g_method ? g_method->name : "<none>");
+}
+
+/* the gate for the two SO_REUSEPORT selection builtins. Kept apart
+ * from cc_require_pkt_ctx because the thing being required is not "a packet
+ * context" -- it is one specific program type.
+ *
+ * The check has to be on `kname`, not on the AttachKind: sk_reuseport shares
+ * AK_SK_VERDICT with sk_msg, sk_skb, socket_filter, flow_dissector, sk_lookup
+ * and the two cgroup sock_addr hooks, and every one of those has a DIFFERENT
+ * ctx struct. `ctx->hash` happens to compile in some of them and means
+ * something else; bpf_sk_select_reuseport does not exist for any of them. */
+static void cc_require_sk_reuseport(const char *who, const char *why) {
+  Attach a = {0};
+  (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
+  int ok = a.kname && !strcmp(a.kname, "sk_reuseport");
+  if (a.sec) free(a.sec);
+  if (ok) return;
+  char *msg = msprintf(
+    "%s is only available inside an SO_REUSEPORT selection program, because %s.\n"
+    "  Contexts that can supply it:"
+    "\n    def sk_reuseport__<name>   (or `class X < BPF::SkReuseport`, `module X; include BPF::SkReuseport; end`)"
+    "\n  (context gate; downstream this is a clang error about `ctx->hash` or a"
+    "\n  verifier message about helper 82, neither of which names the hook you chose.)"
+    "\n  You wrote it in", who, why);
+  die(msg, g_method ? g_method->name : "<none>");
+}
+
+/* pkt_dynptr_byte_at(off) / pkt.byte_at(off) -- a dynptr-backed
+ * 1-byte read at a RUNTIME offset. Unlike the fifteen pkt_* readers it takes an
+ * argument, so it has its own emitter; like them, BOTH spellings come through
+ * this one function, which is what makes the equivalence claim structural
+ * rather than two code paths that happen to agree.
+ *
+ * XDP only: the helper is built on bpf_dynptr_from_xdp, whose first parameter is
+ * a `struct xdp_md *`. (bpf_dynptr_from_skb exists for TC, but that side was
+ * never shipped and TC already has skb_load_byte, so advertising a TC form here
+ * would be a new capability, not a re-port.) */
+static void cc_emit_dynptr_byte_at(Buf *b, AST *ast, int nid) {
+  cc_require_pkt_ctx("pkt_dynptr_byte_at", CC_CTX_XDP,
+                     "it reads through bpf_dynptr_from_xdp, which takes the XDP frame "
+                     "(struct xdp_md *) -- in TC the same byte is skb_load_byte(off)");
+  int args_id = nt_ref(ast, nid, "arguments");
+  int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+  if (na != 1)
+    die("pkt_dynptr_byte_at(off) expects 1 arg (the byte offset into the frame)", NULL);
+  g_uses_dynptr = 1;
+  char *off = cc_expr_str(ast, ids[0]);
+  buf_printf(b, "spnl_pkt_dynptr_byte_at(ctx, %s)", off);
+  free(off);
 }
 
 /* the ctx kind ("xdp"/"tc") of the method being lowered, for flow key-extract. */
@@ -2961,6 +3125,27 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       buf_puts(b, !strcmp(name, "sock_ops_op") ? "((__s64)ctx->op)" : "((__s64)ctx->args[1])");
       return;
     }
+    /* the kernel's own 5-tuple hash of the incoming SYN
+     * (sk_reuseport_md->hash) -- the input a consistent-hash worker index is
+     * built from. Gated for the same reason sock_ops_op is: `hash` names a
+     * field of a specific ctx struct.
+     *
+     * The field is __u32, so the (__s64) widening is always non-negative. That
+     * is load-bearing for the idiomatic `reuseport_hash % N`: clang can prove
+     * the signed modulo equals the unsigned one and lowers `% 4` to `r1 &= 3`
+     * and `% 3` to an unsigned BPF_MOD (measured).
+     * A SIGNED mod would not have loaded -- that is what divu() exists
+     * for. */
+    if (name && !strcmp(name, "reuseport_hash")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; (void)(args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL);
+      if (na != 0) die("reuseport_hash expects no args", name);
+      cc_require_sk_reuseport("reuseport_hash",
+                              "it reads `struct sk_reuseport_md *ctx`, whose `hash` field is the "
+                              "kernel's 5-tuple hash of the SYN that is being steered");
+      buf_puts(b, "((__s64)ctx->hash)");
+      return;
+    }
     if (name && !strcmp(name, "sock_addr_ip4"))  { buf_puts(b, "((__s64)(__u32)__builtin_bswap32(ctx->user_ip4))"); return; }
     if (name && !strcmp(name, "sock_addr_port")) { buf_puts(b, "((__s64)(__u32)__builtin_bswap16((__u16)ctx->user_port))"); return; }
     if (name && (!strcmp(name, "mim_inc") || !strcmp(name, "mim_get"))) {   /* map-in-map */
@@ -3114,13 +3299,120 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       cc_emit_pkt_call(b, name);
       return;
     }
-    /* The same readers spelled as a chain (`pkt.l4.proto`). Resolved to the flat
-     * name and emitted through the identical path, so the two spellings cannot
-     * drift apart -- which is what the chain gate checks. */
+    if (name && !strcmp(name, "pkt_dynptr_byte_at")) {   /* flat spelling */
+      cc_emit_dynptr_byte_at(b, ast, nid);
+      return;
+    }
+    /* the seven pure-XDP TCP slice builtins. All are XDP-only
+     * for one reason -- the helpers they call take `struct xdp_md *` and rewrite
+     * the frame in place; the two syncookie ones bottom out in kfuncs that only
+     * exist for XDP packet pointers. cc_require_pkt_ctx(..., CC_CTX_XDP, ...)
+     * says so at compile time instead of letting clang name a C identifier.
+     *
+     * Each returns __s64 so it composes with Ruby integer comparison
+     * (`if tcp_synack_cookie < 0`), which is how every public example spells the
+     * error check. The reply builders return 0/-1, the matcher 1/0, the cookie
+     * builtins the kfunc result. */
+    if (name && (!strcmp(name, "tcp_syncookie_gen") || !strcmp(name, "tcp_syncookie_check"))) {
+      int gen = !strcmp(name, "tcp_syncookie_gen");
+      cc_require_pkt_ctx(name, CC_CTX_XDP,
+        "it hands the raw frame to bpf_tcp_raw_gen/check_syncookie_ipv4, kfuncs that "
+        "take XDP packet pointers");
+      if (nt_ref(ast, nid, "arguments") >= 0)
+        die(msprintf("%s takes no arguments -- it reads the current packet from ctx. You wrote", name), name);
+      if (gen) g_syncookie_gen = 1; else g_syncookie_check = 1;
+      buf_printf(b, "spnl_tcp_syncookie_%s(ctx)", gen ? "gen" : "check");
+      return;
+    }
+    if (name && !strcmp(name, "tcp_reply_header")) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP, CC_XDP_ONLY_WHY);
+      int aid = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = aid >= 0 ? nt_arr(ast, aid, "arguments", &na) : NULL;
+      if (na != 3 || !ids)
+        die("tcp_reply_header(seq, ack, flags) expects 3 args: the sequence number, the "
+            "acknowledgement number (both host order) and the TCP flag byte "
+            "(e.g. TCP::Flag::SYN | TCP::Flag::ACK). You wrote", name);
+      g_uses_tcp_reply = 1;
+      char *sq = cc_expr_str(ast, ids[0]), *ak = cc_expr_str(ast, ids[1]), *fl = cc_expr_str(ast, ids[2]);
+      buf_printf(b, "((__s64)spnl_tcp_reply_header(ctx, (__u32)(%s), (__u32)(%s), (__u8)(%s)))", sq, ak, fl);
+      free(sq); free(ak); free(fl);
+      return;
+    }
+    if (name && !strcmp(name, "tcp_reply_synack")) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP, CC_XDP_ONLY_WHY);
+      int aid = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = aid >= 0 ? nt_arr(ast, aid, "arguments", &na) : NULL;
+      if (na != 1 || !ids)
+        die("tcp_reply_synack(cookie) expects 1 arg -- the value tcp_syncookie_gen returned "
+            "(the helper takes the MSS out of its upper half). You wrote", name);
+      g_uses_tcp_synack = 1;
+      char *ck = cc_expr_str(ast, ids[0]);
+      buf_printf(b, "((__s64)spnl_tcp_reply_synack(ctx, (__s64)(%s)))", ck);
+      free(ck);
+      return;
+    }
+    if (name && !strcmp(name, "tcp_synack_cookie")) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP,
+        "it grows the frame to 60 bytes, calls bpf_tcp_raw_gen_syncookie_ipv4 and shrinks "
+        "it back -- all three are XDP operations");
+      if (nt_ref(ast, nid, "arguments") >= 0)
+        die("tcp_synack_cookie takes no arguments -- it reads the SYN from ctx, generates the "
+            "cookie and builds the SYN-ACK in one step. You wrote", name);
+      g_uses_synack_cookie = 1;
+      buf_puts(b, "((__s64)spnl_tcp_synack_cookie(ctx))");
+      return;
+    }
+    if (name && !strcmp(name, "tcp_reply_data")) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP, CC_XDP_ONLY_WHY);
+      int aid = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = aid >= 0 ? nt_arr(ast, aid, "arguments", &na) : NULL;
+      if (na != 3 || !ids)
+        die("tcp_reply_data(seq, ack, \"<payload>\") expects 3 args. You wrote", name);
+      const char *bt = nt_type(ast, ids[2]);
+      const char *body = (bt && !strcmp(bt, "StringNode")) ? nt_str(ast, ids[2], "content") : NULL;
+      if (!body || !body[0])
+        die("tcp_reply_data: the payload must be a NON-EMPTY string literal -- it is compiled "
+            "into the program as a const byte array and its length fixes every size in the "
+            "generated header, so it cannot be a variable. You wrote", name);
+      if (strlen(body) > 1024)
+        die(msprintf("tcp_reply_data: payload is %zu bytes, max 1024 -- it is memcpy'd into the "
+                     "incoming frame, which has to be at least that long already", strlen(body)), name);
+      int id = cc_slice_lit_idx(g_reply_bodies, &g_n_reply, body, "tcp_reply_data");
+      char *sq = cc_expr_str(ast, ids[0]), *ak = cc_expr_str(ast, ids[1]);
+      buf_printf(b, "((__s64)spnl_tcp_reply_data%d(ctx, (__u32)(%s), (__u32)(%s)))", id, sq, ak);
+      free(sq); free(ak);
+      return;
+    }
+    if (name && !strcmp(name, "payload_starts")) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP, CC_XDP_ONLY_WHY);
+      int aid = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = aid >= 0 ? nt_arr(ast, aid, "arguments", &na) : NULL;
+      const char *pt = (na == 1 && ids) ? nt_type(ast, ids[0]) : NULL;
+      const char *pre = (pt && !strcmp(pt, "StringNode")) ? nt_str(ast, ids[0], "content") : NULL;
+      if (!pre || !pre[0])
+        die("payload_starts(\"GET /health \") expects 1 NON-EMPTY string literal -- the bytes are "
+            "unrolled into a compare at compile time (that is what makes it verifier-cheap), so "
+            "it cannot be a variable. You wrote", name);
+      if (strlen(pre) > 64)
+        die(msprintf("payload_starts: prefix is %zu bytes, max 64 -- each byte is one unrolled "
+                     "compare against the packet", strlen(pre)), name);
+      int id = cc_slice_lit_idx(g_payload_prefixes, &g_n_payload, pre, "payload_starts");
+      buf_printf(b, "spnl_payload_match%d(ctx)", id);
+      return;
+    }
+    /* the same readers spelled as a chain (`pkt.l4.proto`). Resolved
+     * to the flat name and emitted through the identical path, so the two
+     * spellings cannot drift apart -- which is what the sugar gate checks. The
+     * one chain member that takes an argument (`pkt.byte_at(off)`) is routed to
+     * the same emitter the flat `pkt_dynptr_byte_at(off)` uses. */
     {
       char joined[64];
       int leaf_args = nt_ref(ast, nid, "arguments") >= 0;
       if (cc_pkt_chain_name(ast, nid, joined, sizeof joined)) {
+        if (leaf_args && !strcmp(joined, "pkt_byte_at")) {
+          cc_emit_dynptr_byte_at(b, ast, nid);
+          return;
+        }
         const char *canon = leaf_args ? NULL : cc_pkt_canon(joined);
         if (canon) { cc_emit_pkt_call(b, canon); return; }
         cc_die_bad_pkt_chain(joined, leaf_args);
@@ -3499,6 +3791,121 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       char *k = cc_expr_str(ast, ids[0]), *v = cc_expr_str(ast, ids[1]);
       lines_push(body, msprintf("spnl_hist_observe_by(%s, %s);", k, v));
       free(k); free(v);
+      return strdup("0");
+    }
+    /* tail_call_to(slot) -- transfer control to the program in
+     * `spnl_prog_array[slot]`. Not a call: on success the current program never
+     * resumes, so this is a statement with no value (Ruby's STMT_NO_VALUE, which
+     * prints as "0" in a branch/return position).
+     *
+     * On FAILURE bpf_tail_call does not return an error the author can see -- it
+     * simply does not jump and the next statement runs. That is the whole reason
+     * the fallback `XDP_PASS` after the branch is idiomatic, and the reason the
+     * literal-slot check below exists: an out-of-range literal is a jump that can
+     * never happen, and its symptom is "the packet went down the wrong path",
+     * which no runtime signal distinguishes from a correct fallback. */
+    if (name && !strcmp(name, "tail_call_to")) {
+      cc_require_pkt_ctx("tail_call_to", CC_CTX_XDP,
+                         "it jumps into this unit's PROG_ARRAY, whose entries are the "
+                         "XDP programs written as `def xdp_tail__<name>` -- a tail call can "
+                         "only land in a program of the caller's own type (an XDP dispatcher "
+                         "can be a plain `def xdp__<name>` or another `def xdp_tail__<name>`)");
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 1)
+        die("tail_call_to(slot) expects 1 arg (the PROG_ARRAY slot: the 0-based position "
+            "of the `def xdp_tail__<name>` you want, in declaration order)", NULL);
+      const char *at = nt_type(ast, ids[0]);
+      if (at && !strcmp(at, "IntegerNode")) {
+        long long slot = nt_int(ast, ids[0], "value", 0);
+        if (slot < 0 || slot >= g_n_tail_targets) {
+          char range[64];
+          if (g_n_tail_targets <= 0)      snprintf(range, sizeof range, "none at all");
+          else if (g_n_tail_targets == 1) snprintf(range, sizeof range, "slot 0");
+          else snprintf(range, sizeof range, "slots 0..%d", g_n_tail_targets - 1);
+          char *msg = msprintf(
+            "tail_call_to(%lld): this unit declares %d tail-call target(s), so the only "
+            "slots that will ever be populated are %s. The loader "
+            "(_spnl_prog_array_populate) writes each `def xdp_tail__<name>` into the "
+            "slot matching its DECLARATION ORDER, and a bpf_tail_call into an empty slot "
+            "does not fail -- it silently falls through and the caller keeps running, so "
+            "this would show up as \"the packet took the fallback path\" and nothing "
+            "anywhere would say why.\n"
+            "  Add the `def xdp_tail__<name>` you meant to jump to, or renumber. "
+            "`spinel-ebpf describe <file>` prints the slot -> method table.\n"
+            "  You wrote it in",
+            slot, g_n_tail_targets, range);
+          die(msg, g_method ? g_method->name : "<none>");
+        }
+      }
+      char *s = cc_expr_str(ast, ids[0]);
+      lines_push(body, msprintf("bpf_tail_call(ctx, &spnl_prog_array, (__u32)(%s));", s));
+      free(s);
+      return strdup("0");
+    }
+    /* user_ringbuf_drain -- run the unit's `def user_ringbuf__<name>`
+     * once per record the host has pushed into `bpf_user_cmds`, in FIFO order,
+     * then return. A statement: the helper returns the number of records it
+     * consumed and the oracle discarded it with `(void)`, which the port kept
+     * byte-for-byte.
+     *
+     * Discarding it is defensible here in a way it was not for worker_select
+     * (below): "0 records" is the normal state of an empty queue, not a failure,
+     * and the author already sees the difference -- the callback body did or did
+     * not run. What is NOT visible is a record the host sized differently from
+     * the 8 bytes the callback reads; see the template's note.
+     * 
+     *
+     * Where it may be called: measured, everywhere (12 program types, all
+     * LOAD_OK -- measurement), so there is no context gate. What
+     * it needs is a callback to call, and that is decidable here. */
+    if (name && !strcmp(name, "user_ringbuf_drain")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; if (args_id >= 0) { nt_arr(ast, args_id, "arguments", &na); }
+      if (na != 0)
+        die("user_ringbuf_drain takes no arguments -- it drains this unit's one "
+            "`bpf_user_cmds` ring into this unit's one `def user_ringbuf__<name>(value)` "
+            "callback", NULL);
+      if (!g_user_ringbuf_cb)
+        die("user_ringbuf_drain: this unit has no `def user_ringbuf__<name>(value)` "
+            "callback, so there is nothing for the drained records to run.\n"
+            "  Declare one (or write it as `on :user_cmd do |cmd| ... end` inside a "
+            "`module M; include BPF::EventLoop; ... end`), and push from userspace with "
+            "the glue's `sp_bpf_user_cmd_push(value)`.\n"
+            "  You called it in", g_method && g_method->name ? g_method->name : "<none>");
+      lines_push(body, msprintf("(void)bpf_user_ringbuf_drain(&bpf_user_cmds, "
+                                "spnl_user_ringbuf_cb_%s, NULL, 0);", g_user_ringbuf_cb));
+      return strdup("0");
+    }
+    /* worker_select(idx) -- nominate the socket in slot `idx` of the
+     * REUSEPORT_SOCKARRAY to receive this connection.
+     *
+     * A statement, not a call with a value: the helper's effect is to set
+     * ctx->selected_sk, which the kernel reads only after the program returns
+     * SK_PASS. The oracle discarded the return code with `(void)` and the port kept
+     * that byte-for-byte -- but the discarded code is the ONLY signal that the
+     * slot was empty (-ENOENT), and an empty slot is not an error: the kernel
+     * quietly uses its own 5-tuple choice instead. So "the program picked this
+     * worker" and "the program picked nothing" are indistinguishable at runtime
+     * from anything the probe emits. Nothing here is decidable at compile time
+     * (how many workers register is a userspace fact), so the codegen does not
+     * refuse it -- `describe` prints how many slots the author's own arithmetic
+     * can reach, and the affordance says the fallback is silent. */
+    if (name && !strcmp(name, "worker_select")) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 1)
+        die("worker_select(idx) expects 1 arg (the REUSEPORT_SOCKARRAY slot: the index a "
+            "worker passed to sp_bpf_reuseport_register(listen_fd, idx))", name);
+      cc_require_sk_reuseport("worker_select",
+                              "it calls bpf_sk_select_reuseport(ctx, ...), which sets the "
+                              "`selected_sk` of an SO_REUSEPORT decision -- there is no such "
+                              "decision to influence in any other program type");
+      char *q = cc_expr_str(ast, ids[0]);
+      int t = ++g_if_counter;
+      lines_push(body, msprintf("__u32 _ws_idx%d = (__u32)(%s);", t, q));
+      lines_push(body, msprintf("(void)bpf_sk_select_reuseport(ctx, &bpf_worker_socks, &_ws_idx%d, 0);", t));
+      free(q);
       return strdup("0");
     }
     if (name && !strcmp(name, "latency_start")) {   /* BEGIN side effect */
@@ -4421,43 +4828,27 @@ static int cc_starts(const char *s, const char *pfx, const char **rest) {
  * here -- at the layer that still knows which hook the author wrote. Each message
  * says what is missing, where it was measured, and what to write instead.
  *
- * `on :timer` / `on :user_cmd` (the reactor surface for two of these) are
- * refused in cc_synthesize_reactor, which is worse still without this: an
- * unknown reactor kind is skipped, so the whole handler body disappears. */
+ * `on :user_cmd` (the reactor surface for one of these) synthesizes
+ * `user_ringbuf__cmd_handler`, so it lands in this table by method name like the
+ * flat spellings do. A reactor kind that is NOT in cc_reactor_kind at all is
+ * skipped silently -- the whole handler body disappears -- which is the shape
+ * measured for `on :timer` before :timer was added to that table. */
 typedef struct { const char *prefix; const char *why; } CcWithdrawnAttach;
 static const CcWithdrawnAttach CC_WITHDRAWN_ATTACH[] = {
-  { "xdp__tcp_slice__",
-    "the pure-XDP TCP slice generated a ~470-line state machine plus seven\n"
-    "  builtins (tcp_syncookie_gen/_check, tcp_reply_header/_synack, tcp_synack_cookie,\n"
-    "  tcp_reply_data, payload_starts). None of it survived the port to the C codegen, and\n"
-    "  the seven builtins were withdrawn with it. This name used to compile to a plain\n"
-    "  SEC(\"syscall\") wrapper: your marker body became the whole program.\n"
-    "  Write a normal `def xdp__<name>` handler (SEC(\"xdp\"), pkt_* / pkt.* builtins) and\n"
-    "  terminate the connection in userspace" },
-  { "xdp_tail__",
-    "a tail-call target needs the PROG_ARRAY the dispatcher jumps through, and\n"
-    "  `tail_call_to` (the jump itself) was withdrawn as unported. The glue side\n"
-    "  (_spnl_prog_array_populate) is still there and would populate `spnl_prog_array`,\n"
-    "  but no codegen emits that map. This name used to compile to a plain\n"
-    "  SEC(\"syscall\") wrapper -- not an XDP program at all.\n"
-    "  Write the branches inside one `def xdp__<name>` (the 1M-instruction budget is per\n"
-    "  program, and the split existed to get more of it)" },
-  { "user_ringbuf__",
-    "the host->kernel command channel needs three pieces that did not survive the\n"
-    "  port to the C codegen: the USER_RINGBUF map, the SEC-less callback this method was\n"
-    "  supposed to become, and `user_ringbuf_drain` (withdrawn with them). This name used\n"
-    "  to compile to a plain SEC(\"syscall\") wrapper, so the \"callback\" was a program\n"
-    "  nothing ever drained.\n"
-    "  Push configuration through `param :name, default: N` or a HASH map written\n"
-    "  from userspace instead" },
-  { "spnl_timer__",
-    "`on :timer, every: N` needs a bpf_timer map, an arm program and a re-arming\n"
-    "  callback; none survived the port to the C codegen. The glue side\n"
-    "  (_spnl_timer_arm_all) is still there and looks for `spnl_timer_arm_*`, which\n"
-    "  no codegen emits. The reactor form measured worse than silent: the C reactor\n"
-    "  table has no :timer, so the block was dropped and the body never reached the output.\n"
-    "  Do periodic work in the userspace drain loop (`loop { sleep n; ... }`), which is\n"
-    "  where every OTLP push in this tree already does it" },
+  /* EMPTY, and that is the finished state, not a gap.
+   *
+   * Four prefixes lived here: `spnl_timer__`, `xdp_tail__`, `user_ringbuf__` and
+   * `xdp__tcp_slice__`. All four have since been ported -- the timer map + arm
+   * program + re-arming callback; the PROG_ARRAY + `tail_call_to`; the
+   * USER_RINGBUF + the SEC-less callback + `user_ringbuf_drain` + the loader's
+   * `sp_bpf_user_cmd_push`; the TCP slice bundle + its seven builtins -- so the
+   * entries are gone rather than kept to keep this table non-empty. The gate's
+   * ability to detect a silent attach kind no longer depends on this inventory
+   * having members: it comes from synthesised self-checks instead.
+   *
+   * The refusal machinery below stays wired: it costs one strncmp per method and
+   * it is what a future withdrawal would use. An empty table means every attach
+   * kind this codegen knows about is implemented. */
   { NULL, NULL }
 };
 static void cc_refuse_withdrawn_attach(const char *name) {
@@ -4526,6 +4917,56 @@ static AttachKind cc_detect_attach(const char *name, Attach *a) {
   else if (cc_starts(name, "raw_tp__", &rest))    { a->kind = AK_RAW_TP; a->sec = msprintf("raw_tp/%s", rest); a->ctx_type = "struct bpf_raw_tracepoint_args *"; a->kname = "raw_tp"; }
   /* perf_event sampling -- ctx-prefixed (sample data + regs), non-verdict. */
   else if (cc_starts(name, "perf_event__", &rest)) { a->kind = AK_PERF_EVENT; a->sec = strdup("perf_event"); a->ctx_type = "struct bpf_perf_event_data *"; a->kname = "perf_event"; a->ctx_prefixed = 1; }
+  /* the reactor's `on :timer` handler. Named here even though the emit
+   * loop short-circuits it (a timer is a callback plus an arm program, not the
+   * usual inner+wrapper), because every CONTEXT gate in this file asks
+   * cc_detect_attach who it is lowering into. Left as AK_NONE the handler would
+   * look like a plain SEC("syscall") test-run entry, and the gates read that as
+   * "not an event": has_cap would be allowed to read whatever task the softirq
+   * landed on, and `filter_by` would skip it -- filtering every other handler in
+   * the unit and leaving this one open, which is precisely the "looks narrowed
+   * and is not" artefact the common filter refuses. `sec` is what the arm program actually
+   * carries; the callback has no SEC at all. */
+  else if (cc_starts(name, "spnl_timer__", &rest)) { a->kind = AK_TIMER; a->sec = strdup("syscall"); a->ctx_type = "__u64 *"; a->kname = "timer"; }
+  /* the USER_RINGBUF callback. The ONLY attach kind that emits no
+   * program at all -- it is a `static long cb(struct bpf_dynptr *, void *)` that
+   * bpf_user_ringbuf_drain calls once per pending record, so it has no SEC, no
+   * ctx and no userspace-visible name. `sec` stays NULL for that reason; the
+   * per-method loop short-circuits on this kind before anything reads it.
+   *
+   * It is still an AttachKind rather than AK_NONE for the same reason the timer
+   * is: every context gate in this file asks cc_detect_attach what it
+   * is lowering, and AK_NONE would present a drain callback as a plain method.
+   * The difference from the timer is that this one DOES run in the draining
+   * program's context (whatever that is), so it is deliberately NOT added to the
+   * "not process context" lists -- see cc_ak_process_ctx. */
+  else if (cc_starts(name, "user_ringbuf__", &rest)) { a->kind = AK_USER_RINGBUF; a->sec = NULL; a->ctx_type = NULL; a->kname = "user_ringbuf"; }
+  /* a tail-call target. Deliberately AK_XDP (see the `xdp_tail` note
+   * on struct Attach): the emitted program is an ordinary SEC("xdp") one, and
+   * only the loader treats it differently -- _spnl_prog_array_populate
+   * writes it into `spnl_prog_array` and _spnl_xdp_attach_all skips it, both
+   * keyed on this literal prefix. `kname` is "xdp_tail" because it names the
+   * surface the author wrote, and it is what the wrapper comment prints.
+   * The prefix does not overlap "xdp__" ("xdp_t" vs "xdp__"), so the order of
+   * these two branches is for reading, not for correctness. */
+  else if (cc_starts(name, "xdp_tail__", &rest)) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp_tail"; a->ctx_prefixed = 1; a->verdict = 1; a->xdp_tail = 1; }
+  /* the pure-XDP TCP slice. AK_XDP for the same reason `xdp_tail` is
+   * (see the note on struct Attach): the emitted program is an ordinary
+   * SEC("xdp") one and every context gate here asks cc_detect_attach what it is
+   * lowering. What differs is that the METHOD BODY is discarded -- the marker the
+   * author writes is replaced by the generated state machine -- so the per-method
+   * loop short-circuits on `tcp_slice`, the way it does for the timer and the
+   * USER_RINGBUF callback. `kname` names the surface the author wrote, which is
+   * what the wrapper comment and the diagnostics print.
+   *
+   * Checked BEFORE the plain `xdp__` branch, and this order IS load-bearing:
+   * "xdp__tcp_slice__health" starts with "xdp__". Getting it wrong is exactly
+   * the false negative that let an unported attach kind look present (a prefix
+   * scan answers "present" because the name begins with an implemented prefix),
+   * so the plain branch below keeps its
+   * explicit exclusion as a second line of defence rather than relying on
+   * branch order alone. */
+  else if (cc_starts(name, "xdp__tcp_slice__", &rest)) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp_tcp_slice"; a->ctx_prefixed = 1; a->verdict = 1; a->tcp_slice = 1; }
   else if (cc_starts(name, "xdp__", &rest)) {        /* plain XDP (not xdp__tcp_slice__/xdp_tail__, Stage 1) */
     if (strncmp(rest, "tcp_slice__", 11) != 0) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp"; a->ctx_prefixed = 1; a->verdict = 1; }
   }
@@ -4976,13 +5417,21 @@ static void cc_scan_pkt(AST *ast, int nid, int tc) {
   if (!strcmp(ty, "CallNode")) {
     const char *nm = nt_str(ast, nid, "name");
     if (nm && cc_pkt_canon(nm)) cc_record_pkt(nm, tc);
+    else if (nm && !strcmp(nm, "pkt_dynptr_byte_at")) g_uses_dynptr = 1;   /* flat */
     else {
       /* the chain spelling must reach the same helper-emit bookkeeping
-       * as the flat one, or the reader is lowered to a call with no definition. */
+       * as the flat one, or the reader is lowered to a call with no definition.
+       * `pkt.byte_at(off)` is the one chain member WITH an argument, and it
+       * books the dynptr helper rather than a pkt_* reader. Both spellings are
+       * recorded here for the same reason -- the emit pass runs before the bodies. */
       char joined[64];
-      if (nt_ref(ast, nid, "arguments") < 0 && cc_pkt_chain_name(ast, nid, joined, sizeof joined)) {
-        const char *canon = cc_pkt_canon(joined);
-        if (canon) cc_record_pkt(canon, tc);
+      if (cc_pkt_chain_name(ast, nid, joined, sizeof joined)) {
+        if (nt_ref(ast, nid, "arguments") >= 0) {
+          if (!strcmp(joined, "pkt_byte_at")) g_uses_dynptr = 1;
+        } else {
+          const char *canon = cc_pkt_canon(joined);
+          if (canon) cc_record_pkt(canon, tc);
+        }
       }
     }
   }
@@ -5166,13 +5615,95 @@ static const ReactorKind *cc_reactor_kind(const char *k) {
      * uprobe__react<N>); glue.c attaches it at every RET offset (see go_ret flag). */
     {"go_uret", "uprobe__react", "", 1, 1},
     {"usdt", "usdt__react__", "", 3, 1}, {"perf_event", "perf_event__main", "", 0, 0},
+    /* the interval comes from a trailing `every:` keyword, not from a
+     * StringNode target, so the arity is 0 like the other whole-module kinds.
+     * Being ABSENT from this table is what made `on :timer` the worst of the
+     * silent attach kinds: an unknown kind is skipped, so the body never reached
+     * the output at all. */
+    {"timer", "spnl_timer__main", "", 0, 0},
     {NULL, NULL, NULL, 0, 0}
   };
   for (int i = 0; K[i].kind; i++) if (!strcmp(K[i].kind, k)) return &K[i];
   return NULL;
 }
 
-/* Collect top-level `param :name, default: N` declarations.
+/* `every: N.<unit>` -> nanoseconds, at compile time.
+ *
+ * The Ruby partition still has this conversion
+ * (Partition::BPF_TIMER_UNIT_NS + parse_timer_interval_ns, untouched by the
+ * port to C) -- but that side feeds `describe` and the glue, and the number
+ * this needs is baked into the emitted C twice (the arm program's
+ * bpf_timer_start and the callback's re-arm). The C codegen builds the reactor
+ * itself and never sees a MethodInfo, so the table is mirrored here rather than
+ * threaded across the boundary. The two are kept in step by a unit test that
+ * reads this table out of the source (tests/spinel_ebpf/timer_test.rb), the same
+ * treatment CC_MULTI_AUTO_THRESHOLD gets.
+ *
+ * Everything about the shape is refused loudly: the interval is a
+ * SEC-time constant, so a value the codegen cannot fold is not a slow timer, it
+ * is a timer that never fires. */
+typedef struct { const char *unit; long long ns; } CcTimerUnit;
+static const CcTimerUnit CC_TIMER_UNITS[] = {
+  { "seconds", 1000000000LL }, { "second", 1000000000LL },
+  { "milliseconds", 1000000LL }, { "millisecond", 1000000LL }, { "ms", 1000000LL },
+  { "microseconds", 1000LL }, { "microsecond", 1000LL }, { "us", 1000LL },
+  { "nanoseconds", 1LL }, { "nanosecond", 1LL }, { "ns", 1LL },
+  { NULL, 0 }
+};
+
+static char *cc_timer_units_str(void) {
+  Buf b; memset(&b, 0, sizeof b);
+  for (int i = 0; CC_TIMER_UNITS[i].unit; i++) buf_printf(&b, "%s%s", i ? " " : "", CC_TIMER_UNITS[i].unit);
+  return b.p;
+}
+
+static long long cc_timer_interval_ns(AST *ast, const int *args, int na) {
+  for (int i = 1; i < na; i++) {
+    const char *kt = nt_type(ast, args[i]);
+    if (!kt || strcmp(kt, "KeywordHashNode")) continue;
+    int nk = 0; const int *els = nt_arr(ast, args[i], "elements", &nk);
+    for (int j = 0; j < nk; j++) {
+      int key = nt_ref(ast, els[j], "key"), val = nt_ref(ast, els[j], "value");
+      const char *kn = key >= 0 ? nt_str(ast, key, "value") : NULL;
+      if (!kn || strcmp(kn, "every"))
+        die("on :timer: `every:` is the only keyword accepted", kn ? kn : "?");
+      const char *vt = val >= 0 ? nt_type(ast, val) : NULL;
+      /* `every: 500` is nanoseconds -- kept from the Ruby parser for forward
+       * compatibility, though `500.ms` is what the affordance publishes. */
+      if (vt && !strcmp(vt, "IntegerNode")) return nt_int(ast, val, "value", 0);
+      if (!vt || strcmp(vt, "CallNode")) {
+        char *u = cc_timer_units_str();
+        char *msg = msprintf("on :timer: `every:` must be an integer literal with a unit, "
+                             "e.g. `every: 1.seconds`. The interval is folded into "
+                             "bpf_timer_start at compile time, so it cannot be an expression "
+                             "or a parameter (units: %s)", u);
+        die(msg, vt ? vt : "?");
+      }
+      const char *un = nt_str(ast, val, "name");
+      long long mul = 0;
+      for (int u = 0; CC_TIMER_UNITS[u].unit; u++)
+        if (un && !strcmp(un, CC_TIMER_UNITS[u].unit)) { mul = CC_TIMER_UNITS[u].ns; break; }
+      if (!mul) {
+        char *us = cc_timer_units_str();
+        char *msg = msprintf("on :timer: unknown time unit. Accepted: %s", us);
+        die(msg, un ? un : "?");
+      }
+      int rec = nt_ref(ast, val, "receiver");
+      const char *rt = rec >= 0 ? nt_type(ast, rec) : NULL;
+      if (!rt || strcmp(rt, "IntegerNode"))
+        die("on :timer: `every:` needs an integer LITERAL before the unit "
+            "(`every: 5.seconds`); the value is a compile-time constant", un ? un : "?");
+      long long n = nt_int(ast, rec, "value", 0);
+      if (n <= 0)
+        die("on :timer: the interval must be positive -- bpf_timer_start(0) fires once "
+            "and the handler would never run again", un ? un : "?");
+      return n * mul;
+    }
+  }
+  return 0;
+}
+
+/* collect top-level `param :name, default: N` declarations.
  *
  * Walks ProgramNode(0).statements.body[] -- the same top-level walk
  * cc_synthesize_reactor does -- because a bare top-level call is a statement of
@@ -5319,16 +5850,30 @@ static void cc_filter_gate(IR *ir) {
     Attach a = {0};
     AttachKind k = cc_detect_attach(ir->m[i].name, &a);
     if (k == AK_NONE) continue;          /* SEC("syscall") test-run entry: not an event */
+    /* a USER_RINGBUF callback is not a handler with a wrapper of its
+     * own -- it runs INSIDE whichever handler called user_ringbuf_drain, after
+     * that handler's guard has already decided to proceed. So it is covered
+     * transitively and needs no guard, and it is not "eligible" on its own
+     * either: a unit whose only handler were the callback has no drain site and
+     * is refused before this gate runs. */
+    if (k == AK_USER_RINGBUF) continue;
     if (cc_filter_kind_ok(k)) { eligible++; continue; }
+    /* a timer's case is neither of the two the sentence above names, and an
+     * author reading a diagnostic that describes someone else's mistake will
+     * assume the tool is confused. Say the third one. */
+    const char *extra = (k == AK_TIMER)
+      ? " A bpf_timer callback is a third case: it fires on a timer, not on behalf of any"
+        " task, so there is no \"whose event is this\" to answer at all."
+      : "";
     char *msg = msprintf(
       "filter_by cannot cover `%s` (%s). The common filter means \"skip this event\", "
       "which on a verdict hook would be a security decision and on a packet hook would "
-      "read whichever task happens to be on the CPU. Filtering the other handlers and "
+      "read whichever task happens to be on the CPU.%s Filtering the other handlers and "
       "leaving this one open would give you a probe that looks narrowed and is not -- so "
       "the declaration is refused. Covered kinds: kprobe kretprobe tracepoint raw_tp "
       "fentry fexit uprobe uretprobe usdt kprobe_multi perf_event. Put `%s` in its own probe, or drop "
       "filter_by and narrow by hand (`if pid == target_pid`, with `param :target_pid`)",
-      ir->m[i].name, a.kname, ir->m[i].name);
+      ir->m[i].name, a.kname, extra, ir->m[i].name);
     die(msg, NULL);
   }
   if (!eligible)
@@ -5507,6 +6052,10 @@ static int cc_synthesize_multi(IR *ir, AST *ast, int cid, const int *args, int n
 }
 
 static void cc_synthesize_reactor(IR *ir, AST *ast) {
+  /* reset HERE, not in ebpf_codegen_program with the other per-unit
+   * flags -- this pass runs once per unit immediately before codegen and is what
+   * SETS the flag, so resetting downstream would erase it. */
+  g_uses_timer = 0; g_timer_ns = 0;
   int stmts = nt_ref(ast, 0, "statements");   /* ProgramNode(0).statements */
   if (stmts < 0) return;
   int nb; const int *body = nt_arr(ast, stmts, "body", &nb);
@@ -5538,18 +6087,31 @@ static void cc_synthesize_reactor(IR *ir, AST *ast) {
       const char *st = nt_type(ast, args[0]);
       if (!st || strcmp(st, "SymbolNode")) continue;
       const char *kind = nt_str(ast, args[0], "value"); if (!kind) continue;
-      /* `on :timer` is the one withdrawn attach kind with no `def` form,
-       * so cc_refuse_withdrawn_attach (which keys on a method name) never sees
-       * it. Left alone it is the worst case measured: an unknown reactor
-       * kind is skipped, so the handler body does not merely attach to nothing --
-       * it never reaches the output at all. Refuse it by name.
-       * (Any OTHER unknown `on :kind` is still skipped silently: the same bug
-       * class, not yet adjudicated.) */
-      if (!strcmp(kind, "timer")) cc_refuse_withdrawn_attach("spnl_timer__main");
       /* the multi-symbol form takes an ArrayNode where the 1-to-1 form
        * takes a StringNode, so it is decided before the target collection below. */
       if (cc_synthesize_multi(ir, ast, cid, args, na, kind)) continue;
       const ReactorKind *rk = cc_reactor_kind(kind); if (!rk) continue;
+      /* the interval is read here, where the `on` call's arguments are
+       * still in hand, and stashed as codegen state (the emitter is reached per
+       * METHOD, and by then the keyword is gone). MVP is one timer per unit --
+       * the callback name is fixed -- so a second declaration would silently
+       * collide on `spnl_timer_cb_main`; say so instead. */
+      if (!strcmp(kind, "timer")) {
+        if (g_uses_timer)
+          die("on :timer: one timer per unit (the callback name is fixed at "
+              "spnl_timer_cb_main). Do the second period's work inside the same "
+              "handler with a counter, or split the probe in two", NULL);
+        long long ns = cc_timer_interval_ns(ast, args, na);
+        if (ns <= 0) {
+          char *u = cc_timer_units_str();
+          char *msg = msprintf("on :timer needs an interval: `on :timer, every: 1.seconds do ... end`. "
+                               "Without one there is nothing to pass to bpf_timer_start, so the handler "
+                               "would be compiled and never fire (units: %s)", u);
+          die(msg, NULL);
+        }
+        g_uses_timer = 1;
+        g_timer_ns = ns;
+      }
       /* collect `arity` StringNode targets */
       const char *tg[3]; int ntg = 0;
       for (int i = 1; i <= rk->arity && i < na; i++) {
@@ -5566,7 +6128,18 @@ static void cc_synthesize_reactor(IR *ir, AST *ast) {
       int hbody = nt_ref(ast, block, "body"); if (hbody < 0) { free(mname); continue; }
       ir->m = realloc(ir->m, (size_t)(ir->n + 1) * sizeof(Method));
       Method *me = &ir->m[ir->n]; memset(me, 0, sizeof *me);
-      me->name = mname; me->cls = NULL; me->ret = CC_TY_INT; me->body_id = hbody;
+      me->name = mname; me->cls = NULL; me->body_id = hbody;
+      /* VOID so cc_emit_method_body does not append `return <expr>;`.
+       * The verifier requires a bpf_timer callback to return a LITERAL 0 (still
+       * true on 7.1.5 -- measured: an unknown scalar
+       * gets "At async callback return the register R0 has unknown scalar value
+       * should have been in [0, 0]"), and the Ruby oracle got there the same way,
+       * by emitting the body with return_type "void". */
+      me->ret = (rk->arity == 0 && !strcmp(kind, "timer")) ? CC_TY_VOID : CC_TY_INT;
+      /* `on :user_cmd do |cmd|` synthesizes the flat callback name, so
+       * the ret is forced in ONE place instead (the body-lowering loop) -- the
+       * flat `def user_ringbuf__<name>` spelling gets its ret from spinel's
+       * inference and needs the same treatment. */
       cc_extract_block_params(ast, block, me);
       ir->n++;
     }
@@ -5877,6 +6450,8 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   g_uses_offcpu = 0;       /* reset per unit */
   g_uses_dns_lat = 0;      /* reset per unit */
   g_uses_redis_l7 = 0;     /* reset per unit */
+  g_uses_dynptr = 0;       /* reset per unit */
+  g_n_tail_targets = 0;    /* reset per unit */
   int n_ebpf = 0, uses_pt_regs = 0, uses_usdt = 0, emit_flags = 0;
   int uses_blocklist = 0, uses_cidr = 0, uses_path_counter = 0;
   int uses_path_scratch = 0;  /* path_starts_with -> per-unit PERCPU_ARRAY d_path scratch (PATH_MAX) */
@@ -5896,6 +6471,16 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   int uses_fifo = 0, uses_lifo = 0;   /* QUEUE / STACK maps */
   int uses_xskmap = 0, uses_devmap = 0;   /* xsk_redirect / dev_redirect */
   int uses_cpumap = 0;                    /* cpumap_redirect */
+  /* the PROG_ARRAY is emitted for EITHER half of the pair -- a unit
+   * that only declares targets still needs the map (the loader populates it, and
+   * without it the targets are unreachable), and a unit that only jumps still
+   * needs it to compile. Neither half is refused on its own: a lone target is a
+   * legitimate declaration (the original MVP populated the map by hand), and it is also
+   * the shape the affordance gate compiles to prove the attach kind works. */
+  int uses_tail_call = 0;
+  /* `worker_select` -> the REUSEPORT_SOCKARRAY. Only the selecting
+   * half creates it; `reuseport_hash` alone does not (see the emit site). */
+  int uses_reuseport_sockarray = 0;
   int uses_leak_track = 0;   /* leak_record / leak_forget */
   int uses_lock_edge = 0;    /* lock_edge */
   int uses_keyed_lat = 0;    /* lat_start/lat_end */
@@ -5905,6 +6490,15 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   int uses_arena = 0;        /* arena_set/get (flat array) */
   g_n_pkt = 0;
   g_n_flow = 0;
+  /* reset the TCP-slice state per unit. Running in-process, one
+   * process compiles one unit after another, so a flag left set
+   * would emit a second unit's slice into a program that never asked for it. */
+  g_uses_tcp_slice = 0;
+  g_syncookie_gen = g_syncookie_check = 0;
+  g_uses_tcp_reply = g_uses_tcp_synack = g_uses_synack_cookie = 0;
+  for (int i = 0; i < g_n_payload; i++) free(g_payload_prefixes[i]);
+  for (int i = 0; i < g_n_reply; i++)   free(g_reply_bodies[i]);
+  g_n_payload = g_n_reply = 0;
   for (int i = 0; i < ir->n; i++) {
     if (!cc_method_eligible(&ir->m[i])) continue;
     /* before anything else, refuse a method named after an attach kind
@@ -6013,6 +6607,11 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     if (cc_body_uses_call(ast, bdy, "lifo_push") || cc_body_uses_call(ast, bdy, "lifo_pop")) uses_lifo = 1;
     if (cc_body_uses_call(ast, bdy, "xsk_redirect")) uses_xskmap = 1;
     if (cc_body_uses_call(ast, bdy, "cpumap_redirect")) uses_cpumap = 1;
+    if (cc_body_uses_call(ast, bdy, "tail_call_to")) uses_tail_call = 1;
+    if (cc_body_uses_call(ast, bdy, "user_ringbuf_drain")) {
+      g_uses_user_ringbuf = 1; g_user_ringbuf_drained = 1;
+    }
+    if (cc_body_uses_call(ast, bdy, "worker_select")) uses_reuseport_sockarray = 1;
     if (cc_body_uses_call(ast, bdy, "dev_redirect")) uses_devmap = 1;
     if (cc_body_uses_call(ast, bdy, "leak_record") || cc_body_uses_call(ast, bdy, "leak_forget")) uses_leak_track = 1;
     if (cc_body_uses_call(ast, bdy, "lock_edge")) uses_lock_edge = 1;
@@ -6035,6 +6634,40 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
                              ai.kind == AK_UPROBE || ai.kind == AK_URETPROBE ||
                              ai.kind == AK_KPROBE_MULTI)) uses_pt_regs = 1;
     if (ai.usdt) uses_usdt = 1;   /* usdt.bpf.h + bpf_tracing.h */
+    /* count the tail-call targets HERE, in the pass that runs before
+     * any body is lowered, because the literal-slot check in `tail_call_to` needs
+     * the total -- including targets declared AFTER the dispatcher in the file. */
+    if (ai.xdp_tail) { uses_tail_call = 1; g_n_tail_targets++; }
+    /* the bundle is a per-UNIT section (fixed symbol names), so this
+     * flag has to be set before any section is emitted -- and, unlike every other
+     * `uses_*` here, it is decided by the METHOD NAME, not by a call in a body.
+     * The body is a marker that gets thrown away. */
+    if (ai.tcp_slice) {
+      if (g_uses_tcp_slice)
+        die(msprintf("this unit already declares a pure-XDP TCP slice. The generated machine "
+                     "has fixed symbol names (bpf_conntab, spnl_tcp_slice_main, ...) and is "
+                     "hardcoded to port 8080, so a second one would be the same program under "
+                     "a second name, both attached to the same interface.\n"
+                     "  Write one slice per unit.\n  The second one is"), ir->m[i].name);
+      g_uses_tcp_slice = 1;
+    }
+    /* same reason, one step further -- the drain call needs the
+     * callback's NAME, and the retired oracle only learned it while emitting the
+     * callback. Learning it here makes declaration order irrelevant -- authors
+     * previously had to declare the callback above its drain to work around it. */
+    if (ai.kind == AK_USER_RINGBUF) {
+      if (g_user_ringbuf_cb)
+        die(msprintf("this unit already declares a USER_RINGBUF callback "
+                     "(`user_ringbuf__%s`), and there is one `bpf_user_cmds` ring and one "
+                     "`user_ringbuf_drain` per unit -- a second callback would be emitted "
+                     "and never called, because the drain names its callback by symbol.\n"
+                     "  Branch inside the one callback on the value the host pushed, or "
+                     "split the probe in two.\n"
+                     "  The second one is", g_user_ringbuf_cb), ir->m[i].name);
+      g_uses_user_ringbuf = 1;
+      const char *cb = ir->m[i].name + strlen("user_ringbuf__");
+      g_user_ringbuf_cb = cc_safe_dup(cb);
+    }
     /* record pkt_* builtins + flow conntrack maps for the helper pass. */
     if (ai.kind == AK_XDP || ai.kind == AK_TC) {
       cc_scan_pkt(ast, ir->m[i].body_id, ai.kind == AK_TC);
@@ -6042,6 +6675,30 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     }
     if (ai.sec) free(ai.sec);
   }
+  /* a callback nobody drains is not a program that fires rarely --
+   * it is a `static` function with no caller, which clang drops, leaving a unit
+   * whose USER_RINGBUF the host can fill forever with nothing on the other end.
+   * That is the class this codegen refuses loudly, and the reason it differs from
+   * a lone tail-call target (which IS a program, and which the loader does
+   * register into the PROG_ARRAY, so it does something observable on its own).
+   *
+   * The drain site stays the author's to choose: where
+   * commands are picked up is a rate decision -- an XDP drain runs per packet, a
+   * kprobe drain per syscall -- and injecting it into "some handler" would make
+   * command latency depend on a hook the author never named. */
+  if (g_user_ringbuf_cb && !g_user_ringbuf_drained)
+    die(msprintf(
+      "`user_ringbuf__%s` is a USER_RINGBUF callback, and nothing in this unit calls "
+      "`user_ringbuf_drain`. A callback is not attached to anything -- it runs only when "
+      "some other handler drains the ring -- so as written the host can push commands "
+      "forever and this body will never run (the emitted C would not even keep the "
+      "function: it is `static` with no caller).\n"
+      "  Call `user_ringbuf_drain` from a handler that fires often enough for your "
+      "command latency: `def xdp__<name>` drains once per packet, "
+      "`def kprobe__<func>` once per call. Choosing that rate is the point -- it is not "
+      "injected for you.\n"
+      "  The undrained callback is", g_user_ringbuf_cb),
+      msprintf("user_ringbuf__%s", g_user_ringbuf_cb));
   /* classes_used: a class with >=1 eligible method (drops builtin/internal classes
    * whose methods are all body<0 stubs). */
   char *cls_used = calloc(ir->ncls > 0 ? ir->ncls : 1, 1);
@@ -6066,6 +6723,17 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   Lines *m_bodies = calloc(ir->n > 0 ? ir->n : 1, sizeof(Lines));
   for (int i = 0; i < ir->n; i++) {
     if (!cc_method_eligible(&ir->m[i])) continue;
+    /* a USER_RINGBUF callback returns `long` to the kernel, and the
+     * verifier wants a LITERAL 0 there -- so the body must not end in
+     * `return <expr>;`. Forced here, for both spellings at once: the flat
+     * `def user_ringbuf__<name>(value)` inherits whatever spinel inferred (int,
+     * whenever the last statement is an assignment -- which is exactly what the
+     * two committed examples do), and the reactor form arrives as CC_TY_INT from
+     * cc_synthesize_reactor. The retired oracle reached the same place by
+     * building its MethodEmitter with return_type "void". */
+    { Attach ua = {0};
+      if (cc_detect_attach(ir->m[i].name, &ua) == AK_USER_RINGBUF) ir->m[i].ret = CC_TY_VOID;
+      if (ua.sec) free(ua.sec); }
     cc_emit_method_body(ast, &ir->m[i], &m_bodies[i]);
   }
 
@@ -6092,7 +6760,14 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   {
     const char *extras[6]; int ne = 0;
     if (emit_flags || g_uses_http_l7 || g_uses_redis_l7 || g_uses_offcpu) extras[ne++] = "#include \"spnl/types.h\"";   /* any emit-family channel, plus the HTTP, Redis and off-CPU event headers */
-    if (g_n_pkt > 0 || uses_fib || uses_csum || g_n_flow > 0 || g_uses_l7 || g_uses_http_l7 || g_uses_redis_l7 || uses_sock_endian) extras[ne++] = "#include <bpf/bpf_endian.h>";   /* bpf_ntohs and bpf_htonl: the pkt_* builtins, fib lookups, skb checksums, flows, the peer port of the L7, HTTP and Redis channels, and the converting sock_* accessors */
+    /* every TCP-slice section parses or builds headers with bpf_htons/htonl,
+     * so any of the eight flags pulls in bpf_endian.h. Kept as one condition
+     * rather than folded into g_uses_tcp_slice: the seven builtins are usable
+     * without the bundle (the `ruby_slice.rb` surface) and vice versa. */
+    int uses_slice_endian = g_uses_tcp_slice || g_syncookie_gen || g_syncookie_check ||
+                            g_uses_tcp_reply || g_uses_tcp_synack || g_uses_synack_cookie ||
+                            g_n_reply > 0 || g_n_payload > 0;
+    if (g_n_pkt > 0 || uses_fib || uses_csum || g_n_flow > 0 || g_uses_l7 || g_uses_http_l7 || g_uses_redis_l7 || uses_sock_endian || uses_slice_endian) extras[ne++] = "#include <bpf/bpf_endian.h>";   /* bpf_ntohs and bpf_htonl: the pkt_* builtins, fib lookups, skb checksums, flows, the peer port of the L7, HTTP and Redis channels, the converting sock_* accessors, and the TCP slice */
     if (uses_pt_regs || uses_usdt || uses_sched_ext || uses_qdisc || uses_tcp_cc)
       extras[ne++] = "#include <bpf/bpf_tracing.h>";  /* PT_REGS_PARM / usdt / BPF_PROG */
     if (uses_usdt) extras[ne++] = "#include <bpf/usdt.bpf.h>";       /* bpf_usdt_arg */
@@ -6430,6 +7105,71 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     }
   }
 
+  /* the pure-XDP TCP slice sections, in the order the retired
+   * Ruby emit list had them (syncookie -> shared csum -> reply_header -> synack ->
+   * synack_cookie -> reply_data -> payload matchers), immediately after the flow
+   * maps. Order is not cosmetic here: these are plain C with no forward
+   * declarations, so a helper has to appear before its caller, and the two
+   * builders both call spnl_reply_csum_fold/_tcp.
+   *
+   * The BUNDLE (`xdp__tcp_slice__`) is emitted last of the group: it declares its
+   * own csum/swap helpers under spnl_tcp_slice_* names, so it neither needs nor
+   * collides with the hand-written family above -- the two surfaces can coexist
+   * in one unit, which is what the two public examples do separately. */
+  /* Sorted (check before gen), which is the order the Ruby emitter produced from
+   * `syncookie_used.to_a.sort`. They are two templates rather than one with holes
+   * -- as the oracle had it -- because only `gen` has to resize the frame; see
+   * bi_syncookie_gen.template.c for the three variants that decided that. */
+  if (g_syncookie_check) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_bi_syncookie_check);
+  }
+  if (g_syncookie_gen) {
+    if (g_syncookie_check) buf_puts(&out, "\n"); else SECTION_SEP();
+    buf_puts(&out, tpl_bi_syncookie_gen);
+  }
+  if (g_uses_tcp_reply || g_uses_tcp_synack || g_uses_synack_cookie || g_n_reply > 0) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_reply_csum);
+  }
+  if (g_uses_tcp_reply)     { SECTION_SEP(); buf_puts(&out, tpl_bi_tcp_reply_header); }
+  if (g_uses_tcp_synack)    { SECTION_SEP(); buf_puts(&out, tpl_bi_tcp_reply_synack); }
+  if (g_uses_synack_cookie) { SECTION_SEP(); buf_puts(&out, tpl_bi_tcp_synack_cookie); }
+  for (int i = 0; i < g_n_reply; i++) {
+    char id[16], len[16]; snprintf(id, sizeof id, "%d", i);
+    size_t bl = strlen(g_reply_bodies[i]); snprintf(len, sizeof len, "%d", (int)bl);   /* <= 1024, checked at the call site */
+    /* 12 bytes per line, continuation indented to line up under the first --
+     * byte-for-byte the initialiser the Ruby emitter built. */
+    Buf init; memset(&init, 0, sizeof init);
+    for (size_t k = 0; k < bl; k++) {
+      if (k) buf_puts(&init, (k % 12 == 0) ? ",\n            " : ", ");
+      buf_printf(&init, "0x%02x", (unsigned char)g_reply_bodies[i][k]);
+    }
+    if (i) buf_puts(&out, "\n"); else SECTION_SEP();
+    tpl_emit(&out, tpl_bi_tcp_reply_data, (TplSlot[]){
+      {"@ID@", id}, {"@LEN@", len}, {"@INIT@", init.p ? init.p : ""} }, 3);
+    free(init.p);
+  }
+  for (int i = 0; i < g_n_payload; i++) {
+    char id[16], len[16]; snprintf(id, sizeof id, "%d", i);
+    const char *pre = g_payload_prefixes[i];
+    size_t pl = strlen(pre); snprintf(len, sizeof len, "%d", (int)pl);   /* <= 64, checked at the call site */
+    Buf cmp; memset(&cmp, 0, sizeof cmp);
+    for (size_t k = 0; k < pl; k++) {
+      if (k) buf_puts(&cmp, "\n            ");
+      buf_printf(&cmp, "if (p[%zu] != %u) return 0;", k, (unsigned char)pre[k]);
+    }
+    char *q = cc_c_string_literal(pre);
+    if (i) buf_puts(&out, "\n"); else SECTION_SEP();
+    tpl_emit(&out, tpl_bi_payload_match, (TplSlot[]){
+      {"@ID@", id}, {"@LEN@", len}, {"@PREFIX@", q}, {"@CMP@", cmp.p ? cmp.p : ""} }, 4);
+    free(cmp.p); free(q);
+  }
+  if (g_uses_tcp_slice) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_tcp_slice);
+  }
+
   /* SECTION_REGISTRY: per-unit map+helper sections, gated by
    * builtin usage. Registry order: blocklist, cidr, path_counter (Ruby order). */
   if (uses_blocklist) {
@@ -6546,6 +7286,49 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     buf_puts(&out, tpl_off_cpu);
   }
 
+  /* the SO_REUSEPORT worker sockarray. Sits where Ruby's emit table
+   * put it (right after the off-CPU block) so the section order of a re-ported
+   * surface matches the oracle it came from.
+   *
+   * Emitted for `worker_select` only, not for `reuseport_hash`: reading the hash
+   * is useful on its own (a program can drop SYNs by hash without steering
+   * anything), and a map nothing indexes would be a table the glue populates for
+   * no reader. */
+  if (uses_reuseport_sockarray) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_reuseport_sockarray);
+  }
+
+  /* the dynptr-backed byte reader. Sits where Ruby's emit table put
+   * it (after the tcp_slice/off-CPU block, before the redirect-target maps) so
+   * the section order of a re-ported surface matches the oracle it came from. */
+  if (g_uses_dynptr) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_dynptr);
+  }
+
+  /* the host->kernel command ring + the forward declaration of the
+   * callback the drain names. Sits where Ruby's emit table put it (between the
+   * dynptr helper and the PROG_ARRAY) so the section order of a re-ported
+   * surface matches the oracle it came from. It MUST precede the per-method loop
+   * below for the same reason the timer map does: that loop emits the callback,
+   * and the drain -- which may be lowered before it -- takes its address. */
+  if (g_uses_user_ringbuf) {
+    SECTION_SEP();
+    tpl_emit(&out, tpl_user_ringbuf,
+             (TplSlot[]){ {"@CB@", g_user_ringbuf_cb ? g_user_ringbuf_cb : ""} }, 1);
+  }
+
+  /* the PROG_ARRAY the dispatcher jumps through. Sits where Ruby's
+   * emit table put it (after the dynptr helper, before the redirect-target maps)
+   * so the section order of a re-ported surface matches the oracle it came from. */
+  if (uses_tail_call) {
+    char n[32];
+    snprintf(n, sizeof n, "%d", g_n_tail_targets > 32 ? g_n_tail_targets : 32);
+    SECTION_SEP();
+    tpl_emit(&out, tpl_prog_array, (TplSlot[]){ {"@N@", n} }, 1);
+  }
+
   /* XSKMAP (AF_XDP) / DEVMAP redirect targets for xsk_redirect/dev_redirect. */
   if (uses_xskmap) {
     SECTION_SEP();
@@ -6559,6 +7342,16 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   if (uses_cpumap) {
     SECTION_SEP();
     buf_puts(&out, tpl_cpumap);
+  }
+
+  /* the bpf_timer slot + the callback's forward declaration. Last of
+   * the helper sections, which is where the Ruby emit table put it, and it has to
+   * precede the per-method loop below: that loop emits the callback the arm
+   * program takes the address of. */
+  if (g_uses_timer) {
+    char ns[32]; snprintf(ns, sizeof ns, "%lld", g_timer_ns);
+    SECTION_SEP();
+    tpl_emit(&out, tpl_timer_map, (TplSlot[]){ {"@NAME@", g_timer_name}, {"@NS@", ns} }, 2);
   }
 
   /* per-method ctx struct for ANY eligible method with params (emit_ctx_struct is
@@ -6603,6 +7396,79 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
     char *qn = cc_qual_name(me);   /* comment label (class -> Counter#incr) */
 
     Attach a; int is_attach = cc_detect_attach(me->name, &a);
+    /* a timer is not an inner + a wrapper. It is a bpf_timer callback
+     * (the handler body, then the re-arm) and a SEC("syscall") program fired once
+     * at load time -- so it short-circuits here, the way struct_ops members do
+     * just above. The body was lowered with ret=VOID, so no `return <expr>;` was
+     * appended and the literal `return 0;` the verifier demands is the only exit. */
+    if (a.kind == AK_TIMER) {
+      if (!g_uses_timer)
+        die("`spnl_timer__<name>` is the synthesized name of an `on :timer` handler; "
+            "write it as `on :timer, every: 1.seconds do ... end` inside a "
+            "`module M; include BPF::EventLoop; ... end` so the interval is declared "
+            "(a timer with no interval has nothing to pass to bpf_timer_start)", me->name);
+      Buf body; memset(&body, 0, sizeof body);
+      for (int k = 0; k < m_bodies[i].n; k++) {
+        char *t = cc_indent_each(m_bodies[i].v[k]); buf_puts(&body, t); buf_puts(&body, "\n"); free(t);
+      }
+      char ns[32]; snprintf(ns, sizeof ns, "%lld", g_timer_ns);
+      SECTION_SEP();
+      tpl_emit(&out, tpl_timer_prog,
+               (TplSlot[]){ {"@NAME@", g_timer_name}, {"@NS@", ns},
+                            {"@BODY@", body.p ? body.p : ""} }, 3);
+      free(body.p);
+      if (a.sec) free(a.sec);
+      free(fn); free(qn);
+      continue;
+    }
+    /* the pure-XDP TCP slice. Not an inner + a wrapper either, and for
+     * a reason neither the timer nor the USER_RINGBUF callback has: the author's
+     * BODY IS DISCARDED. `def xdp__tcp_slice__health; XDP_PASS; end` is a marker
+     * -- the whole state machine came from the bundle section above, and all this
+     * emits is the SEC("xdp") entry that calls into it.
+     *
+     * That is unusual enough that the affordance says so in as many words, and
+     * `describe` repeats it: a reader who does not know this will write logic in
+     * the body and watch it have no effect, with no diagnostic. Refusing a
+     * non-marker body was considered and rejected -- "marker" has no definition
+     * that survives contact with `XDP::PASS` vs `XDP_PASS` vs a comment, and a
+     * wrong refusal here is worse than a documented surprise. */
+    if (a.tcp_slice) {
+      SECTION_SEP();
+      tpl_emit(&out, tpl_tcp_slice_prog, (TplSlot[]){ {"@NAME@", me->name} }, 1);
+      if (a.sec) free(a.sec);
+      free(fn); free(qn);
+      continue;
+    }
+    /* a USER_RINGBUF callback is not an inner + a wrapper either. It
+     * is one `static long cb(struct bpf_dynptr *, void *)` that
+     * bpf_user_ringbuf_drain calls per record, so it short-circuits here like the
+     * timer above. The single declared param is filled from the record's first 8
+     * bytes; the body is lowered with ret=VOID so the literal `return 0;` the
+     * verifier demands is the only exit. */
+    if (a.kind == AK_USER_RINGBUF) {
+      if (me->nparams != 1)
+        die(msprintf("`user_ringbuf__%s` takes exactly 1 parameter -- the value the host "
+                     "pushed, read from the record's first 8 bytes. It has %d.\n"
+                     "  Write `def user_ringbuf__%s(value)` (or `on :user_cmd do |cmd| ... end`).\n"
+                     "  You wrote", g_user_ringbuf_cb ? g_user_ringbuf_cb : "?",
+                     me->nparams, g_user_ringbuf_cb ? g_user_ringbuf_cb : "?"), me->name);
+      const char *pct = ty_to_c(me->ptypes[0]);
+      if (!pct) die("user_ringbuf callback param type not supported", ty_legacy_name(me->ptypes[0]));
+      Buf body; memset(&body, 0, sizeof body);
+      for (int k = 0; k < m_bodies[i].n; k++) {
+        char *t = cc_indent_each(m_bodies[i].v[k]); buf_puts(&body, t); buf_puts(&body, "\n"); free(t);
+      }
+      SECTION_SEP();
+      tpl_emit(&out, tpl_user_ringbuf_cb,
+               (TplSlot[]){ {"@CB@", g_user_ringbuf_cb ? g_user_ringbuf_cb : ""},
+                            {"@CTYPE@", pct}, {"@PARAM@", me->pnames[0]},
+                            {"@BODY@", body.p ? body.p : ""} }, 4);
+      free(body.p);
+      if (a.sec) free(a.sec);
+      free(fn); free(qn);
+      continue;
+    }
     /* the inner takes the kernel ctx first when it's a ctx-prefixed attach
      * (xdp/tc/sk/iter) OR a tracing-family handler in a unit that uses stack traces. */
     int ctx_first = is_attach && (a.ctx_prefixed || ((uses_stack_trace || uses_go_gptr) && cc_is_tracing_kind(a.kind)));

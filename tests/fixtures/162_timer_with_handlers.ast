@@ -1,0 +1,127 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/162_timer_with_handlers.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @opens
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @ticks
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @last
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 ModuleNode
+N 9 ConstantReadNode
+S 9 name Sampler
+R 8 constant_path 9
+N 10 StatementsNode
+N 11 CallNode
+S 11 name include
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 ConstantPathNode
+N 14 ConstantReadNode
+S 14 name BPF
+R 13 parent 14
+S 13 name EventLoop
+A 12 arguments 13
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+N 15 CallNode
+S 15 name on
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 SymbolNode
+S 17 value kprobe
+N 18 StringNode
+S 18 content do_sys_openat2
+I 18 fzl 1
+A 16 arguments 17,18
+R 15 arguments 16
+N 19 BlockNode
+N 20 StatementsNode
+N 21 InstanceVariableWriteNode
+S 21 name @opens
+N 22 CallNode
+S 22 name +
+N 23 InstanceVariableReadNode
+S 23 name @opens
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 1
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+R 21 value 22
+A 20 body 21
+R 19 body 20
+R 15 block 19
+S 15 call_operator .
+N 26 CallNode
+S 26 name on
+R 26 receiver -1
+N 27 ArgumentsNode
+N 28 SymbolNode
+S 28 value timer
+N 29 KeywordHashNode
+N 30 AssocNode
+N 31 SymbolNode
+S 31 value every
+R 30 key 31
+N 32 CallNode
+S 32 name milliseconds
+N 33 IntegerNode
+I 33 value 500
+R 32 receiver 33
+R 32 arguments -1
+R 32 block -1
+S 32 call_operator .
+R 30 value 32
+A 29 elements 30
+A 27 arguments 28,29
+R 26 arguments 27
+N 34 BlockNode
+N 35 StatementsNode
+N 36 InstanceVariableWriteNode
+S 36 name @last
+N 37 InstanceVariableReadNode
+S 37 name @opens
+R 36 value 37
+N 38 InstanceVariableWriteNode
+S 38 name @opens
+N 39 IntegerNode
+I 39 value 0
+R 38 value 39
+N 40 InstanceVariableWriteNode
+S 40 name @ticks
+N 41 CallNode
+S 41 name +
+N 42 InstanceVariableReadNode
+S 42 name @ticks
+R 41 receiver 42
+N 43 ArgumentsNode
+N 44 IntegerNode
+I 44 value 1
+A 43 arguments 44
+R 41 arguments 43
+R 41 block -1
+S 41 call_operator .
+R 40 value 41
+A 35 body 36,38,40
+R 34 body 35
+R 26 block 34
+S 26 call_operator .
+A 10 body 11,15,26
+R 8 body 10
+A 1 body 2,4,6,8
+R 0 statements 1

@@ -1,0 +1,76 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/168_reuseport_select.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @syns
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name sk_reuseport__select
+R 4 parameters -1
+N 5 StatementsNode
+N 6 InstanceVariableWriteNode
+S 6 name @syns
+N 7 CallNode
+S 7 name +
+N 8 InstanceVariableReadNode
+S 8 name @syns
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 IntegerNode
+I 10 value 1
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 value 7
+N 11 LocalVariableWriteNode
+S 11 name idx
+N 12 CallNode
+S 12 name %25
+N 13 CallNode
+S 13 name reuseport_hash
+R 13 receiver -1
+R 13 arguments -1
+R 13 block -1
+S 13 call_operator .
+I 13 vcall 1
+R 12 receiver 13
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 4
+A 14 arguments 15
+R 12 arguments 14
+R 12 block -1
+S 12 call_operator .
+R 11 value 12
+N 16 CallNode
+S 16 name worker_select
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name idx
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+N 19 ConstantReadNode
+S 19 name SK_PASS
+A 5 body 6,11,16,19
+R 4 body 5
+R 4 receiver -1
+N 20 CallNode
+S 20 name puts
+R 20 receiver -1
+N 21 ArgumentsNode
+N 22 StringNode
+S 22 content [168]%20sk_reuseport%20worker%20selection
+I 22 fzl 1
+A 21 arguments 22
+R 20 arguments 21
+R 20 block -1
+S 20 call_operator .
+A 1 body 2,4,20
+R 0 statements 1

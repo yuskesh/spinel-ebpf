@@ -1,0 +1,15 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/144_tcp_slice.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name xdp__tcp_slice__health
+R 2 parameters -1
+N 3 StatementsNode
+N 4 ConstantReadNode
+S 4 name XDP_PASS
+A 3 body 4
+R 2 body 3
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

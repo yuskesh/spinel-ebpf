@@ -1,13 +1,21 @@
-# NOT BUILDABLE WITH THE CURRENT CODE GENERATOR.
+# STILL REFUSED, AND CORRECTLY SO: SUPERSEDED, NOT MISSING.
 #
-# This example uses the XDP_TX static-response builtins (xdp_match_health, xdp_reply_health), which did not survive the move from the
-# original Ruby code generator to the C one. Compiling it now stops with a
-# message that names the missing piece and points at the alternative, rather
-# than emitting a program that loads and never fires -- which is what used to
-# happen, silently.
+# This example uses xdp_match_health and xdp_reply_health, the two builtins of
+# the XDP_TX static-response path. They are the only capabilities the audit
+# demoted that were deliberately NOT restored: the pure-XDP TCP slice in
+# tcp_slice.rb and ruby_slice.rb does the same job and does it better, so
+# bringing these two back would mean maintaining a second, worse answer to one
+# question. Compiling this file stops with a message naming them.
 #
-# The file is kept because it records how the feature was expressed. Restoring
-# it means porting the generator side, not editing this file.
+# What was measured about the difference: this path answers from XDP while the
+# kernel's TCP stack still owns the connection, and the two disagree about
+# state, which put its reliability somewhere around a third to a half. The
+# slice removes the disagreement by not letting the kernel have the connection
+# at all: it never listens on the port, completes the handshake with a raw SYN
+# cookie, and answers every request.
+#
+# The file is kept because it records how the feature was expressed, and
+# because the ceiling it ran into is why the slice exists.
 #
 # examples/http_server/pure-xdp-tcp-slice/server.rb
 #

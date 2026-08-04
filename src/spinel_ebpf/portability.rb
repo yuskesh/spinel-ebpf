@@ -171,14 +171,58 @@ module SpinelEbpf
         Feature.new(key: "bpf_loop", kernel: "5.17", why: "bpf_loop (n.times with a dynamic count)"),
       "bpf_iter_num_new" =>
         Feature.new(key: "open_coded_iter", kernel: "6.4", why: "open-coded iterator (n.times with a literal count)"),
+      # Two unrelated surfaces reach this marker and the `why` has to name both,
+      # or an author of a TCP slice reads "on :timer" and concludes the line is
+      # not about their probe. `on :timer` arms one timer in an array slot at
+      # load time; the pure-XDP TCP slice embeds one per CONNECTION in the
+      # LRU_HASH value and arms it from BPF. Same struct, same floor.
       "bpf_timer_init" =>
-        Feature.new(key: "bpf_timer", kernel: "5.15", why: "bpf_timer (on :timer)"),
+        Feature.new(key: "bpf_timer", kernel: "5.15",
+                    why: "bpf_timer (on :timer, and the TCP slice's per-connection time-to-live)"),
       "bpf_user_ringbuf_drain" =>
         Feature.new(key: "user_ringbuf", kernel: "6.1", why: "USER_RINGBUF (the host -> kernel command channel)"),
       "bpf_task_storage_get" =>
         Feature.new(key: "task_storage", kernel: "5.11", why: "task local storage"),
       "bpf_d_path" =>
         Feature.new(key: "d_path", kernel: "5.10", why: "bpf_d_path (reading a full path)"),
+      # bpf_tail_call plus PROG_ARRAY. This entry can never BE the floor: every
+      # program that can hold either is an XDP program, so SEC("xdp") at 5.9
+      # always dominates it. It is here as a record, not as a constraint --
+      # a MISSING marker was measured to cost a multi-symbol probe declaring 5.8
+      # when it needed 5.18, which is under-reporting, the one direction this
+      # contract may never take. The cheap defence is to state the floor of every
+      # feature rather than only the ones expected to win.
+      "BPF_MAP_TYPE_PROG_ARRAY" =>
+        Feature.new(key: "prog_array", kernel: "4.2",
+                    why: "bpf_tail_call + PROG_ARRAY (transferring control to an xdp_tail__ target)"),
+      # SO_REUSEPORT selection. Like PROG_ARRAY above, this can never BE the
+      # floor -- 4.19 is below BASE_EBPF_KERNEL (5.2) -- and it is here for the
+      # same reason. BPF_PROG_TYPE_SK_REUSEPORT, the socket array it selects from
+      # and bpf_sk_select_reuseport all arrived together in 4.19; the older
+      # SO_ATTACH_REUSEPORT_EBPF (4.5) took a SOCKET_FILTER program, which is a
+      # different thing and not what this code generator emits.
+      'SEC("sk_reuseport' =>
+        Feature.new(key: "sk_reuseport", kernel: "4.19",
+                    why: "BPF_PROG_TYPE_SK_REUSEPORT (choosing within an SO_REUSEPORT group)"),
+      "BPF_MAP_TYPE_REUSEPORT_SOCKARRAY" =>
+        Feature.new(key: "reuseport_sockarray", kernel: "4.19",
+                    why: "REUSEPORT_SOCKARRAY + bpf_sk_select_reuseport (the table worker_select indexes)"),
+      # The pure-XDP TCP slice. The two raw SYN-cookie kfuncs arrived together in
+      # 6.8, which makes this the HIGHEST floor any generated program carries --
+      # higher than SEC("xdp") at 5.9, higher than the bpf_timer at 5.15 the
+      # slice also embeds, and higher than USER_RINGBUF at 6.1, which was the
+      # previous ceiling. So unlike the two entries above, this one is not a
+      # record: on a slice probe it IS the floor.
+      #
+      # Two markers rather than one, because the seven builtins can be used
+      # WITHOUT the bundle (the hand-written slice surface): whichever of the two
+      # appears, the frame is being handed to a raw syncookie kfunc.
+      "bpf_tcp_raw_gen_syncookie_ipv4" =>
+        Feature.new(key: "tcp_raw_syncookie", kernel: "6.8",
+                    why: "bpf_tcp_raw_gen_syncookie_ipv4 (the pure-XDP TCP slice's handshake)"),
+      "bpf_tcp_raw_check_syncookie_ipv4" =>
+        Feature.new(key: "tcp_raw_syncookie", kernel: "6.8",
+                    why: "bpf_tcp_raw_check_syncookie_ipv4 (the pure-XDP TCP slice's handshake)"),
       "BPF_MAP_TYPE_ARENA" =>
         Feature.new(key: "arena", kernel: "6.9", why: "bpf_arena (shared memory)"),
       "sched_ext_ops" =>
@@ -190,6 +234,19 @@ module SpinelEbpf
     UNDECLARED = {
       "Qdisc_ops"           => "BPF qdisc (struct_ops/Qdisc_ops)",
       "tcp_congestion_ops"  => "TCP congestion control (struct_ops/tcp_congestion_ops)",
+      # The shape shipped here puts `bpf_tail_call` inside `<name>_inner`, a
+      # `static __noinline` function -- the kernel's own translated dump confirms
+      # it is a real BPF-to-BPF subprogram (a call instruction, then the tail
+      # call inside it) and not something clang inlined away. Mixing BPF-to-BPF
+      # calls with tail calls is a later, per-architecture-JIT capability than
+      # PROG_ARRAY itself (4.2, declared above), so the 4.2 line is the floor of
+      # the feature and NOT the floor of this shape. Measured working on
+      # 7.1.5 / aarch64 (17 of 20 packets jumped). The exact kernel where it
+      # started working is not established here, so it is reported as unknown
+      # rather than guessed.
+      "bpf_tail_call"       => "a bpf_tail_call made from a subprogram (`_inner`) -- later than " \
+                               "PROG_ARRAY's own 4.2 and dependent on the architecture's JIT " \
+                               "(measured working on 7.1.5/aarch64; the floor was not measured)",
     }.freeze
 
     # Runtime conditions that no compile-time check can settle -- the probe
@@ -205,6 +262,27 @@ module SpinelEbpf
         "EBUSY (the incumbent is not displaced). Name the interface with SPNL_XDP_IFACE",
       'SEC("tcx/' =>
         "name the target interface with SPNL_TCX_IFACE (being tcx, it coexists with an incumbent)",
+      'SEC("sk_reuseport' =>
+        "the loader does not attach this one -- the SO_REUSEPORT listening socket is created by " \
+        "the probe itself, so the probe's own userspace half has to call " \
+        "`sp_bpf_reuseport_attach(listen_fd, \"sk_reuseport__<name>\")`. Without that call the " \
+        "program is loaded and **never fires once**",
+      "bpf_user_ringbuf_drain" =>
+        "**a record is a fixed 8 bytes** -- the generated callback reads `sizeof(__s64)` with " \
+        "`bpf_dynptr_read`. Sending a shorter record from a hand-rolled pusher (code driving " \
+        "libbpf reserve/submit directly) makes **the callback fire and the count rise while only " \
+        "the value stays 0**: `bpf_dynptr_read` returns -E2BIG and gives up silently (measured). " \
+        "A check that looks only at the count passes this failure, so look at **both the count " \
+        "and the value**. Using the bundled `sp_bpf_user_cmd_push(value)` avoids the hole " \
+        "entirely. Note also that **if nobody pushes, the drain simply returns 0 records**, which " \
+        "is silent too: \"no command arrived\" and \"the sender is broken\" are indistinguishable " \
+        "in anything the probe emits",
+      "bpf_sk_select_reuseport" =>
+        "naming an empty slot -- one no worker registered with `sp_bpf_reuseport_register` -- " \
+        "**is not an error**: the kernel quietly falls back to its own 5-tuple spread, so " \
+        "\"the program chose\" and \"the kernel chose\" cannot be told apart from where the " \
+        "connections land. To check it, ask for a **skew the default spread cannot produce** and " \
+        "measure that",
     }.freeze
 
     Contract = Struct.new(:native, :ebpf, keyword_init: true)

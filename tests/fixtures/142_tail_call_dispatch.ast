@@ -1,0 +1,133 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/142_tail_call_dispatch.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ConstantWriteNode
+S 2 name XDP_PASS
+N 3 IntegerNode
+I 3 value 2
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @tcp_pkts
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 InstanceVariableWriteNode
+S 6 name @other_pkts
+N 7 IntegerNode
+I 7 value 0
+R 6 value 7
+N 8 DefNode
+S 8 name xdp_tail__tcp_handler
+R 8 parameters -1
+N 9 StatementsNode
+N 10 InstanceVariableWriteNode
+S 10 name @tcp_pkts
+N 11 CallNode
+S 11 name +
+N 12 InstanceVariableReadNode
+S 12 name @tcp_pkts
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 value 11
+N 15 ConstantReadNode
+S 15 name XDP_PASS
+A 9 body 10,15
+R 8 body 9
+R 8 receiver -1
+N 16 DefNode
+S 16 name xdp_tail__other_handler
+R 16 parameters -1
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @other_pkts
+N 19 CallNode
+S 19 name +
+N 20 InstanceVariableReadNode
+S 20 name @other_pkts
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 IntegerNode
+I 22 value 1
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+N 23 ConstantReadNode
+S 23 name XDP_PASS
+A 17 body 18,23
+R 16 body 17
+R 16 receiver -1
+N 24 DefNode
+S 24 name xdp__dispatcher
+R 24 parameters -1
+N 25 StatementsNode
+N 26 LocalVariableWriteNode
+S 26 name proto
+N 27 CallNode
+S 27 name pkt_dynptr_byte_at
+R 27 receiver -1
+N 28 ArgumentsNode
+N 29 IntegerNode
+I 29 value 23
+A 28 arguments 29
+R 27 arguments 28
+R 27 block -1
+S 27 call_operator .
+R 26 value 27
+N 30 IfNode
+N 31 CallNode
+S 31 name ==
+N 32 LocalVariableReadNode
+S 32 name proto
+R 31 receiver 32
+N 33 ArgumentsNode
+N 34 IntegerNode
+I 34 value 6
+A 33 arguments 34
+R 31 arguments 33
+R 31 block -1
+S 31 call_operator .
+R 30 predicate 31
+N 35 StatementsNode
+N 36 CallNode
+S 36 name tail_call_to
+R 36 receiver -1
+N 37 ArgumentsNode
+N 38 IntegerNode
+I 38 value 0
+A 37 arguments 38
+R 36 arguments 37
+R 36 block -1
+S 36 call_operator .
+A 35 body 36
+R 30 statements 35
+N 39 ElseNode
+N 40 StatementsNode
+N 41 CallNode
+S 41 name tail_call_to
+R 41 receiver -1
+N 42 ArgumentsNode
+N 43 IntegerNode
+I 43 value 1
+A 42 arguments 43
+R 41 arguments 42
+R 41 block -1
+S 41 call_operator .
+A 40 body 41
+R 39 statements 40
+R 30 subsequent 39
+N 44 ConstantReadNode
+S 44 name XDP_PASS
+A 25 body 26,30,44
+R 24 body 25
+R 24 receiver -1
+A 1 body 2,4,6,8,16,24
+R 0 statements 1

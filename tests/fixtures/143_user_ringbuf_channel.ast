@@ -1,0 +1,76 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/143_user_ringbuf_channel.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @cmds_received
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 InstanceVariableWriteNode
+S 4 name @last_value
+N 5 IntegerNode
+I 5 value 0
+R 4 value 5
+N 6 DefNode
+S 6 name user_ringbuf__cmd_handler
+N 7 ParametersNode
+N 8 RequiredParameterNode
+S 8 name value
+A 7 requireds 8
+A 7 optionals 
+A 7 keywords 
+A 7 posts 
+R 6 parameters 7
+N 9 StatementsNode
+N 10 InstanceVariableWriteNode
+S 10 name @cmds_received
+N 11 CallNode
+S 11 name +
+N 12 InstanceVariableReadNode
+S 12 name @cmds_received
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 value 11
+N 15 InstanceVariableWriteNode
+S 15 name @last_value
+N 16 LocalVariableReadNode
+S 16 name value
+R 15 value 16
+N 17 CallNode
+S 17 name spnl_emit
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 LocalVariableReadNode
+S 19 name value
+A 18 arguments 19
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+A 9 body 10,15,17
+R 6 body 9
+R 6 receiver -1
+N 20 DefNode
+S 20 name xdp__drain_user_ringbuf
+R 20 parameters -1
+N 21 StatementsNode
+N 22 CallNode
+S 22 name user_ringbuf_drain
+R 22 receiver -1
+R 22 arguments -1
+R 22 block -1
+S 22 call_operator .
+I 22 vcall 1
+N 23 ConstantReadNode
+S 23 name XDP_PASS
+A 21 body 22,23
+R 20 body 21
+R 20 receiver -1
+A 1 body 2,4,6,20
+R 0 statements 1

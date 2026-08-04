@@ -37,10 +37,91 @@ class AffordanceGateTest < Minitest::Test
 
   # Nothing is silently skipped: the two sets together are what the gate checks,
   # and the advertised half must be the whole affordance.
+  #
+  # A non-empty `WITHDRAWN` is no longer required. Porting the demoted surfaces
+  # back empties it, so demanding otherwise would be pressure to leave a lie in
+  # the shipped affordance purely to keep the gate armed. An empty set is the
+  # factually correct state; whether absence can still be detected is proved on
+  # every run by the self-check anchors below.
   def test_gate_covers_the_whole_affordance
     refute_empty CAP.all_builtins
-    refute_empty CAP::WITHDRAWN, "with an empty negative control the gate cannot detect its own decay"
     assert_empty(CAP.all_builtins & CAP::WITHDRAWN.keys)
+  end
+
+  # ---------- the controls that do not deplete ----------
+  # All four withdrawn sets can empty as the demoted surfaces are ported back.
+  # The gate's detection power was therefore moved off them and onto self-checks
+  # that **corrupt a live claim in memory**. Which means that if the claim they
+  # point at disappears, the control silently points at nothing -- a small copy
+  # of the very problem this file is about -- so the anchors are pinned here.
+
+  def test_builtin_selfcheck_anchor_is_a_live_claim_that_takes_an_argument
+    assert_includes CAP.all_builtins, G::SELFCHECK_BUILTIN,
+                    "the builtin self-check's anchor is not advertised"
+    call = G.call_text(G::SELFCHECK_BUILTIN)
+    assert_includes call, "(", "with a zero-argument anchor the corrupted spelling would look like " \
+                              "an undefined local, so the check would be measuring some other " \
+                              "failure rather than the builtin's absence"
+  end
+
+  # The corrupted spelling has to stay **a call with parentheses**: a bare
+  # identifier is not even a CallNode, so it would change what is measured.
+  def test_builtin_selfcheck_absent_call_is_still_a_call
+    absent = "#{G::SELFCHECK_BUILTIN}_zz_absent_name"
+    call   = G.call_text(G::SELFCHECK_BUILTIN).sub(G::SELFCHECK_BUILTIN, absent)
+    assert_match(/\A#{Regexp.escape(absent)}\(.*\)\z/, call)
+    refute_includes CAP.all_builtins, absent
+  end
+
+  # The no-effect half holds only while its input is identical to the twin by
+  # construction. If that stops being true, this half starts measuring something
+  # other than a twin witness.
+  def test_builtin_selfcheck_no_effect_input_is_identical_to_the_twin
+    shape = G.shape_for(G::SELFCHECK_BUILTIN)
+    with    = G.source(shape, "@hits = @hits + 0", [])
+    without = G.source(shape, "@hits = @hits + 0", [])
+    assert_equal without, with,
+                 "if the two no-effect sources are not identical, this is not a twin-witness test"
+  end
+
+  def test_attach_selfcheck_anchor_is_a_live_kind_with_a_probe_shape
+    assert_includes CAP::ATTACH_KINDS.map { |a| a[:kind] }, G::SELFCHECK_ATTACH
+    assert_includes G::ATTACH_SHAPES.keys, G::SELFCHECK_ATTACH
+    refute_nil G.promised_sec(G::SELFCHECK_ATTACH)
+  end
+
+  # The corrupted SEC must not collide with the real one, or :wrong_sec never
+  # comes back.
+  def test_attach_selfcheck_corrupted_sec_cannot_match_the_real_one
+    real = G.promised_sec(G::SELFCHECK_ATTACH)
+    refute_equal real, "#{real}_zz_never_promised"
+  end
+
+  def test_sugar_selfcheck_anchor_is_a_live_claim
+    assert_includes CAP.surface_sugar.map { |s| s[:sugar] }, G::SELFCHECK_SUGAR,
+                    "the sugar absence self-check depends on the pkt.* chain family being present"
+    refute_includes CAP.surface_sugar.map { |s| s[:sugar] }, "pkt.zz_absent_member"
+  end
+
+  # The control over a withdrawn attach kind lives in **two places**: the record
+  # in the affordance (what the gate probes) and CC_WITHDRAWN_ATTACH in the C
+  # generator (what actually refuses). Lose one and that surface is probed by
+  # nobody, without a word. The correspondence **still means something when both
+  # are empty**, which is why it survives the surfaces being ported back.
+  def test_codegen_refusal_table_and_the_withdrawn_record_are_the_same_set
+    prefixes = G.cc_withdrawn_attach_prefixes
+    refute_nil prefixes, "CC_WITHDRAWN_ATTACH cannot be read (an empty refusal table and an " \
+                         "unreadable one would be indistinguishable)"
+    recorded = CAP::WITHDRAWN_ATTACH.values.map { |w| w[:method_prefix].to_s }
+    prefixes.each do |p|
+      assert recorded.any? { |m| m.include?(p) },
+             "the generator refuses #{p} but WITHDRAWN_ATTACH has no record of it (nobody probes it)"
+    end
+    CAP::WITHDRAWN_ATTACH.each do |k, w|
+      assert prefixes.any? { |p| w[:method_prefix].to_s.include?(p) },
+             "#{k} is in the withdrawn record but the generator does not refuse it " \
+             "(withdrawing in the affordance alone is only half of it)"
+    end
   end
 
   # ---------- the probe text ----------
@@ -56,16 +137,65 @@ class AffordanceGateTest < Minitest::Test
 
   # opaque kfuncs publish no example (params honestly unknown); the gate must
   # still be able to call them, at the known arity.
+  # The attach probe's body marker must be something ONLY the body can put
+  # in the emitted C.
+  #
+  # It used to be the ivar's name, and the probe declares that ivar at top level
+  # -- which the codegen turns into a map called `<unit>_top_<marker>`. So the
+  # needle appeared in the output whether or not the body survived, and stage 2
+  # ("did the handler body reach the C?", the stage added because `on :timer`
+  # vanished body and all) could not fail for any kind whose probe has an ivar.
+  # Found while porting the one kind that legitimately discards its body.
+  def test_the_body_marker_cannot_come_from_the_ivar_declaration
+    src = G.attach_source(:xdp, "zzprobe")
+    assert_includes src, "@zzprobe = 0", "the probe does not declare the ivar (so it is no longer the shape an author writes)"
+    assert_includes src, G::BODY_MARK, "the body has no needle in it"
+    refute_equal "zzprobe", G::BODY_MARK,
+                 "the needle is the ivar name -- a top-level ivar appears in the output as a map " \
+                 "name, so it is no evidence that the body arrived"
+    # The needle must not be derivable from anything but the increment: it does
+    # not appear in the probe's declarations, only in the handler.
+    decls, body = src.split(/^\s*def |^\s*on /, 2)
+    refute_includes decls.to_s, G::BODY_MARK, "the needle also appears among the declarations"
+    assert_includes body.to_s, G::BODY_MARK
+  end
+
   def test_opaque_builtins_get_a_synthesised_call
     assert_nil CAP.example_for("scx_dispatch")
     assert_equal "scx_dispatch(a0, a1, a2, a3)", G.call_text("scx_dispatch")
   end
 
   def test_withdrawn_builtins_get_a_call_even_without_a_signature
-    # They are out of SIGNATURES entirely, so the arity comes from WITHDRAWN.
-    refute_includes CAP::SIGNATURES.keys, "tail_call_to"
-    assert_equal "tail_call_to(a0)", G.call_text("tail_call_to")
-    assert_equal 'payload_starts("GET ")', G.call_text("payload_starts")
+    # Withdrawn builtins are out of SIGNATURES entirely, so the arity comes from
+    # WITHDRAWN. The arity>=1 subjects used to be `tail_call_to` and
+    # `tcp_reply_synack`, and the `example:` subject `payload_starts`, until each
+    # was ported back. What is being tested is the gate's SYNTHESIS, not the
+    # subject, so when a subject comes back the fix is to move the assertion --
+    # not to keep an entry withdrawn so that a test keeps passing (the same
+    # pressure this file exists to resist, one level down).
+    #
+    # What is left in the live inventory is two arity-0 entries with no example,
+    # so the other two paths are exercised against a SYNTHETIC record instead.
+    # That is the same move the gate itself makes: the ability to detect a thing
+    # must not depend on the shipped product still containing one.
+    refute_includes CAP::SIGNATURES.keys, "xdp_match_health"
+    assert_equal "xdp_match_health", G.call_text("xdp_match_health")
+    assert_equal "xdp_reply_health", G.call_text("xdp_reply_health")
+
+    fake = CAP::WITHDRAWN.merge(
+      "zz_synth_arity"   => { ctx: :xdp, arity: 2, why: "synthetic" },
+      "zz_synth_example" => { ctx: :xdp, arity: 1, why: "synthetic",
+                             example: 'zz_synth_example("GET ")' },
+    ).freeze
+    CAP.send(:remove_const, :WITHDRAWN)
+    CAP.const_set(:WITHDRAWN, fake)
+    begin
+      assert_equal "zz_synth_arity(a0, a1)", G.call_text("zz_synth_arity")
+      assert_equal 'zz_synth_example("GET ")', G.call_text("zz_synth_example")
+    ensure
+      CAP.send(:remove_const, :WITHDRAWN)
+      CAP.const_set(:WITHDRAWN, fake.reject { |k, _| k.start_with?("zz_synth") }.freeze)
+    end
   end
 
   def test_free_vars_skips_literals
@@ -149,12 +279,12 @@ class AffordanceGateTest < Minitest::Test
     assert_empty stale, "a probe shape is left over for an attach kind that is not advertised: #{stale.inspect}"
   end
 
+  # The non-empty requirement is gone here too. On the attach half, "can absence
+  # still be detected" is carried by the correspondence with the generator's own
+  # refusal table (the test above) and by the two-stage self-check (a wrong SEC,
+  # and a body that never arrives).
   def test_attach_gate_covers_both_directions
     refute_empty CAP::ATTACH_KINDS
-    refute_empty CAP::WITHDRAWN_ATTACH,
-                 "an empty withdrawn set leaves the attach half with no negative control " \
-                 "(an unimplemented attach raises nothing and degrades to SEC(\"syscall\"), so a " \
-                 "decayed gate and a healthy one both report broken=0)"
     assert_empty(CAP::ATTACH_KINDS.map { |a| a[:kind] } & CAP::WITHDRAWN_ATTACH.keys)
   end
 
@@ -176,7 +306,10 @@ class AffordanceGateTest < Minitest::Test
   def test_attach_probe_is_written_in_the_advertised_surface
     src = G.attach_source(:sock_ops, "zzm")
     assert_includes src, "def sock_ops__probe"
-    assert_includes src, "@zzm = @zzm + 1", "without a body marker there is no way to measure whether the body reached the output"
+    # The increment carries BODY_MARK rather than `1` -- see
+    # test_the_body_marker_cannot_come_from_the_ivar_declaration for why.
+    assert_includes src, "@zzm = @zzm + #{G::BODY_MARK}",
+                    "without a body marker there is no way to measure whether the body reached the output"
 
     cls = G.attach_source(:qdisc, "zzq")
     assert_includes cls, "class ProbeQ < BPF::Qdisc"
@@ -248,14 +381,26 @@ class AffordanceGateTest < Minitest::Test
     end
   end
 
-  # Both directions, same rule as builtins/attach: without a withdrawn set the
-  # sugar section could degenerate into a yes-machine and stay green.
+  # The non-empty requirement is gone here too (this is one of the sets that
+  # empties as the surfaces come back). On the sugar half, absence is carried by
+  # the `pkt.zz_absent_member` self-check and "present but lowered to something
+  # else" by the deliberately mismatched pair. What is left here is only the
+  # contract on what a record must contain.
   def test_sugar_gate_covers_both_directions
     refute_empty CAP.surface_sugar
-    refute_empty CAP::WITHDRAWN_SUGAR, "with an empty negative control the gate cannot detect its own decay"
     assert_empty(CAP.surface_sugar.map { |s| s[:sugar] } & CAP::WITHDRAWN_SUGAR.keys)
     CAP::WITHDRAWN_SUGAR.each do |spelling, info|
-      assert G::SUGAR_SHAPES.key?(info[:shape]), "#{spelling}: no probe shape"
+      # The withdrawn set is not guaranteed to be expressions. Un-withdrawing
+      # its last :expr entry (`pkt.byte_at`) left the reactor spelling of a
+      # withdrawn attach kind as the control, so the shape requirement is the one
+      # the gate actually applies -- an :expr claim needs a probe shape to sit in,
+      # an :attach claim IS the probe (and so needs the body hole and a return).
+      if (info[:form] || :expr) == :attach
+        assert_includes info[:sugar].to_s, "<BODY>", "#{spelling}: the attach form has no <BODY> hole"
+        refute_nil info[:ret], "#{spelling}: without a return value the handler does not close"
+      else
+        assert G::SUGAR_SHAPES.key?(info[:shape]), "#{spelling}: no probe shape"
+      end
       refute_nil info[:why]
       refute_nil info[:instead], "#{spelling}: does not say what to write instead"
     end
@@ -264,7 +409,8 @@ class AffordanceGateTest < Minitest::Test
   # The pkt.* chain claims are derived from the flat reader names, so the chain
   # surface cannot name a reader the flat surface does not have.
   def test_pkt_chain_claims_are_derived_from_the_flat_builtins
-    CAP.surface_sugar.select { |s| s[:id].to_s.start_with?("pkt_chain_") }.each do |s|
+    derived = CAP::SUGAR_PKT_CHAIN.map { |c| :"pkt_chain_#{c.tr('.', '_')}" }
+    CAP.surface_sugar.select { |s| derived.include?(s[:id]) }.each do |s|
       assert_equal s[:sugar].tr(".", "_"), s[:flat]
       assert_includes CAP.all_builtins, s[:flat], "#{s[:id]}: the flat side is not advertised as a builtin"
     end
@@ -332,11 +478,14 @@ class AffordanceGateTest < Minitest::Test
     assert_equal CAP::MAPS.size, CAP::MAPS.map { |m| m[:map] }.uniq.size
   end
 
-  # Both directions again: withdrawn types are the record of what left with the
-  # builtin and attach surfaces, and a type cannot be advertised and withdrawn at
-  # once.
+  # Withdrawn types are the record of what left with the builtin and attach surfaces, and
+  # a type cannot be advertised and withdrawn at once.
+  #
+      # The non-empty requirement is gone: the revived-type check is a set
+      # intersection rather than a test of a refusal path, so it was never a
+      # control on detection power in the first place (on the map half, that job
+      # belongs to the two self-checks). Porting all three types back empties it.
   def test_withdrawn_map_types_are_disjoint_and_documented
-    refute_empty CAP::WITHDRAWN_MAPS
     assert_empty(CAP::MAPS.map { |m| m[:type] }.uniq & CAP::WITHDRAWN_MAPS.keys)
     CAP::WITHDRAWN_MAPS.each do |t, info|
       refute_nil info[:went_with], "#{t}: does not record which surface it left with"
