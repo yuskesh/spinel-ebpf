@@ -909,6 +909,47 @@ module AffordanceGate
     body = File.read(CC_SOURCE)[/CC_WITHDRAWN_ATTACH\[\][^{]*\{(.*?)\n\};/m] or return nil
     body.scan(/\{\s*"([^"]+)"/).flatten
   end
+
+  # The comparison itself, lifted out of main so the self-check can drive it with
+  # perturbed inputs. `cc` = prefixes the codegen refuses on;
+  # `aff` = {kind => method_prefix} the affordance records as withdrawn.
+  # Matching is by SUBSTRING in both directions because a C refusal prefix is the
+  # `def` prefix without its trailing separator (`xdp_tail` vs `xdp_tail__`).
+  def correspondence(cc, aff)
+    out = []
+    cc.each { |p| out << [:codegen_only, p] unless aff.values.any? { |m| m.to_s.include?(p) } }
+    aff.each { |k, m| out << [:affordance_only, k] unless cc.any? { |p| m.to_s.include?(p) } }
+    out
+  end
+
+  # ---- the THIRD storey ------------------------------------------------------
+  # This gate already separates "can it still say no?" (a self-check, synthesised,
+  # never depletes) from "do the record and the refusals agree?" (correspondence,
+  # a statement ABOUT an inventory, vacuously true when the inventory is empty --
+  # and that is the correct answer). It then left the correspondence check itself
+  # with no control, and said so.
+  #
+  # That gap closed the moment the demoted surfaces were re-ported: BOTH sides are
+  # empty today, so the check compares [] with [] every run and prints orphan=0. A
+  # comparison that has quietly stopped comparing -- a broken regex, an `any?`
+  # that became `all?`, the substring rule inverted -- prints the identical line.
+  # The other four vocabularies have had this control for a while; this one is the
+  # asymmetry that was named in the gate's own follow-ups.
+  #
+  # The fix is the same move one storey up: do not anchor on a live entry (there
+  # are none, by design). SYNTHESISE one side and demand the named verdict. Both
+  # directions, because they are different code paths, and the failure this whole
+  # section exists for -- a refusal in the C that nothing probes any more -- is
+  # the `codegen_only` one.
+  SELFCHECK_CORR_PREFIX = "zz_selfcheck_no_such_prefix__"
+  def selfcheck_correspondence(cc, aff)
+    { codegen_only:
+        correspondence(cc + [SELFCHECK_CORR_PREFIX], aff)
+          .any? { |d, w| d == :codegen_only && w == SELFCHECK_CORR_PREFIX } ? :codegen_only : :MISSED,
+      affordance_only:
+        correspondence(cc, aff.merge(:zz_selfcheck_kind => SELFCHECK_CORR_PREFIX))
+          .any? { |d, w| d == :affordance_only && w == :zz_selfcheck_kind } ? :affordance_only : :MISSED }
+  end
 end
 
 # --- main -----------------------------------------------------------------
@@ -995,19 +1036,19 @@ end
 # empty, which is where re-porting the demoted surfaces is heading.
 cc_prefixes = nil
 aorphan = []   # a refusal and its record that no longer point at each other
+corrself = {}  # the correspondence check's own control (the third storey)
 if do_attach
   cc_prefixes = AffordanceGate.cc_withdrawn_attach_prefixes
   abort "affordance gate: could not read CC_WITHDRAWN_ATTACH out of\n" \
         "  #{AffordanceGate::CC_SOURCE}\n" \
         "  That table is what actually refuses a withdrawn attach kind; if the gate cannot\n" \
         "  see it, it cannot tell an empty refusal set from an unreadable one." if cc_prefixes.nil?
-  aprefixes = CAP::WITHDRAWN_ATTACH.values.map { |w| w[:method_prefix].to_s }
-  cc_prefixes.each do |p|
-    aorphan << [:codegen_only, p] unless aprefixes.any? { |m| m.include?(p) }
-  end
-  CAP::WITHDRAWN_ATTACH.each do |k, w|
-    aorphan << [:affordance_only, k] unless cc_prefixes.any? { |p| w[:method_prefix].to_s.include?(p) }
-  end
+  aff_prefixes = CAP::WITHDRAWN_ATTACH.transform_values { |w| w[:method_prefix].to_s }
+  aorphan = AffordanceGate.correspondence(cc_prefixes, aff_prefixes)
+  # ...and prove, this run, that the comparison above can still produce each of
+  # its two verdicts. Both sides are empty in the current tree, so without this
+  # the line "orphan=0" is printed by a check that never compared anything.
+  corrself = AffordanceGate.selfcheck_correspondence(cc_prefixes, aff_prefixes) unless only
 end
 # Same rule for sugar: a claim this gate cannot write is a claim nothing checks.
 if do_sugar
@@ -1224,6 +1265,13 @@ if do_attach
               cc_prefixes.size, aorphan.size)
   puts format("  attach   self-check       %s",
               aself.empty? ? "(skipped: --only)" : aself.map { |k, v| "#{k}=#{v}" }.join(" "))
+  # The correspondence check's own control. Printed on its own line rather than
+  # folded into `attach self-check` because it is a different STOREY: the line
+  # above proves the gate can still probe a surface, this one proves the
+  # comparison between the two inventories still compares. Both sides being empty
+  # is exactly when the difference stops being visible.
+  puts format("  attach   corr-check       %s",
+              corrself.empty? ? "(skipped: --only)" : corrself.map { |k, v| "#{k}=#{v}" }.join(" "))
 end
 if do_sugar
   puts format("  sugar    advertised  %3d  broken=%d", sugars.size, sbroken.size)
@@ -1402,6 +1450,23 @@ unless only
             "  #{aself[:body_missing].inspect}). This is stage 2 of the attach verdict and it is the only\n" \
             "  one that sees `on :timer`: its advertised SEC (\"syscall\") is the same string the\n" \
             "  silent degradation emits, so a SEC comparison alone calls it fine."
+    end
+    # The third storey. Not "can the gate probe a surface" but "does the
+    # comparison between the affordance's record and the codegen's refusals still
+    # compare". Today both sides are EMPTY, so `orphan=0` is printed by a check
+    # with no live input -- a broken regex or an inverted match reads identically.
+    if corrself[:codegen_only] != :codegen_only
+      abort "\naffordance gate: the correspondence self-check did not catch a codegen-only refusal\n" \
+            "  (got #{corrself[:codegen_only].inspect}). A prefix the codegen refuses on, which no\n" \
+            "  affordance entry records, was reported as corresponding -- so `orphan=0` above means\n" \
+            "  nothing. That direction is the failure this section exists for: a refusal nothing\n" \
+            "  probes any more, and nothing says so."
+    end
+    if corrself[:affordance_only] != :affordance_only
+      abort "\naffordance gate: the correspondence self-check did not catch an affordance-only\n" \
+            "  record (got #{corrself[:affordance_only].inspect}). A withdrawn entry with no refusal\n" \
+            "  behind it was reported as corresponding, so the affordance could advertise a\n" \
+            "  refusal the codegen does not perform."
     end
   end
   if do_maps

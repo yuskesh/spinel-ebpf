@@ -12,7 +12,7 @@
 # Run:
 #   ./build/open_coded_loop_demo/open_coded_loop_demo &
 #   ls /etc/  # triggers openat
-#   bpftool map dump name open_coded_loop_top_total
+#   bpftool map dump name open_coded_loop
 
 @total = 0
 

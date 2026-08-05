@@ -35,6 +35,12 @@
 #      say. That yields a program that is quietly broken: no span comes out, and it
 #      still exits 0. The required sets in the capability data catch it.
 #
+#   6. A `kernel_cache` declaration, which the production generator never implemented.
+#      This one had the worst silence of the lot: partitioning announced an eBPF
+#      method for it, the generator emitted a .bpf.c with no programs in it, the
+#      build succeeded, and the binary printed "BPF loaded and attached" and served
+#      nothing -- exit 0 all the way through.
+#
 # It also rejects enumerable blocks such as `[1,2,3].map { }`, which cannot run in
 # eBPF and which partitioning does not catch.
 #
@@ -46,6 +52,7 @@ require "set"
 require_relative "capabilities"
 require_relative "codegen_bpf"
 require_relative "param"
+require_relative "kernel_cache"   # check (6) needs the declaration parser
 
 module SpinelEbpf
   module Validate
@@ -105,7 +112,44 @@ module SpinelEbpf
       check_zero_arg_builtins!(ast, result)                # (3)
       check_unknown_builtins!(unknown)                     # (4)
       check_required_sets!(used)                           # (5)
+      check_kernel_cache_unported!(ast)                    # (6)
       nil
+    end
+
+    # (6) `kernel_cache "/path", body` -- a top-level directive that reaches NOTHING.
+    # It was built in the retired Ruby generator; the port to C never carried it, and
+    # the later re-port of the TCP-slice bundle did not include the kernel_cache
+    # branch either. Measured before this check existed:
+    #
+    #   partitioning  says `ebpf  xdp__tcp_slice__kernel_cache`
+    #   generation    emits an EMPTY .bpf.c ("ebpf-eligible methods: 0")
+    #   --build       succeeds; the binary prints "BPF loaded and attached"
+    #   running it    `bpftool prog show` = 0 programs, curl on :8080 refused, exit 0
+    #
+    # The three orphaned map lookups (bpf_kc_resp and its two companions) were once
+    # recorded in the loader contract on the argument that the hole was loud, because
+    # sp_kc_set returns -2. It is loud only if the caller LOOKS: the shipped demo
+    # discarded the value and printed a success message. So the hole was silent in
+    # exactly the shape this file exists to forbid, and it is closed here -- at the
+    # layer that can still see the word the author wrote, rather than at a
+    # `find_map_by_name` that returns NULL.
+    def check_kernel_cache_unported!(ast)
+      decls = SpinelEbpf::KernelCache.declarations(ast)
+      return if decls.empty?
+      paths = decls.map { |d| d.path.inspect }.join(", ")
+      raise Error,
+            "`kernel_cache` is not implemented by the production codegen (#{decls.length} " \
+            "declaration(s): #{paths}).\n" \
+            "  Why: it was built in the retired Ruby generator only. The C codegen never " \
+            "carried it, and the later re-port of the pure-XDP TCP slice did not include the " \
+            "kernel_cache branch. Measured: the generated .bpf.c contains zero programs, the " \
+            "build succeeds, the binary prints \"BPF loaded and attached\", and nothing is " \
+            "ever served.\n" \
+            "  Fix: serve the route from userspace (examples/http_server/), or write the fast " \
+            "path yourself with `def xdp__tcp_slice__<name>` (one fixed response) -- that one " \
+            "IS in the production codegen.\n" \
+            "  Not a silent no-op any more: the three orphaned map lookups (bpf_kc_resp and " \
+            "its length and checksum companions) have been removed, and this refuses instead."
     end
 
     # (1) Reject an attach handler that fell back to native because it cannot run

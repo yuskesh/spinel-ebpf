@@ -19,8 +19,11 @@
 #   # Generate kernel activity:
 #   ls /etc /tmp >/dev/null   # triggers do_sys_openat2
 #   ps >/dev/null              # may trigger context switches
-#   bpftool map dump name probes_event_l_top_open_count
-#   bpftool map dump name probes_event_l_top_switch_count
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `probes_event_l_` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep probes_event_l_
+#   bpftool map dump id <the id printed above>
 
 @open_count   = 0
 @switch_count = 0

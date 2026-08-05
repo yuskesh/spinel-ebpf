@@ -8,7 +8,7 @@
 # Run:
 #   ./build/timer_event_loop/timer_event_loop &
 #   sleep 5
-#   bpftool map dump name timer_event_loop_top_ticks
+#   bpftool map dump name timer_event_loo
 #   # Expect ~5 ticks
 
 @ticks = 0

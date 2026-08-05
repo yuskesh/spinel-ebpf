@@ -58,46 +58,185 @@ module SpinelEbpf
     #
     # MethodEmitter::DPATH_OK_SECS in codegen_bpf.rb reads this constant. The production
     # C generator carries its own copy, and the unit tests keep the two in agreement.
+    #
+    # **`measured` only ever said "it loads".** What a user actually wants to know is
+    # whether the policy they wrote will FIRE, so all 32 hooks were then measured to
+    # actual firing, and these columns were added:
+    #
+    #   fire:   :deny      fires, and the denial itself was observed (hooks with a verdict)
+    #           :observe   firing observed, but the RETURN VALUE IS IGNORED (fentry/fexit
+    #                      carry no verdict, and a void hook runs after creds are settled)
+    #                      -- auditing only
+    #           :load_only only the load was ever confirmed  <- none left
+    #   by:     the operation that was OBSERVED to reach this hook. Not "the operation
+    #           you would expect to" -- close(2) does NOT reach filp_close, stat(2) does
+    #           NOT reach vfs_getattr, and open(2) does NOT reach dentry_open.
+    #   fired:  where that firing was measured (a weak tier owes its evidence, the same
+    #           rule this tree applies to a map claim)
+    #   caveat: present only on hooks where the obvious operation does not reach them, or
+    #           where the path they render is not the one you expect. **This is the most
+    #           valuable column in the registry** -- the silent misreadings collect here.
+    #   no_select: present only on hooks where the path is readable but is NOT the path
+    #           the caller sees, so selecting on it (`path_eq` / `path_starts_with` /
+    #           `path_contains`) is structurally wrong (4 today). A prose caveat was the
+    #           first answer; a compile-time refusal is the right one, because the
+    #           generator knows both facts at compile time -- which builtin was written
+    #           and under which SEC -- so the C side (`CcDpathHook.no_select`) dies. The
+    #           ASYMMETRY is the point: `emit_path` (recording) and `parent_path_eq`
+    #           (whose path comes from the task chain) still compile on the same hook.
+    #           The unit tests keep this set equal to the C one.
+    #
+    # Note: an `lsm/*` program ATTACHES AND THEN SAYS NOTHING unless `bpf` is among the
+    # active LSMs (measured twice, most recently with one probe counting 605 hits on a
+    # kernel booted with it and 0 on one without). `fmod_ret` / `fentry` / `fexit` are
+    # tracing programs and do not depend on it. That is a property of the KIND, not of
+    # an individual hook, so it is reported by `lsm_active_required?`.
     DPATH_HOOKS = {
       # --- the three hooks the gate was first built from ---
-      "lsm/file_open"                      => { form: :file,   guard: false, measured: "loads" },
-      "fmod_ret/security_file_open"        => { form: :file,   guard: false, measured: "loads" },
-      "fmod_ret/security_file_permission"  => { form: :file,   guard: false, measured: "loads; the LSM form of the same hook does not" },
+      "lsm/file_open"                      => { form: :file,   guard: false, measured: "loads",
+        fire: :deny,    by: "open(2)",                                fired: "per-hook probe in the firing sweep" },
+      "fmod_ret/security_file_open"        => { form: :file,   guard: false, measured: "loads",
+        fire: :deny,    by: "open(2)",                                fired: "per-hook probe in the firing sweep" },
+      "fmod_ret/security_file_permission"  => { form: :file,   guard: false, measured: "loads; the LSM form of the same hook does not",
+        fire: :deny,    by: "an access check on read(2) / write(2) and friends",
+        fired: "per-hook probe in the firing sweep" },
       # --- argument is a `struct file *` ---
-      "lsm/mmap_file"                      => { form: :file,   guard: true,  measured: "loads only with the null guard: the argument is file__nullable" },
-      "lsm/file_ioctl"                     => { form: :file,   guard: false, measured: "loads" },
-      "lsm/file_lock"                      => { form: :file,   guard: false, measured: "loads" },
-      "lsm/file_receive"                   => { form: :file,   guard: false, measured: "loads" },
+      "lsm/mmap_file"                      => { form: :file,   guard: true,  measured: "loads only with the null guard: the argument is file__nullable",
+        fire: :deny,    by: "mmap(2) mapping a file",                 fired: "per-hook probe in the firing sweep" },
+      "lsm/file_ioctl"                     => { form: :file,   guard: false, measured: "loads",
+        fire: :deny,    by: "ioctl(2)",                               fired: "per-hook probe in the firing sweep",
+        caveat: "an ioctl on a regular file fails with **ENOTTY** even when nothing blocks it, " \
+                "so judge a denial by the ERRNO, not by whether the call succeeded " \
+                "(measured: target = EPERM, control = ENOTTY)" },
+      "lsm/file_lock"                      => { form: :file,   guard: false, measured: "loads",
+        fire: :deny,    by: "flock(2)",                               fired: "per-hook probe in the firing sweep" },
+      "lsm/file_receive"                   => { form: :file,   guard: false, measured: "loads",
+        fire: :deny,    by: "recvmsg(2) receiving an fd over SCM_RIGHTS",
+        fired: "per-hook probe in the firing sweep" },
       # --- argument is a `struct linux_binprm *` (exec) ---
-      "lsm/bprm_check_security"            => { form: :binprm, guard: true,  measured: "loads with the null guard" },
-      "lsm/bprm_creds_for_exec"            => { form: :binprm, guard: true,  measured: "loads with the null guard" },
-      "lsm/bprm_committed_creds"           => { form: :binprm, guard: true,  measured: "loads with the null guard" },
+      "lsm/bprm_check_security"            => { form: :binprm, guard: true,  measured: "loads with the null guard",
+        fire: :deny,    by: "execve(2)",                              fired: "the end-to-end deny run" },
+      "lsm/bprm_creds_for_exec"            => { form: :binprm, guard: true,  measured: "loads with the null guard",
+        fire: :deny,    by: "execve(2)",                              fired: "per-hook probe in the firing sweep" },
+      "lsm/bprm_committed_creds"           => { form: :binprm, guard: true,  measured: "loads with the null guard",
+        fire: :observe, by: "execve(2)",                              fired: "per-hook probe in the firing sweep",
+        caveat: "**a void hook** -- it fires, but the return value is thrown away, because it " \
+                "runs after the credentials are settled. Returning `-1` here was measured to " \
+                "let the exec succeed anyway. Use it for auditing (emit_path) only" },
       # --- argument is already a `struct path *` ---
-      "lsm/path_unlink"                    => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_rename"                    => { form: :path,   guard: false, measured: "loads for both the old and the new path" },
-      "lsm/path_mkdir"                     => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_rmdir"                     => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_symlink"                   => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_link"                      => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_truncate"                  => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_chmod"                     => { form: :path,   guard: false, measured: "loads" },
-      "lsm/path_chown"                     => { form: :path,   guard: false, measured: "loads" },
-      "lsm/inode_getattr"                  => { form: :path,   guard: false, measured: "loads" },
-      "fmod_ret/security_path_truncate"    => { form: :path,   guard: false, measured: "loads" },
-      "fmod_ret/security_inode_getattr"    => { form: :path,   guard: false, measured: "loads" },
+      "lsm/path_unlink"                    => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "unlink(2) (ctx[0] is the PARENT directory)",
+        fired: "the end-to-end deny run" },
+      "lsm/path_rename"                    => { form: :path,   guard: false, measured: "loads for both the old and the new path",
+        fire: :deny,    by: "rename(2) (ctx[0]=old_dir, ctx[2]=new_dir; both are parent directories)",
+        fired: "per-hook probe in the firing sweep" },
+      "lsm/path_mkdir"                     => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "mkdir(2) (ctx[0] is the PARENT directory)",
+        fired: "per-hook probe in the firing sweep" },
+      "lsm/path_rmdir"                     => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "rmdir(2) (ctx[0] is the PARENT directory)",
+        fired: "per-hook probe in the firing sweep" },
+      "lsm/path_symlink"                   => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "symlink(2) (ctx[0] is the PARENT directory)",
+        fired: "per-hook probe in the firing sweep" },
+      "lsm/path_link"                      => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "link(2)",                                fired: "per-hook probe in the firing sweep",
+        caveat: "**the path is ctx[1] (new_dir)** -- the only member of this family where it is " \
+                "not ctx[0] (ctx[0] is old_dentry, which is not a `struct path *`)" },
+      "lsm/path_truncate"                  => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "truncate(2) (the path-based form)",      fired: "the end-to-end deny run",
+        caveat: "**ftruncate(2) and open(O_TRUNC) do not fire here** -- those start from a file and " \
+                "go to `security_file_truncate`, which is outside this gate. A policy written here " \
+                "against ftruncate was measured to be silently inert" },
+      "lsm/path_chmod"                     => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "chmod(2)",                               fired: "per-hook probe in the firing sweep" },
+      "lsm/path_chown"                     => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "chown(2)",                               fired: "per-hook probe in the firing sweep" },
+      "lsm/inode_getattr"                  => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "stat(2) / statx(2)",                     fired: "per-hook probe in the firing sweep" },
+      "fmod_ret/security_path_truncate"    => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "truncate(2) (the path-based form)",      fired: "the end-to-end deny run",
+        caveat: "**ftruncate(2) and open(O_TRUNC) do not fire here** (same granularity as " \
+                "lsm/path_truncate)" },
+      "fmod_ret/security_inode_getattr"    => { form: :path,   guard: false, measured: "loads",
+        fire: :deny,    by: "stat(2) / statx(2)",                     fired: "per-hook probe in the firing sweep" },
       # --- the kernel's own btf_allowlist_d_path. Observation only: fentry and fexit
-      # carry no verdict, so a deny written here is silently ignored. ---
-      "fentry/filp_close"                  => { form: :file,   guard: false, measured: "loads; observation only" },
-      "fexit/filp_close"                   => { form: :file,   guard: false, measured: "loads; observation only" },
-      "fentry/vfs_fallocate"               => { form: :file,   guard: false, measured: "loads; observation only" },
-      "fexit/vfs_fallocate"                => { form: :file,   guard: false, measured: "loads; observation only" },
-      "fentry/vfs_truncate"                => { form: :path,   guard: false, measured: "loads; observation only" },
-      "fexit/vfs_truncate"                 => { form: :path,   guard: false, measured: "loads; observation only" },
-      "fentry/dentry_open"                 => { form: :path,   guard: false, measured: "loads; observation only" },
-      "fexit/dentry_open"                  => { form: :path,   guard: false, measured: "loads; observation only" },
-      "fentry/vfs_getattr"                 => { form: :path,   guard: false, measured: "loads; observation only" },
-      "fexit/vfs_getattr"                  => { form: :path,   guard: false, measured: "loads; observation only" },
+      # carry no verdict, so a deny written here is silently ignored -- measured, not
+      # assumed. ---
+      "fentry/filp_close"                  => { form: :file,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "fd teardown at process exit (put_files_struct), O_CLOEXEC teardown " \
+                            "at exec (do_close_on_exec), dup2(2)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**close(2) does not fire here** -- on 7.1.5 close(2) calls `filp_flush` directly " \
+                "(measured with ftrace: filp_flush<-__arm64_sys_close 30 times, filp_close 0 times)" },
+      "fexit/filp_close"                   => { form: :file,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "fd teardown at process exit (put_files_struct), O_CLOEXEC teardown " \
+                            "at exec (do_close_on_exec), dup2(2)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**close(2) does not fire here** (same as fentry/filp_close)" },
+      "fentry/vfs_fallocate"               => { form: :file,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "fallocate(2)",                           fired: "per-hook probe in the firing sweep" },
+      "fexit/vfs_fallocate"                => { form: :file,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "fallocate(2)",                           fired: "per-hook probe in the firing sweep" },
+      "fentry/vfs_truncate"                => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "truncate(2) (the path-based form)",      fired: "per-hook probe in the firing sweep",
+        caveat: "**ftruncate(2) and open(O_TRUNC) do not fire here** (the path-based form only)" },
+      "fexit/vfs_truncate"                 => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "truncate(2) (the path-based form)",      fired: "per-hook probe in the firing sweep",
+        caveat: "**ftruncate(2) and open(O_TRUNC) do not fire here** (the path-based form only)" },
+      "fentry/dentry_open"                 => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "kernel-internal callers such as overlayfs's `ovl_path_open` and fsmount(2)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**open(2) does not fire here** (open goes through do_filp_open; measured 0 hits " \
+                "with ftrace). And the path you get is rendered against overlayfs's INTERNAL " \
+                "mount, not the path the caller used: the measurement saw `/f`, not " \
+                "`/tmp/x/low/f`. **It cannot be told apart from a same-named file in another " \
+                "directory**, so do not write a path selector here",
+        no_select: "the path is readable but is rendered against overlayfs's internal mount " \
+                   "(measured: `/f`), and the control file in a DIFFERENT directory rendered to " \
+                   "the same `/f` -- selection cannot work. Recording it with `emit_path` still " \
+                   "does. To select on open(2), write `def lsm__file_open` or " \
+                   "`def fmod_ret__security_file_open`" },
+      "fexit/dentry_open"                  => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "kernel-internal callers such as overlayfs's `ovl_path_open` and fsmount(2)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**open(2) does not fire here**, and the path is rendered against overlayfs's " \
+                "internal mount (same as fentry/dentry_open)",
+        no_select: "same as fentry/dentry_open (both sides rendered the path identically). To " \
+                   "select on open(2), write `def lsm__file_open` or " \
+                   "`def fmod_ret__security_file_open`" },
+      "fentry/vfs_getattr"                 => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "kernel-internal callers such as overlayfs copy-up (`ovl_copy_up_one`)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**stat(2) does not fire here** -- stat calls `vfs_getattr_nosec` directly " \
+                "(measured with ftrace: 79 hits on nosec against 0 on vfs_getattr). To watch " \
+                "stat, use `lsm/inode_getattr` or `fmod_ret/security_inode_getattr`. The path is " \
+                "also rendered against overlayfs's internal mount (`/f`) and cannot be told " \
+                "apart from a same-named file elsewhere",
+        no_select: "the path is readable but is rendered against overlayfs's internal mount " \
+                   "(measured: `/f`), so selection cannot work. Recording it with `emit_path` " \
+                   "still does. To select on stat(2), write `def lsm__inode_getattr` or " \
+                   "`def fmod_ret__security_inode_getattr`" },
+      "fexit/vfs_getattr"                  => { form: :path,   guard: false, measured: "loads; observation only",
+        fire: :observe, by: "kernel-internal callers such as overlayfs copy-up (`ovl_copy_up_one`)",
+        fired: "per-hook probe in the firing sweep",
+        caveat: "**stat(2) does not fire here** (same as fentry/vfs_getattr; use " \
+                "lsm/inode_getattr instead)",
+        no_select: "same as fentry/vfs_getattr. To select on stat(2), write " \
+                   "`def lsm__inode_getattr` or `def fmod_ret__security_inode_getattr`" },
     }.freeze
+
+    # The SECs where path SELECTION is structurally impossible (the `no_select` above).
+    # The C side (`CcDpathHook.no_select`) is what actually dies; this constant is what
+    # the user is TOLD. The unit tests keep the two SETS equal (the prose differs per
+    # language, and is not compared).
+    DPATH_NO_SELECT_SECS = DPATH_HOOKS.select { |_, v| v[:no_select] }.keys.freeze
+
+    # The builtins that are refused, and the ones that are still allowed on the very same
+    # hook. Both halves are named, because the asymmetry IS the claim: with only one half
+    # written down this would be indistinguishable from having withdrawn the hook.
+    DPATH_SELECT_BUILTINS  = %w[path_eq path_starts_with path_contains].freeze
+    DPATH_NONSELECT_BUILTINS = %w[emit_path emit_parent_path parent_path_eq].freeze
 
     # Hooks that were tried and **rejected**. They are not in the gate, but they are kept
     # here with the reason, because they are the evidence for the rule that nothing is
@@ -611,6 +750,37 @@ module SpinelEbpf
       CONTEXT_GATES[name]
     end
 
+    # Has this SEC been measured all the way to FIRING? nil when it is not in the gate.
+    def dpath_fire(sec)
+      DPATH_HOOKS[sec]
+    end
+
+    # An `lsm/*` program attaches and then SAYS NOTHING unless `bpf` is among the active
+    # LSMs (measured: the same probe counted 605 hits on a kernel booted with it, 0
+    # without). fmod_ret / fentry / fexit are tracing programs and do not depend on it.
+    # It is a property of the KIND, not of an individual hook.
+    def lsm_active_required?(sec)
+      sec.to_s.start_with?("lsm/")
+    end
+
+    # One hook on one line: what reaches it, whether a verdict is honoured, and the trap.
+    def dpath_fire_line(sec)
+      h = DPATH_HOOKS[sec] or return nil
+      tier = { deny: "fires, and the denial was observed",
+               observe: "fires, but **the return value is ignored**",
+               load_only: "**only the load was ever confirmed**" }[h[:fire]] || h[:fire].to_s
+      s = format("%s -- %s / reached by: %s [%s]", sec, tier, h[:by], h[:fired])
+      s += "\n      ! #{h[:caveat]}" if h[:caveat]
+      # Stated as a FACT, not a warning: a probe that selects on a path here does not
+      # compile at all, so a reader of `describe` cannot confuse "you cannot write this"
+      # with "you wrote it and it does nothing".
+      s += "\n      x path selection (#{DPATH_SELECT_BUILTINS.join(' / ')}) **fails at compile " \
+           "time** -- #{h[:no_select]} / recording (#{DPATH_NONSELECT_BUILTINS.join(' / ')}) is fine" if h[:no_select]
+      s += "\n      ! unless `bpf` is among the active LSMs this attaches and then **says " \
+           "nothing** (the counter simply stays 0)" if lsm_active_required?(sec)
+      s
+    end
+
     # Given a set of builtin names, return {domain => [names]} for the domains they
     # touch, with the names sorted.
     def domains_used(names)
@@ -797,6 +967,38 @@ module SpinelEbpf
               hooks = DPATH_HOOKS.select { |_, v| v[:form] == form }.keys
               out << format("    %s: %s\n", label, hooks.join(" | "))
             end
+            # The gate only ever guaranteed "this loads". Report the firing tiers.
+            # **Do not print all 32 as a wall** -- what a reader needs is which ones can
+            # deny, and which ones the obvious operation does not reach.
+            by_fire = DPATH_HOOKS.group_by { |_, v| v[:fire] }
+            out << format("    firing, as measured: %s\n",
+                          %i[deny observe load_only].map { |t|
+                            format("%s=%d", t, (by_fire[t] || []).length)
+                          }.join(" / "))
+            out << "      deny    = fires and the denial was observed (you can write policy)\n"
+            out << "      observe = fires, but **the return value is ignored** (auditing only)\n"
+            caveats = DPATH_HOOKS.select { |_, v| v[:caveat] }
+            unless caveats.empty?
+              out << "    ! hooks the obvious operation does not reach, or whose path is not " \
+                     "the one you expect (#{caveats.length}/#{DPATH_HOOKS.length}, measured):\n"
+              caveats.each { |sec, v| out << format("      %-34s %s\n", sec, v[:caveat]) }
+            end
+            # Four of those caveats said "do not write a path selector here"; they are now
+            # compile-time failures. Print BOTH halves -- refused and still allowed --
+            # because without the second half this reads as having withdrawn the hook.
+            unless DPATH_NO_SELECT_SECS.empty?
+              out << "    x path SELECTION structurally impossible = fails at compile time " \
+                     "(#{DPATH_NO_SELECT_SECS.length}/#{DPATH_HOOKS.length}):\n"
+              out << "      refused: #{DPATH_SELECT_BUILTINS.join(' / ')}   " \
+                     "allowed: #{DPATH_NONSELECT_BUILTINS.join(' / ')} (recording, and paths " \
+                     "that come from the task chain)\n"
+              DPATH_NO_SELECT_SECS.each do |sec|
+                out << format("      %-34s %s\n", sec, DPATH_HOOKS[sec][:no_select])
+              end
+            end
+            n_lsm = DPATH_HOOKS.keys.count { |s| lsm_active_required?(s) }
+            out << "    ! the `lsm/*` hooks (#{n_lsm} of them) attach and then say nothing " \
+                   "unless `bpf` is among the active LSMs\n"
             out << "    tried and rejected (kept out of the gate -- the same function can " \
                    "be allowed under one attach kind and refused under another):\n"
             DPATH_MEASURED_REJECTED.each { |sec, why| out << format("      %-32s %s\n", sec, why) }
@@ -1092,7 +1294,10 @@ module SpinelEbpf
     #      put it back in the affordance".
     #
     # `ctx` is the attach form a minimal probe needs, which is what the gate builds from.
-    # `why` says why demotion was chosen over porting.
+    # `why` says why demotion was chosen over porting, and `instead` says **what to
+    # write in its place**. The withdrawn attach kinds have carried `instead` for a
+    # while; the builtins used to bury the same thing inside the `why` prose, which is
+    # half the information for a consumer reading only the JSON.
     # ===================================================================
     WITHDRAWN = {
 # `reuseport_hash` and `worker_select` were withdrawn here and have since
@@ -1102,9 +1307,11 @@ module SpinelEbpf
 # `tail_call_to` was withdrawn here and has since been ported together with
 # the two halves it needs: the `xdp_tail__` attach kind and the PROG_ARRAY.
       "xdp_match_health" => { ctx: :xdp, arity: 0,
-                              why: "Part of the XDP_TX static-response path, a large piece including compile-time checksum precomputation. It was also measured to top out around 35-50% reliability for structural reasons, and was superseded by the pure-XDP TCP slice" },
+                              why: "Part of the XDP_TX static-response path, a large piece including compile-time checksum precomputation. It was also measured to top out around 35-50% reliability for structural reasons, and was superseded by the pure-XDP TCP slice",
+                              instead: "`def xdp__tcp_slice__health; XDP_PASS; end` -- the successor that answers the same /health without the kernel's TCP stack owning the connection. The generator emits the handshake, the retransmits and the FIN, so the structural 35-50% ceiling these two had is simply absent (the slice was measured at 100% sequentially)" },
       "xdp_reply_health" => { ctx: :xdp, arity: 0,
-                              why: "As above: the XDP_TX static-response path, superseded by the TCP slice" },
+                              why: "As above: the XDP_TX static-response path, superseded by the TCP slice",
+                              instead: "as above -- `def xdp__tcp_slice__health`. The two builtins were only ever used as a pair, so the replacement is the same single attach kind" },
 # `pkt_dynptr_byte_at` was withdrawn here and has since been ported, along
 # with its chain spelling `pkt.byte_at(off)`. The stated reason was that
 # the pkt_* and skb_load_* readers already cover the same read; what they
@@ -2638,6 +2845,62 @@ WITHDRAWN_SUGAR = {}.freeze
       (out + SUGAR_SINGLES).freeze
     end
 
+    # ===================================================================
+    # Making the sugar spellings VISIBLE TO INTROSPECTION.
+    #
+    # `describe` and `capabilities <file>` work out a probe's capability domains by
+    # scanning for flat builtin names, and the scan deliberately excludes anything
+    # after a dot (so that the receiver in `sk.foo` is not read as a builtin). The
+    # consequence was that the chain spelling `pkt.l4.proto` matched nothing at all:
+    # **the spelling this project recommends was the one whose affordance came back
+    # empty**. The generated C was identical throughout -- the equivalence claims are
+    # measured on every gate run -- so the only thing that disagreed was the
+    # introspection.
+    #
+    # No second table (that is the same design decision the equivalence claims made:
+    # "a reader that only the chain side knows about cannot structurally exist"). The
+    # entries are selected out of the one authority the gate already reads,
+    # `surface_sugar`:
+    #   * form is :expr or :stmt (an attach form's spelling is a method name)
+    #   * the sugar is ONE dotted identifier chain -- optionally with a trailing
+    #     `(...)` argument list, or ` = <value>` / ` += <value>`
+    #   * the head identifier on the flat side is a REGISTERED builtin
+    # so `XDP::PASS` (a constant, not a builtin), `5_000_000` (no dot) and the
+    # two-statement `t = kptr(...)` (head identifier `t`) drop out on their own. When a
+    # family gains a member, this and the gate gain it at the same time.
+    # ===================================================================
+    SUGAR_ALIAS_RE = /\A([a-z_]\w*(?:\.[a-z_]\w*)+)(?:\([^)]*\))?(?:\s*(\+?=)\s*\S+)?\z/.freeze
+
+    def sugar_builtin_aliases
+      bs = all_builtins
+      surface_sugar.filter_map do |s|
+        next unless %i[expr stmt].include?(s[:form])
+        m = SUGAR_ALIAS_RE.match(s[:sugar].to_s.strip) or next
+        flat = s[:flat].to_s[/\A[a-z_]\w*/]
+        next unless flat && bs.include?(flat)
+        { id: s[:id], sugar: s[:sugar], dotted: m[1], op: m[2], flat: flat }
+      end
+    end
+
+    # The regexp that finds an alias in source text. The one non-obvious point is **not
+    # confusing the read form with the write form**: `sk.snd_cwnd` (a reader) and
+    # `sk.snd_cwnd = 10` (a writer) lower to different builtins, so the read form
+    # excludes a following assignment with a negative lookahead. `==` is a comparison
+    # and is not excluded (the inner lookahead is what draws that line).
+    def sugar_alias_regexp(a)
+      base = "(?<![\\w.])#{Regexp.escape(a[:dotted])}(?![\\w])"
+      case a[:op]
+      when "="  then /#{base}\s*=(?!=)/
+      when "+=" then /#{base}\s*\+=/
+      else           /#{base}(?!\s*\+?=(?!=))/
+      end
+    end
+
+    # The flat builtin names (uniq) whose sugar spelling appears in comment-free source.
+    def sugar_alias_hits(code)
+      sugar_builtin_aliases.filter_map { |a| a[:flat] if code =~ sugar_alias_regexp(a) }.uniq
+    end
+
     # The enrichers, for reference. Without changing the probe at all, they
     # add attributes at run time, gated by environment variables. This is where an
     # author can see that pod attribution comes from the environment, not the probe.
@@ -2870,10 +3133,47 @@ WITHDRAWN_SUGAR = {}.freeze
         # Cross-links between related builtins -- pairings and families -- with the
         # facts needed to choose between them.
         builtin_groups: BUILTIN_GROUPS,
+        # **Withdrawn builtins.** The Ruby constant has existed for a while and
+        # tools/affordance_gate.rb reads it directly, but it was never published here
+        # (unlike withdrawn_sugar and withdrawn_maps). To a consumer reading only the
+        # JSON, "a name that was never advertised" and "a name whose advertisement was
+        # taken back" were indistinguishable -- and the second kind is exactly what a
+        # machine picks up from older prose and tries to write. Same silence the map
+        # vocabulary had, so it gets the same opening: `why` (what was wrong with it)
+        # and `instead` (what to write in its place) travel together.
+        withdrawn: WITHDRAWN,
         attach_kinds: ATTACH_KINDS,
+        # Withdrawn attach kinds. Kept in a separate table from the builtins because the
+        # silence has a different quality: an unported builtin dies, an unported attach
+        # kind exits 0 and degrades to SEC("syscall").
+        withdrawn_attach: WITHDRAWN_ATTACH,
         context_gates: CONTEXT_GATES.map { |n, g|
           { builtin: n, domain: g[:domain], valid_secs: g[:valid_secs] }
         },
+        # `valid_secs` only ever meant "this compiles". Compiling and firing are
+        # different things -- of these 32 hooks, only 4 had ever had their firing
+        # measured -- so each hook says what reaches it, whether its return value is
+        # honoured, and whether the obvious operation misses it. For a machine author
+        # this is the only machine-readable ground for "will the policy I wrote be
+        # silent".
+        dpath_hooks: DPATH_HOOKS.map { |sec, h|
+          { sec: sec, form: h[:form], guard: h[:guard], load_measured: h[:measured],
+            fire: h[:fire], fired_by: h[:by], fire_measured: h[:fired],
+            caveat: h[:caveat],
+            # Non-nil = path SELECTION is structurally impossible, so path_eq /
+            # path_starts_with / path_contains fail at compile time. emit_path and
+            # parent_path_eq still compile.
+            no_select: h[:no_select],
+            lsm_active_required: lsm_active_required?(sec) }
+        },
+        # A summary of the `no_select` above: what is refused, and what is still allowed
+        # on the same hook. The asymmetry is the claim, so neither half is published
+        # without the other.
+        dpath_no_select: { secs: DPATH_NO_SELECT_SECS,
+                           refused_builtins: DPATH_SELECT_BUILTINS,
+                           allowed_builtins: DPATH_NONSELECT_BUILTINS,
+                           measured: "firing sweep of all 32 gated hooks; refused at compile time" },
+        dpath_rejected: DPATH_MEASURED_REJECTED,
         ruby_subset: RUBY_SUBSET,
         # Surface sugar. ruby_subset is prose, so it cannot answer "can I write
         # pkt.l4.proto" mechanically -- which is why that spelling went on being

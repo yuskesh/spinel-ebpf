@@ -143,6 +143,140 @@ class CapabilitiesTest < Minitest::Test
     end
   end
 
+  # Being in the gate only ever meant "this compiles". Of the 32 hooks, only 4 had
+  # ever had their FIRING measured; the other 28 were advertised flat, on the
+  # strength of loading. Now that there is a firing tier, enforce the rule this
+  # tree applies everywhere: **the weaker the tier, the more evidence it owes.**
+  def test_dpath_hooks_carry_measured_firing_behaviour
+    CAP::DPATH_HOOKS.each do |sec, spec|
+      assert_includes %i[deny observe load_only], spec[:fire], "#{sec}: unknown firing tier"
+      refute_empty spec[:by].to_s,    "#{sec}: needs to say WHAT REACHES IT (separate from loading)"
+      refute_empty spec[:fired].to_s, "#{sec}: needs to say where that firing was measured"
+      # The weakest tier (never seen to fire) cannot be listed without a reason.
+      if spec[:fire] == :load_only
+        refute_empty spec[:caveat].to_s,
+                     "#{sec}: listing it as load_only requires saying why firing could not be measured"
+      end
+    end
+    # After the sweep, no hook is stuck at "it loads".
+    assert_empty CAP::DPATH_HOOKS.select { |_, v| v[:fire] == :load_only }.keys
+  end
+
+  # The central invariant: **fentry and fexit carry no verdict**, so a `-1`
+  # written there is thrown away by the generated wrapper ((void)inner(...);
+  # return 0;). A registry that called such a hook :deny would be claiming "you
+  # can block here" -- a lie that compiles, loads and passes the verifier, which
+  # is to say one that nothing else can catch. Forbid it structurally.
+  def test_tracing_hooks_never_claim_deny
+    # Do not hand-write "which attach kinds carry a verdict" into the test --
+    # **read it from the production C generator**, which is what emits the
+    # wrapper (`a->verdict = 1` is what splits `return (int)inner(...)` from
+    # `(void)inner(...); return 0;`). If the registry disagreed with that, the
+    # claim "you can block here" would be false.
+    src = File.read(File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__))
+    verdict_by_prefix = %w[lsm fmod_ret fentry fexit].to_h { |p|
+      line = src[/^.*cc_starts\(name, "#{p}__".*$/]
+      refute_nil line, "#{p}__ attach detection is not where it was in the C codegen"
+      [p, line.include?("a->verdict = 1")]
+    }
+    # Pin the premise itself (a fact about the C side) before relying on it.
+    assert_equal({ "lsm" => true, "fmod_ret" => true, "fentry" => false, "fexit" => false },
+                 verdict_by_prefix, "which attach kinds carry a verdict changed in the C codegen")
+
+    CAP::DPATH_HOOKS.each do |sec, spec|
+      prefix = sec.split("/").first
+      next if spec[:fire] != :deny
+
+      assert verdict_by_prefix[prefix],
+             "#{sec}: #{prefix} carries no verdict in the C codegen (the return value is " \
+             "discarded), so it cannot claim :deny"
+    end
+    # Spell it out: not one fentry/fexit hook is :deny.
+    assert_empty CAP::DPATH_HOOKS.select { |s, v|
+      s.start_with?("fentry/", "fexit/") && v[:fire] == :deny
+    }.keys
+    # A void hook is the same story for a different reason (it runs after the
+    # credentials are settled), and that was measured too.
+    assert_equal :observe, CAP::DPATH_HOOKS["lsm/bprm_committed_creds"][:fire]
+    # And the other direction: hooks that do carry a verdict, and were measured
+    # denying, stay :deny.
+    assert_equal :deny, CAP::DPATH_HOOKS["lsm/path_unlink"][:fire]
+    assert_equal :deny, CAP::DPATH_HOOKS["fmod_ret/security_file_open"][:fire]
+  end
+
+  # The hooks the obvious operation does not reach are where the SILENT
+  # misreadings live, so dropping a caveat has to fail. This is the most valuable
+  # thing the sweep produced.
+  def test_silently_unreachable_hooks_keep_their_caveat
+    {
+      "fentry/filp_close"  => "close(2)",     # close(2) calls filp_flush directly
+      "fexit/filp_close"   => "close(2)",
+      "fentry/vfs_getattr" => "stat(2)",      # stat calls vfs_getattr_nosec directly
+      "fexit/vfs_getattr"  => "stat(2)",
+      "fentry/dentry_open" => "open(2)",      # open goes through do_filp_open
+      "fexit/dentry_open"  => "open(2)",
+      "lsm/path_truncate"  => "ftruncate(2)", # a policy written here was measured inert
+      "fmod_ret/security_path_truncate" => "ftruncate(2)",
+    }.each do |sec, obvious|
+      cav = CAP::DPATH_HOOKS[sec][:caveat].to_s
+      refute_empty cav, "#{sec}: nobody can discover \"#{obvious} does not reach this\" on their own"
+      assert_includes cav, obvious, "#{sec}: the caveat does not name #{obvious}"
+      assert_includes cav, "not fire here", "#{sec}: the caveat must say so outright"
+    end
+  end
+
+  # Four of those caveats said "do not write a path selector here", and those are
+  # now compile-time failures. The refusal happens on the **C side**
+  # (`CcDpathHook.no_select`); this registry is what the user is TOLD. **If the
+  # two sets disagree, the affordance says a spelling is writable that dies, or
+  # the reverse**, so compare them. The prose differs per language and is not
+  # compared.
+  def test_no_select_set_matches_the_c_codegen
+    src = File.read(File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__))
+    table = src[/static const CcDpathHook CC_DPATH_OK\[\] = \{(.*?)\n\};/m]
+    refute_nil table, "CC_DPATH_OK is not where it was in the C codegen"
+    # An entry with `no_select` is one where a further string follows the fourth
+    # (measured); they are written with the CC_DP_NOSEL_OVL macro, so the SEC line
+    # is followed by `CC_DP_NOSEL_OVL(`.
+    c_secs = table.scan(/\{\s*"([^"]+)",\s*CC_DP_\w+,\s*\d,\s*"[^"]*",\s*\n?\s*CC_DP_NOSEL_OVL\(/m).flatten
+    assert_equal CAP::DPATH_NO_SELECT_SECS.sort, c_secs.sort,
+                 "the affordance's no_select set and the C codegen's refusal set disagree " \
+                 "(move one alone and a spelling the affordance calls writable dies, or vice versa)"
+    # If it ever empties, the asymmetric gate has vanished wholesale, so fail on
+    # that too. (A control anchored on an inventory usually rots -- this one is a
+    # claim ABOUT the inventory, so an empty inventory is the failure.)
+    assert_equal 4, CAP::DPATH_NO_SELECT_SECS.length
+    CAP::DPATH_NO_SELECT_SECS.each do |sec|
+      why = CAP::DPATH_HOOKS[sec][:no_select].to_s
+      assert_includes why, "emit_path", "#{sec}: without WHAT STILL WORKS this reads as a withdrawn hook" \
+        if sec.include?("fentry")   # spell it out on the two representatives; the rest say "same as"
+      refute_empty why, "#{sec}: needs the reason selection cannot work"
+    end
+    # The asymmetry itself: the refused spellings and the allowed ones are disjoint.
+    assert_empty(CAP::DPATH_SELECT_BUILTINS & CAP::DPATH_NONSELECT_BUILTINS)
+    # And the allowed side really is d_path-gated (a typo there erases the point).
+    (CAP::DPATH_SELECT_BUILTINS + CAP::DPATH_NONSELECT_BUILTINS).each do |b|
+      refute_nil CAP.gate_for(b), "#{b} is not a builtin in the d_path gate"
+    end
+  end
+
+  # An `lsm/*` program attaches and then says nothing unless `bpf` is among the
+  # active LSMs. That is a property of the KIND, not of an individual hook
+  # (measured: 605 hits on a kernel booted with it, 0 without).
+  def test_lsm_active_dependency_is_by_kind_not_by_hook
+    assert CAP.lsm_active_required?("lsm/file_open")
+    refute CAP.lsm_active_required?("fmod_ret/security_file_open")
+    refute CAP.lsm_active_required?("fentry/vfs_truncate")
+    assert_equal 18, CAP::DPATH_HOOKS.keys.count { |s| CAP.lsm_active_required?(s) }
+    # The one-line rendering carries the tier, what reaches it and the trap
+    # (describe and capabilities share it).
+    line = CAP.dpath_fire_line("fentry/vfs_getattr")
+    assert_includes line, "the return value is ignored"
+    assert_includes line, "stat(2) does not fire here"
+    assert_includes line, "firing sweep"
+    assert_nil CAP.dpath_fire_line("kprobe/do_sys_openat2"), "outside the gate must be nil"
+  end
+
   # The gate lives in two places -- the production C codegen and the Ruby registry.
   # Widening one alone gives "compiles under C, dies under the Ruby fallback", so
   # parse the table out of the C source and compare.
@@ -265,6 +399,47 @@ class CapabilitiesTest < Minitest::Test
     end
     assert_equal CAP.all_builtins.count { |x| CAP.signature_for(x)[:opaque] },
                  doc["summary"]["opaque_builtins"]
+  end
+
+  # ================================================================
+  # **The record of a demotion was invisible to a consumer reading only the JSON.**
+  #
+  # `withdrawn_sugar` and `withdrawn_maps` were published; `withdrawn` (builtins)
+  # and `withdrawn_attach` were not. The constants existed and
+  # tools/affordance_gate.rb read them directly, so the gate worked -- the silence
+  # was in the SHIPPED ARTEFACT only, the same shape the map vocabulary had
+  # (absence, not a lie).
+  #
+  # The invariant runs **both ways**: add a constant and forget to wire it into
+  # the JSON and this fails; delete the JSON key and it fails. The contents are
+  # compared too, so a key wired to the wrong constant
+  # (`withdrawn_attach: WITHDRAWN`) fails as well.
+  # ================================================================
+  def test_every_withdrawn_constant_is_published_in_the_json
+    require "json"
+    doc = JSON.parse(CAP.affordance_json)
+    consts = CAP.constants.grep(/\AWITHDRAWN/).sort
+    refute_empty consts, "there are no WITHDRAWN* constants at all (this test guards nothing)"
+    expected = consts.map { |c| c.to_s.downcase }.sort
+    assert_equal expected, doc.keys.grep(/\Awithdrawn/).sort,
+                 "the JSON's withdrawn* keys do not match the Ruby WITHDRAWN* constants " \
+                 "(one side gained or lost an entry)"
+    # Present is not enough -- each key must carry THAT constant.
+    consts.each do |c|
+      assert_equal CAP.const_get(c).keys.map(&:to_s).sort, doc[c.to_s.downcase].keys.sort,
+                   "#{c} and the JSON's #{c.to_s.downcase} point at different contents"
+    end
+  end
+
+  # A demotion must not be a dead end. The withdrawn attach kinds have carried
+  # this contract for a while; the builtins now match it. "You cannot use this"
+  # is half the information.
+  def test_withdrawn_builtins_carry_reason_and_alternative
+    CAP::WITHDRAWN.each do |name, rec|
+      assert rec[:why] && rec[:why].length > 20, "#{name}: why is too short"
+      assert rec[:instead] && rec[:instead].length > 20,
+             "#{name}: no instead (without what to write in its place, a demotion is a dead end)"
+    end
   end
 
   # (completeness) every attach kind fills in its how-to-write-it fields, and the

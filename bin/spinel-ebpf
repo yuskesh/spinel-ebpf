@@ -1281,12 +1281,7 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
         end
       end
     end
-    # declared kernel_cache paths (declaration order = XDP slots),
-    # read back from the .ast we produced, so the sp_kc_set glue can resolve
-    # path -> slot.
     kc_ast_file = File.join(build_dir, "#{base}.ast")
-    kc_paths = File.exist?(kc_ast_file) ?
-      SpinelEbpf::KernelCache.declarations(SpinelEbpf::ParseSpinelAst.parse_file(kc_ast_file)).map(&:path) : []
     # The same read-back for `param` -- the loader needs the name (to find the
     # rodata field the codegen emitted) and the env var it answers to.
     params = with_ebpf ? SpinelEbpf::Param.declarations_from_ast_file(kc_ast_file) : []
@@ -1300,7 +1295,6 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
                                     reactor_usdts: reactor_usdts,
                                     reactor_perf_events: reactor_perf_events,
                                     kprobe_multis: kprobe_multis,
-                                    kernel_cache_paths: kc_paths,
                                     params: params,
                                     filter_keys: filter_keys,
                                     # The userspace consumer filter. Read from the
@@ -1450,7 +1444,7 @@ end
 def build_glue_c(base, skel_name, with_dispatch: false,
                  reactor_uprobes: [], reactor_usdts: [], reactor_perf_events: [],
                  kprobe_multis: [],
-                 kernel_cache_paths: [], params: [], filter_keys: [], keep_filters: [],
+                 params: [], filter_keys: [], keep_filters: [],
                  with_otlp: false)
   storage = with_dispatch ? "" : "static "
 
@@ -1644,18 +1638,6 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         return (int)spnl_otlp_xlayer_l34_count_obj(_spnl_skel->obj, "#{_hist_map}", fd, 2);
     }
   SHIM
-
-  # kernel_cache path->slot table (declaration order matches the
-  # XDP match_route() slots). sp_kc_set(path, body) resolves the path to its slot.
-  kc_paths_decl =
-    if kernel_cache_paths.empty?
-      "static const char *const _spnl_kc_paths[1] = {0};\n" \
-      "    static const int _spnl_kc_npaths = 0;"
-    else
-      list = kernel_cache_paths.map { |p| p.inspect }.join(", ")
-      "static const char *const _spnl_kc_paths[] = { #{list} };\n" \
-      "    static const int _spnl_kc_npaths = #{kernel_cache_paths.length};"
-    end
 
   # `param` and `filter_by`: the two runtime knobs.
   # Both are `volatile const` in .rodata that the codegen emitted; `bpftool gen
@@ -2999,57 +2981,6 @@ def build_glue_c(base, skel_name, with_dispatch: false,
         if (fd < 0) return fd;
         __u32 k = ip_host_order;
         return bpf_map_delete_elem(fd, &k);
-    }
-
-    /* kernel_cache response populate (multi-route). Ruby side:
-     *   module KCache
-     *     ffi_func :sp_kc_set, [:str, :str], :int
-     *   end
-     * and the kernel_cache directive calls sp_kc_set(path, body) at startup. We
-     * resolve `path` to its slot (declaration order = XDP match_route slots),
-     * build the full HTTP/1.0 response (framing the body), zero-pad to 256 bytes --
-     * the bpf_kc_resp[slot] map value -- so the XDP slice serves it. Returns -2 when
-     * the program has no kernel_cache (map absent), -4 for an undeclared path,
-     * <0 on overflow / errors. */
-    #{kc_paths_decl}
-    int sp_kc_set(const char *path, const char *body)
-    {
-        if (!_spnl_skel) return -1;
-        struct bpf_map *map = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP}");
-        if (!map) return -2;
-        int slot = -1;
-        for (int i = 0; i < _spnl_kc_npaths; i++) {
-            if (path && _spnl_kc_paths[i] && strcmp(path, _spnl_kc_paths[i]) == 0) { slot = i; break; }
-        }
-        if (slot < 0) return -4;          /* path was not declared with kernel_cache */
-        int fd = bpf_map__fd(map);
-        unsigned char buf[256];           /* must match KERNEL_CACHE_RESP_CAP */
-        memset(buf, 0, sizeof(buf));
-        int blen = body ? (int)strlen(body) : 0;
-        int n = snprintf((char *)buf, sizeof(buf),
-                         "HTTP/1.0 200 OK\\r\\nContent-Length: %d\\r\\n\\r\\n%s", blen, body ? body : "");
-        if (n < 0 || n >= (int)sizeof(buf)) return -3;   /* response too large for the cache slot */
-        __u32 k = slot;
-        /* record actual length so the XDP slice sizes the frame to 54+n
-         * (a SHRINK for real clients => native XDP_TX works on NICs that drop
-         * adjust_tail-GROWN frames, e.g. nxp_enetc4), and precompute the payload's
-         * partial TCP checksum (sum of 16-bit words in the kernel's native/LE order,
-         * see below) so the slice can checksum the variable-length payload via a FIXED 20-byte header
-         * bpf_csum_diff seeded with this -- no variable-length bpf_csum_diff (which
-         * the verifier rejects). Both maps are optional (older .bpf.o => CAP path). */
-        struct bpf_map *lmap = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP_LEN}");
-        if (lmap) { __u32 _ln = (__u32)n; bpf_map_update_elem(bpf_map__fd(lmap), &k, &_ln, BPF_ANY); }
-        struct bpf_map *cmap = bpf_object__find_map_by_name(_spnl_skel->obj, "#{lc::MAP_KC_RESP_CSUM}");
-        if (cmap) {
-            /* Match the kernel's csum_partial word order (native/LE on arm64):
-             * 16-bit words read little-endian, trailing odd byte = low byte. */
-            __u32 pc = 0;
-            for (int i = 0; i + 1 < n; i += 2) pc += (__u32)buf[i] | ((__u32)buf[i + 1] << 8);
-            if (n & 1) pc += (__u32)buf[n - 1];
-            while (pc >> 16) pc = (pc & 0xffff) + (pc >> 16);   /* fold to 16-bit partial */
-            bpf_map_update_elem(bpf_map__fd(cmap), &k, &pc, BPF_ANY);
-        }
-        return bpf_map_update_elem(fd, &k, buf, BPF_ANY);
     }
 
     /* CIDR blocklist FFI (LPM_TRIE). Same lookup-by-name pattern as the

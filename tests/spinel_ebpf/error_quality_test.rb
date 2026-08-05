@@ -188,6 +188,21 @@ class ErrorQualityTest < Minitest::Test
                           "kprobe__do_sys_openat2")   # where (the method)
   end
 
+  # `kernel_cache` is not in the production codegen. **Its silence was the worst of
+  # the lot** (partitioning declared an eBPF method, the generator emitted a .bpf.c
+  # with no programs, --build succeeded, and the binary printed "BPF loaded and
+  # attached" and served nothing), so it fails loudly at the layer that can still
+  # see the word the author wrote.
+  def test_kernel_cache_directive_is_loud
+    msg = assert_validate_error("p6_kernel_cache",
+                                "kernel_cache",        # what
+                                "not implemented",     # why (it is not there)
+                                "retired Ruby generator", # where it came from
+                                "zero programs",       # what was happening (measured)
+                                "xdp__tcp_slice__")    # how to fix it (what does exist)
+    assert_includes msg, "/ping", "the declared path is not named (the where)"
+  end
+
   # ---------- The other axis: a legitimate probe must still pass (not over-strict) ----------
 
   # A complete three-hook http probe passes both validation and code generation.

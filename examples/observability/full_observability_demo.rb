@@ -27,13 +27,12 @@
 #                                          # -> user_cmd
 #   sleep 3                                # -> timer (~3 ticks)
 #
-#   # Check all counters:
-#   for n in rx_total tcp_connects open_count ctx_switches \
-#            cmds_received last_cmd ticks; do
-#     printf "%-15s = " "$n"
-#     bpftool map dump name "full_observabili_top_$n" \
-#       | grep -oE 'value":\s*[0-9]+' | head -1
-#   done
+#   # Check all counters — but not by name:
+#   # The kernel keeps only the first 15 characters of a map name, so this
+#   # probe's 7 ivar maps all collapse to `full_observabil` and cannot be told
+#   # apart by name. Look them up by id instead:
+#   bpftool map show | grep full_observabil     # prints 7 ids
+#   bpftool map dump id <the id printed above>  # tell them apart by value
 
 @rx_total      = 0
 @tcp_connects  = 0
@@ -89,5 +88,5 @@ module FullObservability
 end
 
 puts "FullObservability loaded — 6 event sources active in 1 module"
-puts " trigger each source then `bpftool map dump name full_observabili_top_*`"
+puts " trigger each source, then read the counters by map id (see the header)"
 sleep 3600

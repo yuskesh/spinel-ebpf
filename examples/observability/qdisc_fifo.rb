@@ -16,7 +16,11 @@
 #   tc qdisc add dev lo root handle 1: spnl_qdisc
 #   ping -c 5 127.0.0.1                     # 5 packets all pass through!
 #   tc -s qdisc show dev lo                  # Sent X bytes Y pkt (dropped 0)
-#   bpftool map dump name <enqueued/dequeued>
+#   # The kernel keeps only the first 15 characters of a map name, so the two
+#   # ivar maps (@enqueued / @dequeued) both appear as `qdisc_fifo_top_` and
+#   # cannot be told apart by name. Look them up by id instead:
+#   bpftool map show | grep qdisc_fifo_top_
+#   bpftool map dump id <the id printed above>
 
 class FifoQdisc < BPF::Qdisc
   def init(sch, opt, extack)

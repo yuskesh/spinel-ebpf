@@ -17,8 +17,11 @@
 #   # Then run any C++ binary that throws — e.g. our throw_loop sample.
 #
 # Inspect:
-#   bpftool map dump name usdt_libstdcxx_top_throws
-#   bpftool map dump name usdt_libstdcxx_top_catches
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `usdt_libstdcxx_` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep usdt_libstdcxx_
+#   bpftool map dump id <the id printed above>
 
 @throws = 0
 @catches = 0

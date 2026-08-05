@@ -1,0 +1,75 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/error_quality_p6_kernel_cache.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 ModuleNode
+N 3 ConstantReadNode
+S 3 name KCache
+R 2 constant_path 3
+N 4 StatementsNode
+N 5 CallNode
+S 5 name ffi_func
+R 5 receiver -1
+N 6 ArgumentsNode
+N 7 SymbolNode
+S 7 value sp_kc_set
+N 8 ArrayNode
+N 9 SymbolNode
+S 9 value str
+N 10 SymbolNode
+S 10 value str
+A 8 elements 9,10
+N 11 SymbolNode
+S 11 value int
+A 6 arguments 7,8,11
+R 5 arguments 6
+R 5 block -1
+S 5 call_operator .
+A 4 body 5
+R 2 body 4
+N 12 DefNode
+S 12 name kernel_cache
+N 13 ParametersNode
+N 14 RequiredParameterNode
+S 14 name path
+N 15 RequiredParameterNode
+S 15 name body
+A 13 requireds 14,15
+A 13 optionals 
+A 13 keywords 
+A 13 posts 
+R 12 parameters 13
+N 16 StatementsNode
+N 17 CallNode
+S 17 name sp_kc_set
+N 18 ConstantReadNode
+S 18 name KCache
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 LocalVariableReadNode
+S 20 name path
+N 21 LocalVariableReadNode
+S 21 name body
+A 19 arguments 20,21
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+A 16 body 17
+R 12 body 16
+R 12 receiver -1
+N 22 CallNode
+S 22 name kernel_cache
+R 22 receiver -1
+N 23 ArgumentsNode
+N 24 StringNode
+S 24 content /ping
+I 24 fzl 1
+N 25 StringNode
+S 25 content PONG%0A
+I 25 fzl 1
+A 23 arguments 24,25
+R 22 arguments 23
+R 22 block -1
+S 22 call_operator .
+A 1 body 2,12,22
+R 0 statements 1

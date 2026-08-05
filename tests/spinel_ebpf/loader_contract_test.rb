@@ -167,13 +167,17 @@ class LoaderContractTest < Minitest::Test
 
   # --- honesty about what is not covered ------------------------------------
 
-  def test_a_declared_orphan_says_why_it_is_one
-    orphans = LC::ENTRIES.select { |e| e[:authority] == :none }
-    assert_operator orphans.size, :>, 0,
-                    "no orphan is declared. If the kernel_cache maps finally got a " \
-                    "producer that is good news, but this test has become vacuous and " \
-                    "should be replaced rather than deleted."
-    orphans.each do |e|
+  # This REPLACES (does not delete -- the rule the previous version's own message
+  # asked for) a test that REQUIRED at least one orphan. There are none now: the
+  # three kernel_cache maps left with the surface that reached them, because that
+  # surface was measured to be a silent no-op (an empty .bpf.c, exit 0, and a demo
+  # printing success) and is refused at compile time instead.
+  #
+  # So this is about the RULE, not the inventory. It is vacuous today by design --
+  # the detection power moved to the gate, which now synthesises its orphan rather
+  # than finding one (asserted below, because that is the part that would rot).
+  def test_an_orphan_if_ever_declared_says_why_it_is_one
+    LC::ENTRIES.select { |e| e[:authority] == :none }.each do |e|
       refute_nil e[:note], "#{e[:token]} is declared an orphan with no note"
       assert_match(/oracle|not ported|no production/i, e[:note],
                    "#{e[:token]}'s note does not say WHY nothing produces it; " \
@@ -196,6 +200,64 @@ class LoaderContractTest < Minitest::Test
                  "The census counted that as the fifth kind of contract precisely " \
                  "because nothing detects it; the least that is owed is a sentence."
     end
+  end
+
+  # The above is allowed to be vacuous only because the gate's control is not.
+  # The self-check used to do `entries.find { |x| x["authority"] == "none" }` and
+  # crashed outright (`undefined method merge for nil`) the moment the last orphan
+  # left -- i.e. the check was underwritten by dead code being present, the same
+  # finding one gate over. Pin the shape, since a future edit that "simplifies" it
+  # back would restore that coupling silently.
+  def test_the_gates_orphan_control_is_synthesised_not_found
+    src = File.read(File.expand_path("../../tools/loader_gate.rb", __dir__))
+    body = src[/def self_checks(.*?)\n  end/m]
+    refute_nil body, "loader_gate.rb: self_checks is not where it was (structure changed?)"
+    # The comments quote the old form on purpose (that is how the reason
+    # survives); strip them, or this test reports the explanation as the offence.
+    body = body.lines.reject { |l| l =~ /\A\s*#/ }.join
+    refute_match(/authority"\] == "none"/, body,
+                 "the orphan self-check is anchored on a LIVE orphan again. There are none, " \
+                 "so this control would either crash or quietly stop testing the orphan rule. " \
+                 "Synthesise it: merge \"authority\" => \"none\" onto an entry that IS produced.")
+    assert_match(/"authority" => "none"/, body,
+                 "the orphan self-check no longer builds an orphan at all")
+  end
+
+  # An `encoding` sentence was once written off as uncheckable, and that turned
+  # out to be the wrong word: byte order and fd reinterpretation ROUND TRIP. Six of
+  # the eight were measured (with the control that a wrong encoding fails), and the
+  # two that could not be were the two belonging to ORPHANS -- a map nothing
+  # produces has no round trip to run. Those left with the surface, so every
+  # surviving sentence has a measurement, and this is what keeps a NEW one from
+  # arriving without one.
+  #
+  # It cannot check that the sentence is true (nothing derives it). It checks the
+  # rule this tree applies to a weak-tier claim: say how it was measured, in a form
+  # a reader can act on.
+  def test_every_encoding_claim_names_its_measurement
+    stated = LC::ENTRIES.select { |e| e[:encoding] }
+    assert_equal 6, stated.length,
+                 "the number of ENCODING claims changed. Six were measured and two deleted " \
+                 "(the kernel_cache orphans); a new one needs its own round trip, and a " \
+                 "missing one needs a reason written down."
+    stated.each do |e|
+      m = e[:encoding_measured].to_s
+      refute_empty m,
+                   "#{e[:token]}: an `encoding` with no `encoding_measured`. This is the one " \
+                   "kind of contract nothing derives, so a sentence that was never " \
+                   "round-tripped is indistinguishable from a sentence that is wrong."
+      assert_match(/[Rr]ound-tripped/, m,
+                   "#{e[:token]}: the measurement must say what was written and read back")
+      assert_operator m.length, :>, 60,
+                     "#{e[:token]}: too short to be a measurement anyone could repeat"
+    end
+  end
+
+  # ...and the converse: no entry may carry evidence for a claim it does not make.
+  def test_no_measurement_without_a_claim
+    orphaned = LC::ENTRIES.select { |e| e[:encoding_measured] && e[:encoding].nil? }
+    assert_empty orphaned.map { |e| e[:token] },
+                 "an `encoding_measured` with no `encoding`: the evidence outlived the sentence"
   end
 
   def test_lookup_by_constant_name_fails_loudly

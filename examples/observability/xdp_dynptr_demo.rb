@@ -12,7 +12,7 @@
 # Run:
 #   SPNL_XDP_IFACE=lo ./build/xdp_dynptr_demo/xdp_dynptr_demo &
 #   ping -c 5 -q 127.0.0.1
-#   bpftool map dump name xdp_dynptr_dem_top_ipv4_pkts
+#   bpftool map dump name xdp_dynptr_dem_
 
 @ipv4_pkts = 0
 @other_pkts = 0

@@ -1,0 +1,69 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/181_path_eq_overlay_getattr_fexit.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @denied
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fexit__vfs_getattr
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name path
+N 7 RequiredParameterNode
+S 7 name stat
+N 8 RequiredParameterNode
+S 8 name request_mask
+N 9 RequiredParameterNode
+S 9 name query_flags
+N 10 RequiredParameterNode
+S 10 name ret
+A 5 requireds 6,7,8,9,10
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 11 StatementsNode
+N 12 IfNode
+N 13 CallNode
+S 13 name path_eq
+R 13 receiver -1
+N 14 ArgumentsNode
+N 15 LocalVariableReadNode
+S 15 name path
+N 16 StringNode
+S 16 content /etc/shadow
+I 16 fzl 1
+A 14 arguments 15,16
+R 13 arguments 14
+R 13 block -1
+S 13 call_operator .
+R 12 predicate 13
+N 17 StatementsNode
+N 18 InstanceVariableWriteNode
+S 18 name @denied
+N 19 CallNode
+S 19 name +
+N 20 InstanceVariableReadNode
+S 20 name @denied
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 IntegerNode
+I 22 value 1
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 17 body 18
+R 12 statements 17
+R 12 subsequent -1
+N 23 IntegerNode
+I 23 value 0
+A 11 body 12,23
+R 4 body 11
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

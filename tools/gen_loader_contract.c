@@ -118,6 +118,7 @@ static void emit_ruby(void)
     printf(", value_bytes: %d", e->value_bytes);
     fputs(", alloc: ", stdout);                  put_rb(e->alloc);
     fputs(", encoding: ", stdout);               put_rb(e->encoding);
+    fputs(", encoding_measured: ", stdout);      put_rb(e->encoding_measured);
     fputs(", note: ", stdout);                   put_rb(e->note);
     fputs(" }.freeze,\n", stdout);
   }
@@ -154,6 +155,7 @@ static void emit_json(void)
     printf(",\"token_len\":%d",   (int)strlen(e->token));
     printf(",\"alloc\":");        put_str(e->alloc);
     printf(",\"encoding\":");     put_str(e->encoding);
+    printf(",\"encoding_measured\":"); put_str(e->encoding_measured);
     printf(",\"note\":");         put_str(e->note);
     putchar('}');
   }

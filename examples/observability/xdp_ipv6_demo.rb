@@ -17,9 +17,11 @@
 #   curl -s "http://[::1]:80" 2>/dev/null || true
 #
 # Read counters:
-#   bpftool map dump name xdp_ipv6_demo_top_rx_v6_total
-#   bpftool map dump name xdp_ipv6_demo_top_rx_v6_icmp6
-#   bpftool map dump name xdp_ipv6_demo_top_last_src_hi
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # three all appear as `xdp_ipv6_demo_t` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep xdp_ipv6_demo_t
+#   bpftool map dump id <the id printed above>
 
 @rx_v6_total = 0
 @rx_v6_icmp6 = 0

@@ -323,4 +323,109 @@ class IntrospectTest < Minitest::Test
     out = I.report(src, "dns_probe.rb")
     refute_match(/metric: /, out, "a channel with no metric is being made to talk about metrics")
   end
+  # `describe` says whether the hooks this probe writes actually FIRE. Passing the
+  # gate (it compiles) and firing are different things, and confusing the two is
+  # exactly how a truncate policy was once measured to be silently inert. Only
+  # **this probe's** hooks are printed, not the list of 32.
+  def test_describe_reports_firing_for_the_hooks_this_probe_writes
+    src = "def fentry__vfs_getattr(p0)\n  emit_path(p0)\n  0\nend\n"
+    r = I.report(src, "t.rb")
+    assert_includes r, "fentry/vfs_getattr"
+    assert_includes r, "the return value is ignored", "it must say the hook carries no verdict"
+    assert_includes r, "stat(2) does not fire here", "it must name the easiest misreading"
+    assert_includes r, "firing sweep", "where the firing was measured"
+  end
+
+  # The other direction: on a hook measured all the way to denying, do not say
+  # "observation only" (a warning that fires everywhere gets ignored).
+  def test_describe_reports_deny_tier_without_the_observe_warning
+    src = "def lsm__path_mkdir(dir)\n  if path_eq(dir, \"/tmp/g\")\n    -1\n  else\n    0\n  end\nend\n"
+    r = I.report(src, "t.rb")
+    assert_includes r, "lsm/path_mkdir"
+    assert_includes r, "the denial was observed"
+    refute_includes r, "the return value is ignored"
+    # The trap that belongs to `lsm/*` alone -- it says nothing without bpf among
+    # the active LSMs -- is still printed.
+    assert_includes r, "says"
+  end
+
+  # A probe that writes no gated hook must not be made to talk about d_path.
+  def test_describe_stays_quiet_when_no_path_builtin_is_used
+    src = "def kprobe__do_sys_openat2(dfd)\n  spnl_emit(dfd)\nend\n"
+    r = I.report(src, "t.rb")
+    refute_includes r, "the denial was observed"
+  end
+
+  # ===================================================================
+  # **The spelling this project recommends was the one whose affordance was empty.**
+  #
+  # The equivalence claims measure on every gate run that the two spellings produce
+  # the same C -- and introspection had never looked at that equivalence at all
+  # (`pkt.l4.proto` -> `(none)`, `pkt_l4_proto` -> `net pkt_l4_proto`). What
+  # follows is that equivalence extended TO INTROSPECTION; the list of claims is
+  # derived from surface_sugar, so a family that gains a member gains coverage
+  # automatically (no expected values written into the test).
+  # ===================================================================
+  CAP = SpinelEbpf::Capabilities
+
+  # The smallest source that fits the sugar's shape. `:expr` is a read; `:stmt` is
+  # the statement as written.
+  def sugar_src(text, form)
+    body = form == :stmt ? text.to_s : "x = #{text}"
+    "def probe_sugar\n  #{body}\nend\n"
+  end
+
+  def test_every_sugar_alias_reports_the_same_domain_as_its_flat_spelling
+    aliases = CAP.sugar_builtin_aliases
+    refute_empty aliases, "the sugar-to-builtin derivation is empty = introspection sees no chain spelling"
+    aliases.each do |a|
+      s = CAP.surface_sugar.find { |x| x[:id] == a[:id] }
+      dom_sugar = I.builtin_domains(sugar_src(a[:sugar], s[:form]))
+      dom_flat  = I.builtin_domains(sugar_src(s[:flat], s[:form]))
+      refute_empty dom_flat, "#{a[:sugar]}: even the flat side (#{a[:flat]}) reports no domain"
+      assert_equal dom_flat, dom_sugar,
+                   "#{a[:sugar]} and #{s[:flat]} compile to the same C, but report different domains"
+    end
+  end
+
+  # Stop the derivation from **silently narrowing**. If surface_sugar makes a claim
+  # of the shape "one dotted expression whose flat form is a builtin" and the alias
+  # list does not carry it, that spelling drops back out of introspection -- which
+  # is precisely the state this closed.
+  def test_alias_derivation_covers_every_dotted_builtin_sugar_claim
+    covered = CAP.sugar_builtin_aliases.map { |a| a[:id] }.sort
+    expected = CAP.surface_sugar.select { |s|
+      next false unless %i[expr stmt].include?(s[:form])
+      next false unless s[:sugar].to_s.include?(".")
+      CAP.all_builtins.include?(s[:flat].to_s[/\A[a-z_]\w*/].to_s)
+    }.map { |s| s[:id] }.sort
+    assert_equal expected, covered,
+                 "the dotted builtin sugar claims and the set introspection can resolve disagree"
+    # The pkt.* readers are the surface that was counted by name, so pin the count.
+    pkt = CAP.sugar_builtin_aliases.count { |a| a[:dotted].start_with?("pkt.") && a[:op].nil? }
+    assert_equal CAP::SUGAR_PKT_CHAIN.size + 1, pkt,
+                 "the 15 pkt.* chain readers plus pkt.byte_at should resolve, 16 in all"
+  end
+
+  # The read form and the write form are **different builtins**. They share a
+  # prefix, so a naive string match reports a write as a read -- the generated C
+  # stays correct and only the introspection drifts, which is the same shape of
+  # silence this closed.
+  def test_dot_write_forms_are_not_reported_as_reads
+    w = I.builtin_domains("def tcp_cc__cong_avoid(sk, ack, acked)\n  sk.snd_cwnd = 10\nend\n")
+    assert_equal({ net: ["tcp_sock_snd_cwnd_set"] }, w)
+    a = I.builtin_domains("def tcp_cc__cong_avoid(sk, ack, acked)\n  sk.snd_cwnd += 1\nend\n")
+    assert_equal({ net: ["tcp_sock_snd_cwnd_add"] }, a)
+    # `==` is not an assignment (a reader written in a comparison must not vanish).
+    c = I.builtin_domains("def xdp__p\n  if pkt.l4.proto == 1\n    @a = @a + 1\n  end\nend\n")
+    assert_equal({ net: ["pkt_l4_proto"] }, c)
+  end
+
+  # Close the same trap on the chain side that the flat side already had: a text
+  # scan must not read the file's own PROSE. And a chain whose root is not a bare
+  # `pkt` is not this sugar (the codegen requires the bare root).
+  def test_chain_scan_ignores_comments_and_non_pkt_roots
+    assert_empty I.builtin_domains("# a sentence mentioning pkt.l4.proto\ndef xdp__p\n  XDP_PASS\nend\n")
+    assert_empty I.builtin_domains("def xdp__p\n  foo.pkt.len\nend\n")
+  end
 end
