@@ -11,7 +11,7 @@
 #
 # Inspect:
 #   bpftool map dump name bpf_hist_keyed   — count per stack id
-#   bpftool map dump name bpf_stack_traces — PC list per stack id
+#   bpftool map dump name bpf_stack_trace — PC list per stack id
 
 def kprobe__do_sys_openat2(dfd, filename)
   ksid = stack_id

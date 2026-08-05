@@ -79,6 +79,7 @@
 173_user_cmd_reactor	ok	
 174_tcp_slice_builtins	ok	
 17_kprobe	ok	
+182_emit_path_overlay_hook	ok	
 18_tp_args	ok	
 19_emit_str	ok	
 20_top_ivar	ok	

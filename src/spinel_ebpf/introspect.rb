@@ -31,6 +31,21 @@ module SpinelEbpf
     # `via:`); SPNL_ATTACH_MULTI is a measurement knob and deliberately not
     # consulted, since describing an environment variable's effect on a file
     # would make the description depend on who is reading it.
+    # The attach methods this source writes that land on a hook in the d_path gate.
+    # `fmod_ret` is tried first only to make the "cut at the first prefix that matches"
+    # rule explicit -- none of these four collide today, but a future prefix could.
+    DPATH_ATTACH_PREFIXES = %w[fmod_ret lsm fentry fexit].freeze
+
+    def dpath_secs_used(source)
+      source.scan(/^\s*def\s+([a-z_0-9]+)/).flatten.filter_map do |m|
+        pre = DPATH_ATTACH_PREFIXES.find { |p| m.start_with?("#{p}__") }
+        next nil unless pre
+
+        sec = "#{pre}/#{m[(pre.length + 2)..]}"
+        sec if SpinelEbpf::Capabilities::DPATH_HOOKS.key?(sec)
+      end.uniq
+    end
+
     def multi_attach_sets(source)
       source.scan(/^\s*on\s+:(\w+)\s*,\s*%w\[([^\]]*)\]([^\n]*)/).map do |kind, body, rest|
         via = rest[/via:\s*:(\w+)/, 1]
@@ -144,12 +159,20 @@ module SpinelEbpf
         attach:   code.include?("sp_bpf_reuseport_attach") }
     end
 
+    # The chain and dot spellings (`pkt.l4.proto`, `sk.snd_cwnd`) are the SAME builtin,
+    # so they report the same domain. The flat scan excludes anything after a dot --
+    # deliberately, so the receiver in `sk.foo` is not read as a builtin -- which meant
+    # the sugar could not match a single time: the spelling this project recommends was
+    # the one that came back `(none)`. The correspondence between spellings is DERIVED
+    # from the equivalence claims (`Capabilities.sugar_builtin_aliases`), reusing the
+    # authority the gate already measures rather than writing a second table.
+    # Comments come off first (a text scan that reads a file's own prose is its own bug).
     def builtin_domains(source)
-      code = source.each_line.map { |l| l.chomp.sub(/#.*\z/, "") }.join("\n")
+      code = strip_comments(source)
       names = SpinelEbpf::Capabilities.all_builtins.select do |b|
         code =~ /(?<![\w.])#{Regexp.escape(b)}(?![\w])/
       end
-      SpinelEbpf::Capabilities.domains_used(names)
+      SpinelEbpf::Capabilities.domains_used(names | SpinelEbpf::Capabilities.sugar_alias_hits(code))
     end
 
     # Collect the packed-record emit sites, with line numbers. Unlike the scalar
@@ -680,6 +703,17 @@ module SpinelEbpf
         gated = blts.filter_map { |b| g = SpinelEbpf::Capabilities.gate_for(b); [b, g] if g }
         gated.each do |b, g|
           out << format("    ! %s is only usable in: %s\n", b, g[:valid_secs].join(" | "))
+        end
+        # Passing the gate does not mean the hook FIRES. Report, for the hooks this
+        # probe actually writes, what reaches them, whether the return value counts, and
+        # the trap. Only this probe's hooks and not the whole list of 32, because the
+        # question being asked is "will the policy I wrote fire" -- and it is exactly
+        # that question that a truncate policy was once measured to get wrong.
+        unless gated.empty?
+          dpath_secs_used(source).each do |sec|
+            line = SpinelEbpf::Capabilities.dpath_fire_line(sec)
+            out << format("    * %s\n", line) if line
+          end
         end
         # Gates that turn on the attach kind rather than on a SEC allowlist --
         # "is this a hook where the current task is the subject of the event", and

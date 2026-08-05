@@ -25,9 +25,6 @@ examples/http_server/
 │   ├── server.rb        #   with no kernel TCP socket
 │   ├── ruby_slice.rb
 │   └── tcp_slice.rb
-├── kernel_cache_demo/   # declare a route; serve it from the kernel (pure-XDP)
-│   ├── ping.rb
-│   └── routes.rb
 ├── sendfile_demo/       # sendfile(2) zero-copy static-file serving + dogfooding demos
 │   ├── server.rb
 │   ├── http_parser.rb
@@ -64,6 +61,5 @@ container exec dev bash -c '
 | `keepalive/` | HTTP/1.1 persistent connections on top of SO_REUSEPORT. Without keepalive, one request per connection makes the server RTT-bound over a real network, so it cannot be compared fairly against nginx. Pure userspace (builds `--native-only`, no libbpf) to isolate the keepalive question. |
 | `epoll/` | An event-driven worker. The blocking keepalive model occupies a worker for the whole life of one connection, so N workers serve only N concurrent connections. Here each worker runs an epoll loop and multiplexes many connections, the way nginx does, so one worker per core saturates the machine. |
 | `pure-xdp-tcp-slice/` | The response never reaches userspace. The kernel TCP stack does not listen on the port at all; the XDP program answers SYN / data / FIN itself, using `bpf_tcp_raw_gen_syncookie_ipv4` for the handshake and a per-flow state map for the rest. No `accept`, `read`, `write` or `close` on the server side. `tcp_slice.rb` is the DSL form, `ruby_slice.rb` writes the same slice as a plain Ruby `xdp__` method, and `server.rb` is the earlier XDP_TX variant that still uses the kernel handshake. |
-| `kernel_cache_demo/` | Declaring a route is enough. `kernel_cache "/ping", body` makes spinel-ebpf synthesize a pure-XDP TCP slice that serves that path from the kernel -- no hand-written eBPF. `ping.rb` builds the body at runtime and pushes it into a BPF map; `routes.rb` declares several routes dispatched by one slice. |
 | `sendfile_demo/` | `sendfile(2)` zero-copy static-file serving: HTTP framing stays in Ruby, and only the body bytes go from the file page cache straight to the socket, never through a userspace buffer (nginx's `sendfile on`). Also contains the dogfooding demos that serve the project's own presentation deck and a browser terminal. |
 | `ws_echo.rb` | A WebSocket echo server with RFC 6455 handshake and frame parse / unmask / build / mask written entirely in Ruby -- no C shims. Client frames are masked binary and routinely contain NUL bytes, so the I/O is binary-safe throughout. |

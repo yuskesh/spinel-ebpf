@@ -79,10 +79,23 @@
  * The fifth is the one the plan did not name and it is the least visible: a
  * host-order vs network-order key, a value written as an fd that the kernel
  * stores as a socket pointer, a checksum folded in the kernel's native word
- * order. Same width, same type, same name -- and wrong. It is declared here
- * because it cannot be derived, and the gate can only check that a declaration
- * EXISTS where the shape alone does not determine the meaning; it cannot check
- * that the sentence is true. That limit is stated here rather than papered over.
+ * order. Same width, same type, same name -- and wrong.
+ *
+ * This file used to say the gate "cannot check that the sentence is true". That
+ * claim was then measured and it was too strong: byte order and fd
+ * reinterpretation ROUND TRIP -- write a known value on one side, read it back
+ * on the other, and add the control that the wrong encoding fails. Six of the
+ * eight sentences were measured that way, and the two that could not be are the
+ * two that belonged to ORPHANS: a map nothing produces has no round trip to
+ * run, which is not "unmeasurable in principle" but "unmeasurable until
+ * something produces it". Those two left with the surface (see the orphan
+ * section below).
+ *
+ * What remains true is narrower and worth keeping: nothing DERIVES these
+ * sentences, so the gate cannot check them on every run the way it checks a map
+ * name. The rule instead is that a sentence must name its measurement --
+ * `encoding_measured`, required by loader_contract_test.rb wherever `encoding`
+ * is set, which is the rule this tree applies to any weak-tier claim.
  *
  * Capacity (max_entries) is deliberately NOT in the table: exceeding it makes
  * bpf_map_update_elem return an error the loader already prints, so it is loud,
@@ -132,6 +145,13 @@ typedef struct {
   int         value_bytes; /* bytes the LOADER moves per record; 0 = it moves none */
   const char *alloc;       /* index allocation rule, or NULL when there is no index */
   const char *encoding;    /* meaning of the bytes where shape does not fix it */
+  /* An `encoding` sentence was once written off as uncheckable. Six of the eight
+   * were then round-tripped: write a known value on one side, read it on the
+   * other, and add the control that a WRONG encoding fails. This names the
+   * measurement. Required whenever `encoding` is set (loader_contract_test),
+   * the same rule this tree applies to a weak-tier map claim's `measured` -- a
+   * sentence with no way to have been wrong is the thing to be suspicious of. */
+  const char *encoding_measured;
   const char *note;
 } LcEntry;
 
@@ -148,24 +168,37 @@ static const LcEntry lc_entries[] = {
     "142_tail_call_dispatch", "PROG_ARRAY", "__u32", "__u32", 4,
     "declaration order of `def xdp_tail__<name>`, base LC_PROG_ARRAY_SLOT_BASE",
     "the value is written as a program fd; the kernel stores the program",
+    "Round-tripped: wrote fd 3 into a PROG_ARRAY and read the value back as "
+    "138189, which is exactly bpf_prog_get_info_by_fd(fd).id -- not the fd.",
     "A jump into an unpopulated slot FALLS THROUGH silently, so an off-by-one "
     "here is not an error, it is a different program running." },
 
   { "bpf_blocklist", "MAP_BLOCKLIST", LC_MAP_NAME, LC_AUTH_GOLDEN,
     "31_tc_blocklist", "HASH", "__u32", "__u8", 1, NULL,
     "key is an IPv4 address in HOST order (the BPF side converts, not the loader)",
+    "Round-tripped: the shipped loader stored sp_bpf_blocklist_add(0x7F000001) as "
+    "the key 2130706433 verbatim (bpftool dump of the running probe), and that key "
+    "matched a wire frame whose saddr bytes are 7f 00 00 01 under "
+    "BPF_PROG_TEST_RUN; the byte-swapped key 16777343 did NOT match.",
     "sp_bpf_blocklist_add/del." },
 
   { "bpf_cidr_block", "MAP_CIDR_BLOCK", LC_MAP_NAME, LC_AUTH_GOLDEN,
     "57_cidr_blocklist", "LPM_TRIE", "struct spnl_cidr_key", "__u8", 1, NULL,
     "key.data[0..3] is the IPv4 address most-significant byte first, which is "
     "NOT the host order the same loader passes to bpf_blocklist",
+    "Round-tripped: the SAME binary in the SAME run stored 127.0.0.0/8 here as "
+    "data=[127,0,0,0] while storing 127.0.0.1 in bpf_blocklist as the host-order "
+    "integer 2130706433 -- the two byte orders side by side. MSB-first matched a "
+    "real 127.0.0.1 frame; the host-order bytes [0,0,0,127] did not.",
     "LPM_TRIE keys are a prefixlen plus big-endian bytes by kernel rule." },
 
   { "bpf_user_cmds", "MAP_USER_CMDS", LC_MAP_NAME, LC_AUTH_GOLDEN,
     "143_user_ringbuf_channel", "USER_RINGBUF", NULL, "__s64", 8, NULL,
     "one record is exactly one __s64, FIFO; a short record makes bpf_dynptr_read "
     "return -E2BIG and the callback observe zero",
+    "Round-tripped: the width first (8 -> the value arrives; 4 -> rc=-7 = -E2BIG "
+    "and the value is 0; 16 -> the first 8 bytes), then the word FIFO, which "
+    "nothing had measured: 11, 22, 33 pushed and one drain saw 11, 22, 33.",
     "Reserving 4 here is silent at run time -- the callback fires, the count "
     "is right, and only the value is 0." },
 
@@ -173,66 +206,69 @@ static const LcEntry lc_entries[] = {
     "168_reuseport_select", "REUSEPORT_SOCKARRAY", "__u32", "__u64", 8,
     "worker index chosen by the forking userspace, not by the codegen",
     "the value is written as a listen fd; the kernel stores the socket it names",
+    "Round-tripped: wrote listen fd 4 (as __u64, which is part of the encoding) "
+    "and read the value back as 4097 = the socket's SO_COOKIE; an unbound socket "
+    "was refused with EINVAL.",
     "sp_bpf_reuseport_register." },
 
   { "bpf_stacks", "MAP_STACKS", LC_MAP_NAME, LC_AUTH_GOLDEN,
-    "48_stack_trace", "STACK_TRACE", "__u32", NULL, 0, NULL, NULL,
+    "48_stack_trace", "STACK_TRACE", "__u32", NULL, 0, NULL, NULL, NULL,
     "value_ctype is deliberately NULL: the producer spells the value "
     "`127 * sizeof(__u64)` and the loader never reads it -- only the NAME travels, "
     "runtime (spnl_dump_stack, the offcpu drain, the request-tree push)." },
 
   { "bpf_hist_keyed", "MAP_HIST_KEYED", LC_MAP_NAME, LC_AUTH_GOLDEN,
-    "42_keyed_hist", "HASH", "__u64", "struct spnl_hist_struct", 0, NULL, NULL,
+    "42_keyed_hist", "HASH", "__u64", "struct spnl_hist_struct", 0, NULL, NULL, NULL,
     "Same as bpf_stacks: the name travels to the runtime as an argument." },
 
-  /* ---- ORPHANS: the loader looks these up and no producer exists ------------- *
-   * The kernel_cache maps were implemented in the retired Ruby generator
-   * (src/spinel_ebpf/codegen_bpf.rb) and never ported to the production C
-   * codegen, but sp_kc_set() is still emitted into every glue that declares a
-   * kernel_cache path. The lookup returns NULL and sp_kc_set returns -2, so this
-   * is loud at run time rather than silent -- which is why it is recorded here
-   * instead of deleting the glue (that is a surface decision, not a seam one).
-   * The gate refuses a new orphan, and refuses an orphan that gains a producer
-   * without the declaration moving. */
-  { "bpf_kc_resp", "MAP_KC_RESP", LC_MAP_NAME, LC_AUTH_NONE,
-    NULL, "ARRAY", "__u32", NULL, 256, "kernel_cache declaration order, base 0",
-    "the value is a fixed response body of exactly value_bytes bytes, zero "
-    "padded; the retired generator called the same number KERNEL_CACHE_RESP_CAP",
-    "Retired Ruby generator only. No production C codegen emits this map "
-    "(measured: 0 hits in spinel_ebpf_cc.c, in templates, and in all goldens)." },
-
-  { "bpf_kc_resp_len", "MAP_KC_RESP_LEN", LC_MAP_NAME, LC_AUTH_NONE,
-    NULL, "ARRAY", "__u32", "__u32", 4, "same slot as bpf_kc_resp", NULL,
-    "Retired Ruby generator only. No production C codegen emits this map." },
-
-  { "bpf_kc_resp_csum", "MAP_KC_RESP_CSUM", LC_MAP_NAME, LC_AUTH_NONE,
-    NULL, "ARRAY", "__u32", "__u32", 4, "same slot as bpf_kc_resp",
-    "a 16-bit-folded partial checksum computed over 16-bit words in the KERNEL's "
-    "native (little-endian on arm64) order -- the loader must fold the same way",
-    "Retired Ruby generator only. No production C codegen emits this map. The "
-    "clearest instance of kind 5: right name, right type, right width, and "
-    "wrong if the word order disagrees." },
+  /* ---- ORPHANS (LC_AUTH_NONE): none, and that is a decision -----------------
+   * Three used to be declared here (bpf_kc_resp / _len / _csum, the maps behind
+   * the `kernel_cache "/path", body` directive) rather than deleted, on the
+   * grounds that removing the glue was a SURFACE decision and this file is about
+   * the seam. The surface decision has now been made.
+   *
+   * What was measured: the directive still parsed, the partitioner still
+   * announced an eBPF method for it, and the production codegen emitted an EMPTY
+   * .bpf.c. `--build` succeeded, the binary printed "BPF loaded and attached",
+   * `bpftool prog show` listed nothing, and curl was refused -- exit 0
+   * throughout. The note here used to say the hole was "loud at run time rather
+   * than silent" because sp_kc_set returns -2; that is true only if the caller
+   * LOOKS, and the shipped demo discarded the value and printed a success line.
+   *
+   * So the whole chain went: refuse `kernel_cache` at compile time, in the
+   * validation pass where the author's own word is still visible, then delete
+   * sp_kc_set and these three declarations. Nothing looks them up any more.
+   *
+   * The kind-5 example they carried is not lost -- it is described above -- but
+   * it is no longer a table ENTRY, and the reason is the point of the
+   * `encoding_measured` rule: a sentence about a map nothing produces is the one
+   * claim in this file that can never be round-tripped. The other six were.
+   *
+   * The gate still refuses a NEW orphan and an orphan that gains a producer; its
+   * control for that is SYNTHESISED in memory (tools/loader_gate.rb), not
+   * anchored on a live entry, precisely so that emptying this section does not
+   * empty the check. */
 
   /* ---- per-unit maps the loader finds by suffix ------------------------------ */
   { "_events", "SUFFIX_EMIT_INT", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "103_emit_parent_path", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "103_emit_parent_path", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The `spnl_emit` channel, and also the loose end of every other suffix: the "
     "loader's ringbuf sweep tests it LAST and only after excluding the specific "
     "ones." },
   { "_str_events", "SUFFIX_EMIT_STR", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "103_emit_parent_path", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "103_emit_parent_path", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The `spnl_emit_str` channel." },
   { "_pair_events", "SUFFIX_EMIT_PAIR", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "137_sock_accessors", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "137_sock_accessors", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The `spnl_emit_pair` channel." },
   { "_emit3_events", "SUFFIX_EMIT3", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "36_emit_n_tuple", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "36_emit_n_tuple", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The `spnl_emit3` channel." },
   { "_emit4_events", "SUFFIX_EMIT4", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "137_sock_accessors", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "137_sock_accessors", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The `spnl_emit4` channel." },
   { "_lost", "SUFFIX_LOST", LC_MAP_SUFFIX, LC_AUTH_GOLDEN,
-    "105_emit_dns", "PERCPU_ARRAY", NULL, NULL, 0, NULL, NULL,
+    "105_emit_dns", "PERCPU_ARRAY", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-channel ring-full counter. Matched at the END of the name "
     "(`_mn + _ml - 5`), not anywhere in it, so the length 5 is part of the "
     "contract and is generated from the token." },
@@ -241,25 +277,25 @@ static const LcEntry lc_entries[] = {
    * so this table names the channel and the gate reads the spelling out of
    * record_schema_gen.json rather than restating it. */
   { "_dns_events", "SUFFIX_DNS", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "dns", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "dns", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit DNS-event channel." },
   { "_conn_events", "SUFFIX_CONN", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "conn", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "conn", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit connect-event channel." },
   { "_l7_events", "SUFFIX_L7", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "l7", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "l7", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit L7 latency-event channel." },
   { "_http_events", "SUFFIX_HTTP", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "http", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "http", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit HTTP L7 RED channel." },
   { "_redis_events", "SUFFIX_REDIS", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "redis", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "redis", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit Redis L7 RED channel." },
   { "_offcpu_events", "SUFFIX_OFFCPU", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "offcpu", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "offcpu", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit off-CPU L7 correlation channel." },
   { "_l7stream_events", "SUFFIX_L7STREAM", LC_MAP_SUFFIX, LC_AUTH_RECORD_SCHEMA,
-    "l7stream", "RINGBUF", NULL, NULL, 0, NULL, NULL,
+    "l7stream", "RINGBUF", NULL, NULL, 0, NULL, NULL, NULL,
     "The per-unit sock-keyed L7 stream channel, and the one channel the loader "
     "reads with its own C text rather than the runtime's mirror "
     "(record_schema.h calls that out as outside its scope)." },
@@ -268,22 +304,22 @@ static const LcEntry lc_entries[] = {
    * The strncmp length is NOT written here: gen_loader_contract.c computes it
    * from the token, so `strncmp(name, "xdp_tail__", 9)` is unwritable. */
   { "xdp_tail__", "PREFIX_XDP_TAIL", LC_PROG_PREFIX, LC_AUTH_GOLDEN,
-    "142_tail_call_dispatch", NULL, NULL, NULL, 0, NULL, NULL,
+    "142_tail_call_dispatch", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Used for OPPOSITE decisions in two places: skip auto-attach, and populate "
     "the PROG_ARRAY. A prefix that matched only one of the two would attach "
     "tail-call targets to the interface." },
   { "uprobe__", "PREFIX_UPROBE", LC_PROG_PREFIX, LC_AUTH_GOLDEN,
-    "109_ssl_http_l7", NULL, NULL, NULL, 0, NULL, NULL,
+    "109_ssl_http_l7", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Program-name prefix for uprobe handlers." },
   { "uretprobe__", "PREFIX_URETPROBE", LC_PROG_PREFIX, LC_AUTH_GOLDEN,
-    "109_ssl_http_l7", NULL, NULL, NULL, 0, NULL, NULL,
+    "109_ssl_http_l7", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Program-name prefix for uretprobe handlers." },
   { "usdt__", "PREFIX_USDT", LC_PROG_PREFIX, LC_AUTH_GOLDEN,
-    "39_usdt_basic", NULL, NULL, NULL, 0, NULL, NULL,
+    "39_usdt_basic", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "The loader splits the REST of the name on `__` into provider/probe, "
     "so the prefix length also fixes where that split starts." },
   { "spnl_timer_arm_", "PREFIX_TIMER_ARM", LC_PROG_PREFIX, LC_AUTH_GOLDEN,
-    "145_timer_event_loop", NULL, NULL, NULL, 0, NULL, NULL,
+    "145_timer_event_loop", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "The loader runs these once with bpf_prog_test_run to arm the timer; "
     "missing them means the probe loads and never ticks." },
 
@@ -294,7 +330,7 @@ static const LcEntry lc_entries[] = {
  * chooses the spelling when it synthesises the program name -- and invisible to
  * a grep for map names, which is the whole reason the coverage direction exists. */
 { "__", "SEPARATOR_USDT", LC_PROG_SEPARATOR, LC_AUTH_GOLDEN,
-  "39_usdt_basic", NULL, NULL, NULL, 0, NULL, NULL,
+  "39_usdt_basic", NULL, NULL, NULL, 0, NULL, NULL, NULL,
   "`usdt__<provider>__<probe>`: the loader takes the FIRST `__` after the "
   "prefix, so a provider containing `__` is not representable -- which is why "
   "the loader carries an explicit 'malformed USDT prog name' diagnostic." },
@@ -305,19 +341,19 @@ static const LcEntry lc_entries[] = {
    * that already publishes them machine-readably is Capabilities::ATTACH_KINDS,
    * so `witness` is the attach kind and the gate reads :sec from it. */
   { "uprobe", "SEC_UPROBE", LC_SEC_NAME, LC_AUTH_ATTACH_KINDS,
-    "uprobe", NULL, NULL, NULL, 0, NULL, NULL,
+    "uprobe", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Section name for uprobe attach." },
   { "uretprobe", "SEC_URETPROBE", LC_SEC_NAME, LC_AUTH_ATTACH_KINDS,
-    "uretprobe", NULL, NULL, NULL, 0, NULL, NULL,
+    "uretprobe", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Section name for uretprobe attach." },
   { "usdt", "SEC_USDT", LC_SEC_NAME, LC_AUTH_ATTACH_KINDS,
-    "usdt", NULL, NULL, NULL, 0, NULL, NULL,
+    "usdt", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Section name for USDT attach." },
   { "perf_event", "SEC_PERF_EVENT", LC_SEC_NAME, LC_AUTH_ATTACH_KINDS,
-    "perf_event", NULL, NULL, NULL, 0, NULL, NULL,
+    "perf_event", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Section name for perf_event attach." },
   { "kprobe.multi", "SEC_KPROBE_MULTI", LC_SEC_NAME, LC_AUTH_ATTACH_KINDS,
-    "kprobe_multi", NULL, NULL, NULL, 0, NULL, NULL,
+    "kprobe_multi", NULL, NULL, NULL, 0, NULL, NULL, NULL,
     "Section name for multi-symbol kprobe attach." },
 
   /* ---- .rodata symbol prefixes ---------------------------------------------- *
@@ -326,13 +362,19 @@ static const LcEntry lc_entries[] = {
    * C; the shared part is the prefix. Unlike everything else here this one IS
    * compile-checked -- but only in a build nobody's gate runs. */
   { "spnl_param_", "PREFIX_RODATA_PARAM", LC_RODATA_PREFIX, LC_AUTH_CODEGEN_C,
-    "126_runtime_param", NULL, NULL, "volatile const __s64", 8, NULL, NULL,
+    "126_runtime_param", NULL, NULL, "volatile const __s64", 8, NULL, NULL, NULL,
     "One symbol per declared runtime parameter. Frozen by BPF_MAP_FREEZE at "
     "load; the assignment must land in the gap between __open() and __load()." },
   { "spnl_filter_", "PREFIX_RODATA_FILTER", LC_RODATA_PREFIX, LC_AUTH_CODEGEN_C,
     "129_common_filter", NULL, NULL, "volatile const __s64", 8, NULL,
     "unset means 0 for pid/tid/cgroup_id but -1 for uid/gid, so that uid 0 "
     "stays selectable -- a shape-identical value with a different meaning",
+    "Round-tripped: one probe declaring `filter_by :pid, :uid` emits "
+    "`spnl_filter_pid = 0` guarded by `!= 0` and `spnl_filter_uid = -1` guarded "
+    "by `>= 0` -- same type, same width, different meaning. At run time, unset "
+    "saw both a uid-1000 and a uid-0 workload (3/3), SPNL_FILTER_UID=0 saw only "
+    "root (0/3), =1000 only the other (3/0). Had the sentinel been 0, unset "
+    "would be indistinguishable from =0.",
     "One symbol per declared in-kernel common filter key." },
 };
 

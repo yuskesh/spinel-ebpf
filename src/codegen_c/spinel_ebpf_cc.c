@@ -778,47 +778,84 @@ typedef struct {
   CcDpathForm form;      /* how the gated arg becomes a `struct path *` */
   int guard;             /* NULL-guard the pointer before bpf_d_path */
   const char *measured;  /* which measurement says LOAD_OK */
+  /* NULL when a path SELECTOR written here can mean what the author thinks.
+   * Non-NULL = the path this hook hands you is real and readable but is NOT the
+   * path the caller sees, so comparing it against a literal is structurally
+   * wrong -- the string is the reason, and it is refused. */
+  const char *no_select;
+  const char *no_select_use; /* what to write instead: the "how to fix it" half */
 } CcDpathHook;
+/* Which of the two things the caller is doing with the path. The gate is
+ * ASYMMETRIC, because the finding behind it is: bpf_d_path still WORKS on the
+ * four overlayfs-internal hooks -- recording what it renders is honest,
+ * DECIDING on it is not. Splitting the use is the whole reason CcDpathHook
+ * gained `no_select`.
+ *
+ *   OBSERVE  emit_path            -- record whatever this hook hands you
+ *   SELECT   path_eq / _starts_with / _contains -- DECIDE on the hook's ARGUMENT
+ *   TASK     parent_path_eq / emit_parent_path  -- the path comes from the task
+ *            chain (real_parent->mm->exe_file), NOT from the hook's argument, so
+ *            the rendering finding does not reach it; the hook only gates the
+ *            helper. Deciding is fine here even on the four. */
+typedef enum { CC_DP_USE_OBSERVE = 0, CC_DP_USE_SELECT, CC_DP_USE_TASK } CcDpathUse;
 static const CcDpathHook CC_DPATH_OK[] = {
   /* --- the original three (output unchanged) --- */
-  { "lsm/file_open",                       CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fmod_ret/security_file_open",         CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fmod_ret/security_file_permission",   CC_DP_FILE,   0, "measured: LOAD_OK" },
+  { "lsm/file_open",                       CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fmod_ret/security_file_open",         CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fmod_ret/security_file_permission",   CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
   /* --- `struct file *` arg (lsm/mmap_file's is file__nullable) --- */
-  { "lsm/mmap_file",                       CC_DP_FILE,   1, "measured: LOAD_OK" },
-  { "lsm/file_ioctl",                      CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "lsm/file_lock",                       CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "lsm/file_receive",                    CC_DP_FILE,   0, "measured: LOAD_OK" },
+  { "lsm/mmap_file",                       CC_DP_FILE,   1, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/file_ioctl",                      CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/file_lock",                       CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/file_receive",                    CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
   /* --- `struct linux_binprm *` arg (exec) --- */
-  { "lsm/bprm_check_security",             CC_DP_BINPRM, 1, "measured: LOAD_OK" },
-  { "lsm/bprm_creds_for_exec",             CC_DP_BINPRM, 1, "measured: LOAD_OK" },
-  { "lsm/bprm_committed_creds",            CC_DP_BINPRM, 1, "measured: LOAD_OK" },
+  { "lsm/bprm_check_security",             CC_DP_BINPRM, 1, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/bprm_creds_for_exec",             CC_DP_BINPRM, 1, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/bprm_committed_creds",            CC_DP_BINPRM, 1, "measured: LOAD_OK", NULL, NULL },
   /* --- the arg IS a `struct path *` (security_path_* family + getattr) --- */
-  { "lsm/path_unlink",                     CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_rename",                     CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_mkdir",                      CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_rmdir",                      CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_symlink",                    CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_link",                       CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_truncate",                   CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_chmod",                      CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/path_chown",                      CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "lsm/inode_getattr",                   CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fmod_ret/security_path_truncate",     CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fmod_ret/security_inode_getattr",     CC_DP_PATH,   0, "measured: LOAD_OK" },
+  { "lsm/path_unlink",                     CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_rename",                     CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_mkdir",                      CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_rmdir",                      CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_symlink",                    CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_link",                       CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_truncate",                   CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_chmod",                      CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/path_chown",                      CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "lsm/inode_getattr",                   CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fmod_ret/security_path_truncate",     CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fmod_ret/security_inode_getattr",     CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
   /* --- the kernel's own btf_allowlist_d_path (observe only: fentry/fexit
    * carry no verdict, so a deny written here is silently ignored) --- */
-  { "fentry/filp_close",                   CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fexit/filp_close",                    CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fentry/vfs_fallocate",                CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fexit/vfs_fallocate",                 CC_DP_FILE,   0, "measured: LOAD_OK" },
-  { "fentry/vfs_truncate",                 CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fexit/vfs_truncate",                  CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fentry/dentry_open",                  CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fexit/dentry_open",                   CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fentry/vfs_getattr",                  CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { "fexit/vfs_getattr",                   CC_DP_PATH,   0, "measured: LOAD_OK" },
-  { NULL, CC_DP_FILE, 0, NULL }
+  { "fentry/filp_close",                   CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fexit/filp_close",                    CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fentry/vfs_fallocate",                CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fexit/vfs_fallocate",                 CC_DP_FILE,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fentry/vfs_truncate",                 CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  { "fexit/vfs_truncate",                  CC_DP_PATH,   0, "measured: LOAD_OK", NULL, NULL },
+  /* These four were measured END TO END: they fire, and bpf_d_path returns a
+   * real string -- but the `struct path` belongs to overlayfs's INTERNAL mount,
+   * so it is rendered from THAT mount's root. The observed path was `/f`, not
+   * the caller's `/tmp/ovd/low/f`, and the CONTROL file in a different
+   * directory rendered to the same `/f`. Recording that is honest; deciding on
+   * it is not, so the selectors are refused here. */
+#define CC_DP_NOSEL_OVL(op, alt)                                                     \
+  "the `struct path` this hook hands you belongs to overlayfs's INTERNAL mount, so " \
+  "bpf_d_path renders it from that mount's root: the measured path was `/f`, not "   \
+  "the caller's `/tmp/ovd/low/f`, and a control file in a DIFFERENT directory "      \
+  "rendered to the same `/f` -- a path selector here cannot tell them apart",        \
+  "keep the path for the record with emit_path (that still works here), and select " \
+  "on a hook that renders the caller's path: " alt " for " op
+  { "fentry/dentry_open",                  CC_DP_PATH,   0, "measured: LOAD_OK",
+    CC_DP_NOSEL_OVL("open(2)", "def lsm__file_open / def fmod_ret__security_file_open") },
+  { "fexit/dentry_open",                   CC_DP_PATH,   0, "measured: LOAD_OK",
+    CC_DP_NOSEL_OVL("open(2)", "def lsm__file_open / def fmod_ret__security_file_open") },
+  { "fentry/vfs_getattr",                  CC_DP_PATH,   0, "measured: LOAD_OK",
+    CC_DP_NOSEL_OVL("stat(2)", "def lsm__inode_getattr / def fmod_ret__security_inode_getattr") },
+  { "fexit/vfs_getattr",                   CC_DP_PATH,   0, "measured: LOAD_OK",
+    CC_DP_NOSEL_OVL("stat(2)", "def lsm__inode_getattr / def fmod_ret__security_inode_getattr") },
+#undef CC_DP_NOSEL_OVL
+  { NULL, CC_DP_FILE, 0, NULL, NULL, NULL }
 };
 static const CcDpathHook *cc_dpath_hook(const char *sec) {
   for (int i = 0; sec && CC_DPATH_OK[i].sec; i++)
@@ -1901,7 +1938,7 @@ static char *cc_dpath_hooks_str(void) {
  * (its `form` decides how the gated arg becomes a `struct path *`). Shared by
  * path_eq / path_starts_with / path_contains / parent_path_eq / emit_path /
  * emit_parent_path. die() with the offending SEC. */
-static const CcDpathHook *cc_require_dpath_ok(const char *who) {
+static const CcDpathHook *cc_require_dpath_ok(const char *who, CcDpathUse use) {
   Attach a = {0};
   (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
   const CcDpathHook *h = cc_dpath_hook(a.sec);
@@ -1911,6 +1948,20 @@ static const CcDpathHook *cc_require_dpath_ok(const char *who) {
                          "only on sleepable hooks, fmod_ret/fentry only on the kernel's "
                          "btf_allowlist_d_path; kprobe never). Write it in one of the "
                          "measured-OK hooks:%s\n  (got SEC)", who, hooks);
+    die(msg, a.sec ? a.sec : "<none>");
+  }
+  /* The SECOND half of the gate, and the asymmetric one. The helper loads here,
+   * the path is real -- what fails is only the DECISION. So this fires for
+   * path_eq / path_starts_with / path_contains and NOT for emit_path (which is
+   * how you legitimately record an overlayfs copy-up) nor for the parent_* pair
+   * (whose path comes from the task chain, not from this hook's argument). */
+  if (use == CC_DP_USE_SELECT && h->no_select) {
+    char *msg = msprintf("%s: this hook cannot be used to SELECT on a path -- %s.\n"
+                         "  Fix: %s.\n"
+                         "  (emit_path and parent_path_eq are still allowed here; only the "
+                         "path SELECTORS are refused, because the string they compare is not "
+                         "the caller's path.)\n  (got SEC)",
+                         who, h->no_select, h->no_select_use);
     die(msg, a.sec ? a.sec : "<none>");
   }
   if (a.sec) free(a.sec);
@@ -3217,7 +3268,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       const char *lit = nt_str(ast, ids[1], "content");
       if (!lit)
         die("path_eq: the path must be a string literal (it is compiled into the compare)", NULL);
-      const CcDpathHook *h = cc_require_dpath_ok("path_eq");
+      const CcDpathHook *h = cc_require_dpath_ok("path_eq", CC_DP_USE_SELECT);
       char *fexpr = cc_expr_str(ast, ids[0]);
       /* how the gated arg becomes a `struct path *` is per-hook (file /
        * struct path * / linux_binprm), so ask the gate entry. */
@@ -3240,7 +3291,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       const char *lit = nt_str(ast, ids[1], "content");
       if (!lit)
         die("path_starts_with: the prefix must be a string literal (it is compiled into the compare)", NULL);
-      const CcDpathHook *h = cc_require_dpath_ok("path_starts_with");
+      const CcDpathHook *h = cc_require_dpath_ok("path_starts_with", CC_DP_USE_SELECT);
       char *fexpr = cc_expr_str(ast, ids[0]);
       char *guard = NULL;
       char *pathexpr = cc_dpath_expr(h, fexpr, g_body, "", &guard);
@@ -3262,7 +3313,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       const char *lit = nt_str(ast, ids[1], "content");
       if (!lit)
         die("path_contains: the substring must be a string literal (it is compiled into the compare)", NULL);
-      const CcDpathHook *h = cc_require_dpath_ok("path_contains");
+      const CcDpathHook *h = cc_require_dpath_ok("path_contains", CC_DP_USE_SELECT);
       char *fexpr = cc_expr_str(ast, ids[0]);
       char *guard = NULL;
       char *pathexpr = cc_dpath_expr(h, fexpr, g_body, "", &guard);
@@ -3286,7 +3337,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       const char *lit = nt_str(ast, ids[0], "content");
       if (!lit)
         die("parent_path_eq: the path must be a string literal", NULL);
-      (void)cc_require_dpath_ok("parent_path_eq");   /* task chain: form is fixed */
+      (void)cc_require_dpath_ok("parent_path_eq", CC_DP_USE_TASK);   /* task chain: form is fixed */
       int pt = ++g_if_counter;
       lines_push(g_body, msprintf("struct task_struct *_pt%d = bpf_get_current_task_btf();", pt));
       /* direct deref chain (keeps trusted-ness for bpf_d_path) */
@@ -3990,7 +4041,7 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 1) die("emit_path expects 1 arg (the hook's file/path/binprm attach param)", NULL);
       /* bpf_d_path is kernel-gated -- see CC_DPATH_OK (shared with path_eq). */
-      const CcDpathHook *h = cc_require_dpath_ok("emit_path");
+      const CcDpathHook *h = cc_require_dpath_ok("emit_path", CC_DP_USE_OBSERVE);
       char *fexpr = cc_expr_str(ast, ids[0]);
       int e = ++g_if_counter;
       lines_push(body, strdup("{"));
@@ -4051,7 +4102,7 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
       if (na != 0) die("emit_parent_path expects no args (reads current task's parent)", NULL);
       /* same bpf_d_path kernel gate as emit_path; the task chain below
        * is the path source here, so the hook's arg form does not apply. */
-      (void)cc_require_dpath_ok("emit_parent_path");
+      (void)cc_require_dpath_ok("emit_parent_path", CC_DP_USE_TASK);
       int e = ++g_if_counter;
       /* direct-deref chain: task->real_parent->mm->exe_file->f_path stays trusted for bpf_d_path */
       lines_push(body, strdup("{"));

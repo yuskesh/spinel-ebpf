@@ -7,8 +7,11 @@
 #
 # Run it, make any TCP connection (e.g. `curl deb.debian.org`), then observe the
 # last values read straight from the kernel:
-#   bpftool map dump name u_kfield_demo_top_last_sndbuf
-#   bpftool map dump name u_kfield_demo_top_last_rcvbuf
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `u_kfield_demo_t` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep u_kfield_demo_t
+#   bpftool map dump id <the id printed above>
 @calls = 0
 @last_sndbuf = 0
 @last_rcvbuf = 0

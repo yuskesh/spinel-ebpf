@@ -27,8 +27,15 @@
 # compile time, not lowered.
 #
 # This slice is hardcoded for /health on port 8080. Making it configurable from
-# the Ruby DSL (`def xdp__tcp_slice__<name>(port, prefix, body)`) is future work;
-# see kernel_cache_demo/ for the declarative multi-route form.
+# the Ruby DSL (`def xdp__tcp_slice__<name>(port, prefix, body)`) is future work.
+#
+# There used to be a purely declarative form here as well -- `kernel_cache
+# "/ping", body`, one line and no attach method at all. It was never implemented
+# by the production code generator: the declaration parsed, the partitioner
+# announced an eBPF method for it, and the generator then emitted a .bpf.c with
+# no programs in it. The build succeeded, the binary printed "BPF loaded and
+# attached", and nothing was ever served. The compiler now refuses the directive
+# by name rather than leaving that shape reachable.
 def xdp__tcp_slice__health
   XDP_PASS  # placeholder (codegen replaces the whole function)
 end

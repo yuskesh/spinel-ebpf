@@ -17,8 +17,11 @@
 #   curl -s http://127.0.0.1:80  # fires tcp_v4_connect kprobe
 #
 # Inspect the ringbufs with bpftool:
-#   bpftool map dump name emit_n_tuple_demo_emit3_events
-#   bpftool map dump name emit_n_tuple_demo_emit4_events
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `emit_n_tuple_de` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep emit_n_tuple_de
+#   bpftool map dump id <the id printed above>
 
 def kprobe__do_sys_openat2(dfd, filename, how)
   spnl_emit3(dfd, 0, 0)

@@ -15,7 +15,7 @@
 #     ./build/event_loop/event_loop_demo &
 #   ping -c 5 -q 127.0.0.1
 #   curl -sS http://127.0.0.1:80/ >/dev/null   # any TCP traffic
-#   bpftool map dump name event_loop_dem_top_rx_total
+#   bpftool map dump name event_loop_dem_
 
 @rx_total        = 0
 @rx_icmp         = 0

@@ -1,0 +1,88 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/182_emit_path_overlay_hook.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @copyups
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fentry__dentry_open
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name path
+N 7 RequiredParameterNode
+S 7 name flags
+N 8 RequiredParameterNode
+S 8 name cred
+A 5 requireds 6,7,8
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 9 StatementsNode
+N 10 InstanceVariableWriteNode
+S 10 name @copyups
+N 11 CallNode
+S 11 name +
+N 12 InstanceVariableReadNode
+S 12 name @copyups
+R 11 receiver 12
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 11 arguments 13
+R 11 block -1
+S 11 call_operator .
+R 10 value 11
+N 15 CallNode
+S 15 name emit_path
+R 15 receiver -1
+N 16 ArgumentsNode
+N 17 LocalVariableReadNode
+S 17 name path
+A 16 arguments 17
+R 15 arguments 16
+R 15 block -1
+S 15 call_operator .
+N 18 IfNode
+N 19 CallNode
+S 19 name parent_path_eq
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 StringNode
+S 21 content /usr/bin/ovl
+I 21 fzl 1
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+R 18 predicate 19
+N 22 StatementsNode
+N 23 InstanceVariableWriteNode
+S 23 name @copyups
+N 24 CallNode
+S 24 name +
+N 25 InstanceVariableReadNode
+S 25 name @copyups
+R 24 receiver 25
+N 26 ArgumentsNode
+N 27 IntegerNode
+I 27 value 1
+A 26 arguments 27
+R 24 arguments 26
+R 24 block -1
+S 24 call_operator .
+R 23 value 24
+A 22 body 23
+R 18 statements 22
+R 18 subsequent -1
+N 28 IntegerNode
+I 28 value 0
+A 9 body 10,15,18,28
+R 4 body 9
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

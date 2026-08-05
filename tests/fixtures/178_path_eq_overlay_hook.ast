@@ -1,0 +1,65 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/178_path_eq_overlay_hook.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @denied
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fentry__dentry_open
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name path
+N 7 RequiredParameterNode
+S 7 name flags
+N 8 RequiredParameterNode
+S 8 name cred
+A 5 requireds 6,7,8
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 9 StatementsNode
+N 10 IfNode
+N 11 CallNode
+S 11 name path_eq
+R 11 receiver -1
+N 12 ArgumentsNode
+N 13 LocalVariableReadNode
+S 13 name path
+N 14 StringNode
+S 14 content /etc/shadow
+I 14 fzl 1
+A 12 arguments 13,14
+R 11 arguments 12
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 15 StatementsNode
+N 16 InstanceVariableWriteNode
+S 16 name @denied
+N 17 CallNode
+S 17 name +
+N 18 InstanceVariableReadNode
+S 18 name @denied
+R 17 receiver 18
+N 19 ArgumentsNode
+N 20 IntegerNode
+I 20 value 1
+A 19 arguments 20
+R 17 arguments 19
+R 17 block -1
+S 17 call_operator .
+R 16 value 17
+A 15 body 16
+R 10 statements 15
+R 10 subsequent -1
+N 21 IntegerNode
+I 21 value 0
+A 9 body 10,21
+R 4 body 9
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

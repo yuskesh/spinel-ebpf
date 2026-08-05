@@ -16,7 +16,7 @@
 #   # ... actually bpftool can't easily reserve+submit on USER_RINGBUF,
 #   # so the production path is via a libbpf-using userspace client.
 #   ping -c 5 127.0.0.1
-#   bpftool map dump name user_ringbuf_d_top_cmds_received
+#   bpftool map dump name user_ringbuf_d_
 
 @cmds_received = 0
 @last_value = 0

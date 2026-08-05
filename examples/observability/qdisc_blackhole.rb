@@ -13,7 +13,7 @@
 #   ip link add dummy0 type dummy && ip link set dummy0 up
 #   tc qdisc add dev dummy0 root handle 1: spnl_qdisc
 #   ping -I dummy0 -c 5 192.0.2.1     # 100% loss (qdisc drops everything)
-#   bpftool map dump name qdisc_blackh_top_dropped  # @dropped increments
+#   bpftool map dump name qdisc_blackh_to  # @dropped increments
 
 class BlackHole < BPF::Qdisc
   # enqueue MUST release the skb reference (via bpf_qdisc_skb_drop)

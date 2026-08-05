@@ -577,6 +577,44 @@ class AffordanceGateTest < Minitest::Test
     assert_equal :other, G.check_map(entry, nil).first
   end
 
+  # ---------- the correspondence check, and its own control ----------
+
+  # The comparison itself. Substring matching in both directions is deliberate (a
+  # C refusal prefix is the `def` prefix minus its trailing separator), and it is
+  # the kind of rule that inverts silently, so pin all three outcomes.
+  def test_correspondence_pairs_by_substring_in_both_directions
+    assert_empty G.correspondence(%w[xdp_tail], { xdp_tail_call: "xdp_tail__" })
+    assert_equal [[:codegen_only, "ghost"]],
+                 G.correspondence(%w[ghost], {})
+    assert_equal [[:affordance_only, :recorded]],
+                 G.correspondence([], { recorded: "recorded__" })
+    # both empty = today's state = vacuously true, and that is CORRECT.
+    assert_empty G.correspondence([], {})
+  end
+
+  # The third storey. Both real inventories are empty today, so `orphan=0` is
+  # printed by a check with no live input: a broken regex or an inverted `any?`
+  # reads exactly the same. The control must therefore be SYNTHESISED -- and must
+  # still work when handed the empty world, because that is the world it runs in.
+  def test_the_correspondence_self_check_fires_on_an_empty_tree
+    r = G.selfcheck_correspondence([], {})
+    assert_equal :codegen_only,    r[:codegen_only]
+    assert_equal :affordance_only, r[:affordance_only]
+  end
+
+  # ...and the control's own control: break the comparison and the self-check
+  # must stop saying it caught anything. A self-check that cannot fail makes
+  # every number above it meaningless, so its inability to fail must fail.
+  def test_a_broken_correspondence_is_visible_to_its_self_check
+    blind = Module.new do
+      extend G                                  # the real self-check...
+      def self.correspondence(_cc, _aff) = []   # ...over a comparison that compares nothing
+    end
+    r = blind.send(:selfcheck_correspondence, [], {})
+    assert_equal :MISSED, r[:codegen_only]
+    assert_equal :MISSED, r[:affordance_only]
+  end
+
   # ---------- it must not pass vacuously ----------
 
   # A gate whose codegen is unavailable has to abort, not report success. This is

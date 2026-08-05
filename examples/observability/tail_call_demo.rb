@@ -13,8 +13,11 @@
 #   # Populate spnl_prog_array slot 0 and 1 with the two xdp_tail__ progs
 #   # via bpftool.
 #   ping -c 5 127.0.0.1
-#   bpftool map dump name tail_call_demo_top_tcp_pkts
-#   bpftool map dump name tail_call_demo_top_other_pkts
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `tail_call_demo_` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep tail_call_demo_
+#   bpftool map dump id <the id printed above>
 
 @tcp_pkts = 0
 @other_pkts = 0

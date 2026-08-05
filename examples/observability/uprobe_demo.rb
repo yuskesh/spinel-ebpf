@@ -13,8 +13,11 @@
 #   bash -c 'echo "hello"; echo "world"'   # generates 2 readline calls
 #
 # Inspect:
-#   bpftool map dump name uprobe_demo_top_calls
-#   bpftool map dump name uprobe_demo_top_returns
+#   # The kernel keeps only the first 15 characters of a map name, so these
+#   # two both appear as `uprobe_demo_top` and cannot be told apart by name.
+#   # Look them up by id instead:
+#   bpftool map show | grep uprobe_demo_top
+#   bpftool map dump id <the id printed above>
 
 @calls = 0
 @returns = 0

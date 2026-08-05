@@ -391,9 +391,18 @@ module LoaderGate
       raise "loader gate: self-check needs the MAP_USER_CMDS entry"
     out[:producer_wrong_type] = check_producer(e.merge("map_type" => "HASH")) ? :caught : :MISSED
     out[:producer_wrong_name] = check_producer(e.merge("token" => "bpf_user_cmds_x")) ? :caught : :MISSED
-    orphan = entries.find { |x| x["authority"] == "none" }
+    # SYNTHESISED, not found. This used to be
+    #   entries.find { |x| x["authority"] == "none" }
+    # and it crashed the moment the last orphan left (the three kernel_cache maps
+    # went with the surface that reached them): `undefined method merge for nil`.
+    # That is the same finding one gate over -- a control anchored on an
+    # INVENTORY dies when the inventory is fixed, and the "0 problems" it used to
+    # print was underwritten by dead code being present. The orphan rule
+    # ("declared as produced by nothing, but something produces it") does not
+    # need a real orphan to be exercised: build one out of the MAP_USER_CMDS
+    # entry, which is produced, and demand the catch.
     out[:orphan_gains_producer] =
-      check_producer(orphan.merge("token" => "bpf_user_cmds")) ? :caught : :MISSED
+      check_producer(e.merge("authority" => "none", "witness" => nil)) ? :caught : :MISSED
     out[:shape_width] = begin
       saved = @contract
       @contract = JSON.parse(JSON.generate(contract))

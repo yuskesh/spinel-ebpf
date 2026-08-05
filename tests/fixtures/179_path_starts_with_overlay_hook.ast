@@ -1,0 +1,67 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/179_path_starts_with_overlay_hook.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 InstanceVariableWriteNode
+S 2 name @hits
+N 3 IntegerNode
+I 3 value 0
+R 2 value 3
+N 4 DefNode
+S 4 name fentry__vfs_getattr
+N 5 ParametersNode
+N 6 RequiredParameterNode
+S 6 name path
+N 7 RequiredParameterNode
+S 7 name stat
+N 8 RequiredParameterNode
+S 8 name request_mask
+N 9 RequiredParameterNode
+S 9 name query_flags
+A 5 requireds 6,7,8,9
+A 5 optionals 
+A 5 keywords 
+A 5 posts 
+R 4 parameters 5
+N 10 StatementsNode
+N 11 IfNode
+N 12 CallNode
+S 12 name path_starts_with
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name path
+N 15 StringNode
+S 15 content /etc/
+I 15 fzl 1
+A 13 arguments 14,15
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+R 11 predicate 12
+N 16 StatementsNode
+N 17 InstanceVariableWriteNode
+S 17 name @hits
+N 18 CallNode
+S 18 name +
+N 19 InstanceVariableReadNode
+S 19 name @hits
+R 18 receiver 19
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 1
+A 20 arguments 21
+R 18 arguments 20
+R 18 block -1
+S 18 call_operator .
+R 17 value 18
+A 16 body 17
+R 11 statements 16
+R 11 subsequent -1
+N 22 IntegerNode
+I 22 value 0
+A 10 body 11,22
+R 4 body 10
+R 4 receiver -1
+A 1 body 2,4
+R 0 statements 1

@@ -13,7 +13,7 @@
 # Run:
 #   ./build/tcp_rcv_fentry/tcp_rcv_fentry &
 #   # generate some TCP traffic on the host, then:
-#   bpftool map dump name tcp_rcv_fentry_top_  # the top-level ivar maps
+#   bpftool map dump name tcp_rcv_fentry_  # the top-level ivar maps
 #
 # strace -e bpf the loader: zero data-plane syscalls during measurement,
 # the same observability story kprobes provide.
