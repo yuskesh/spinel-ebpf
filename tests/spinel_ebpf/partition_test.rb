@@ -276,12 +276,128 @@ class PartitionTest < Minitest::Test
   end
 
   # A non-BPF superclass is OUTSIDE the namespace -> stays native, no raise.
+  # The AST has to actually contain `class Widget; def handle; end; end` -- the
+  # enumeration reads the body out of the AST now, so an IR naming code the AST
+  # does not have enumerates nothing (which is the whole point).
   def test_phase2_non_bpf_superclass_stays_native
     ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 0 ", "IA @meth_body_ids 0 ",
                    "SA @cls_names 1 Widget", "SA @cls_parents 1 PlainBase",
                    "SA @cls_meth_names 1 handle", "SA @cls_meth_bodies 1 1"])
-    res = P.classify(ir, parse_ast(EMPTY_AST_LINES)) # must not raise
+    res = P.classify(ir, parse_ast(class_ast("Widget", "handle"))) # must not raise
     assert(res.methods.any? { |m| m.qualified_name == "Widget#handle" },
            "non-BPF class method should be enumerated, not error")
+  end
+
+  # ---------- the IR's body ids are ids in the IR's OWN parse ----------
+  #
+  # The .ast and the .ir come from two different spinel invocations, and a plain
+  # `require` resolves relative to the running executable -- so the two parses can
+  # be handed different source text and number their nodes differently (a
+  # 1216-node shift was measured on examples/http_server/so-reuseport/server.rb). The IR
+  # says WHICH methods exist; the AST says WHERE the body is.
+
+  # `def <name>; <body stmts>; end` at top level, ids from 2.
+  def toplevel_def_ast(name, body_lines = ["A 4 body "])
+    ["ROOT 0", "N 0 ProgramNode", "N 1 StatementsNode",
+     "R 0 statements 1", "A 1 body 2",
+     "N 2 DefNode", "S 2 name #{name}", "N 3 ParametersNode",
+     "R 2 parameters 3", "N 4 StatementsNode", "R 2 body 4"] + body_lines
+  end
+
+  # `class <cls>; def <meth>; end; end`
+  def class_ast(cls, meth)
+    ["ROOT 0", "N 0 ProgramNode", "N 1 StatementsNode",
+     "R 0 statements 1", "A 1 body 2",
+     "N 2 ClassNode", "N 3 ConstantReadNode", "S 3 name #{cls}",
+     "R 2 constant_path 3", "R 2 superclass -1",
+     "N 4 StatementsNode", "R 2 body 4", "A 4 body 5",
+     "N 5 DefNode", "S 5 name #{meth}", "N 6 ParametersNode",
+     "R 5 parameters 6", "N 7 StatementsNode", "R 5 body 7", "A 7 body "]
+  end
+
+  def test_body_comes_from_the_ast_not_the_ir_id
+    # The IR claims `probe`'s body is node 999 -- an id from a parse this AST is
+    # not. Resolution must land on the DefNode's real body (4), not on 999.
+    ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 1 probe", "IA @meth_body_ids 1 999",
+                   "SA @cls_names 0 ", "SA @cls_parents 0 ",
+                   "SA @cls_meth_names 0 ", "SA @cls_meth_bodies 0 "])
+    res = P.classify(ir, parse_ast(toplevel_def_ast("probe")))
+    m = res.by_qualified_name["probe"]
+    refute_nil m, "probe must still be enumerated -- the IR is the authority on existence"
+    assert_equal 4, m.body_id
+  end
+
+  # The failure in miniature: the id the IR reports is a REAL node here, so
+  # nothing crashes -- it is simply a different method's body, and the flags come
+  # out of the wrong code. Walking node 4 sees `loop`; walking node 8 does not.
+  def test_shifted_id_would_read_another_methods_body
+    ast_lines = ["ROOT 0", "N 0 ProgramNode", "N 1 StatementsNode",
+                 "R 0 statements 1", "A 1 body 2,6",
+                 # def spliced_in;  loop do ... end ; end
+                 "N 2 DefNode", "S 2 name spliced_in", "N 3 ParametersNode",
+                 "R 2 parameters 3", "N 4 StatementsNode", "R 2 body 4", "A 4 body 5",
+                 "N 5 CallNode", "S 5 name loop", "R 5 receiver -1",
+                 # def probe; end
+                 "N 6 DefNode", "S 6 name probe", "N 7 ParametersNode",
+                 "R 6 parameters 7", "N 8 StatementsNode", "R 6 body 8", "A 8 body "]
+    ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 1 probe", "IA @meth_body_ids 1 4",
+                   "SA @cls_names 0 ", "SA @cls_parents 0 ",
+                   "SA @cls_meth_names 0 ", "SA @cls_meth_bodies 0 "])
+    m = P.classify(ir, parse_ast(ast_lines)).by_qualified_name["probe"]
+    assert_equal 8, m.body_id, "must resolve `probe`, not the body the stale id points at"
+    refute m.flags.uses_unbounded_loop,
+           "`loop` belongs to spliced_in -- reading it as probe's is exactly the bug"
+    assert_equal :ebpf, m.tag
+  end
+
+  # Same bare name at two scopes: the class table must not pick up the top-level
+  # `def initialize`, which is what a whole-AST name search would do.
+  def test_scope_disambiguates_same_name
+    ast_lines = ["ROOT 0", "N 0 ProgramNode", "N 1 StatementsNode",
+                 "R 0 statements 1", "A 1 body 2,6",
+                 "N 2 DefNode", "S 2 name handle", "N 3 ParametersNode",
+                 "R 2 parameters 3", "N 4 StatementsNode", "R 2 body 4", "A 4 body 5",
+                 "N 5 CallNode", "S 5 name loop", "R 5 receiver -1",
+                 "N 6 ClassNode", "N 7 ConstantReadNode", "S 7 name Widget",
+                 "R 6 constant_path 7", "R 6 superclass -1",
+                 "N 8 StatementsNode", "R 6 body 8", "A 8 body 9",
+                 "N 9 DefNode", "S 9 name handle", "N 10 ParametersNode",
+                 "R 9 parameters 10", "N 11 StatementsNode", "R 9 body 11", "A 11 body "]
+    ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 1 handle", "IA @meth_body_ids 1 4",
+                   "SA @cls_names 1 Widget", "SA @cls_parents 1 ",
+                   "SA @cls_meth_names 1 handle", "SA @cls_meth_bodies 1 11"])
+    r = P.classify(ir, parse_ast(ast_lines))
+    assert_equal 4,  r.by_qualified_name["handle"].body_id
+    assert_equal 11, r.by_qualified_name["Widget#handle"].body_id
+    assert r.by_qualified_name["handle"].flags.uses_unbounded_loop
+    refute r.by_qualified_name["Widget#handle"].flags.uses_unbounded_loop
+  end
+
+  # Redefinition: Ruby keeps the last one, and spinel's flatten numbers a later
+  # sibling higher -- so `.last` is the definition that actually runs.
+  def test_redefinition_resolves_to_the_last_definition
+    ast_lines = ["ROOT 0", "N 0 ProgramNode", "N 1 StatementsNode",
+                 "R 0 statements 1", "A 1 body 2,6",
+                 "N 2 DefNode", "S 2 name probe", "N 3 ParametersNode",
+                 "R 2 parameters 3", "N 4 StatementsNode", "R 2 body 4", "A 4 body 5",
+                 "N 5 CallNode", "S 5 name loop", "R 5 receiver -1",
+                 "N 6 DefNode", "S 6 name probe", "N 7 ParametersNode",
+                 "R 6 parameters 7", "N 8 StatementsNode", "R 6 body 8", "A 8 body "]
+    ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 1 probe", "IA @meth_body_ids 1 4",
+                   "SA @cls_names 0 ", "SA @cls_parents 0 ",
+                   "SA @cls_meth_names 0 ", "SA @cls_meth_bodies 0 "])
+    m = P.classify(ir, parse_ast(ast_lines)).by_qualified_name["probe"]
+    assert_equal 8, m.body_id
+    refute m.flags.uses_unbounded_loop
+  end
+
+  # A method the IR names but the AST does not define is dropped rather than
+  # given somebody else's body -- the enumeration cannot invent a location.
+  def test_unresolvable_name_is_not_enumerated
+    ir = parse_ir(["SPINEL-IR v1", "SA @meth_names 1 ghost", "IA @meth_body_ids 1 4",
+                   "SA @cls_names 0 ", "SA @cls_parents 0 ",
+                   "SA @cls_meth_names 0 ", "SA @cls_meth_bodies 0 "])
+    res = P.classify(ir, parse_ast(toplevel_def_ast("probe")))
+    assert_nil res.by_qualified_name["ghost"]
   end
 end

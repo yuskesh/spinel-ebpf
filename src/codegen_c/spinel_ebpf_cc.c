@@ -1050,10 +1050,10 @@ static int cc_is_binary_op(const char *name) {
   return 0;
 }
 
-/* eBPF-eligible (Stage 1 minimal partition): a real top-level method (body_id>=0,
- * which drops builtin stubs like `def spnl_emit(x); end`) whose params are all
- * `int` and whose return is `int` or void/nil. */
-static int cc_method_eligible(const Method *me) {
+/* Signature-eligible: a real top-level method (body_id>=0, which drops builtin
+ * stubs like `def spnl_emit(x); end`) whose params are all `int` and whose
+ * return is `int` or void/nil. This is ALL the C side can decide by itself. */
+static int cc_sig_eligible(const Method *me) {
   if (me->body_id < 0) return 0;
   /* Ruby SUPPORTED_EBPF_SIGNATURE_TYPES = int/bool/void/nil (nil -> VOID). int
    * -> __s64, bool -> __s32; everything else (string/array/hash/poly/...) is
@@ -1062,6 +1062,83 @@ static int cc_method_eligible(const Method *me) {
   for (int k = 0; k < me->nparams; k++)
     if (me->ptypes[k] != CC_TY_INT && me->ptypes[k] != CC_TY_BOOL) return 0;
   return 1;
+}
+
+/* One comma-separated env list, matched whole-segment. Shared by the two name
+ * lists the CLI hands the generator ($SPNL_EBPF_EXCLUDE, read below in
+ * cc_is_consumer_fn; and $SPNL_PARTITION_NATIVE, read just under here). Lives
+ * out here rather than beside its first user because the text driver
+ * (non-SPNL_INPROCESS build, used by tools/golden.rb) needs it too. */
+static int cc_name_in_env_list(const char *name, const char *env) {
+  const char *ex = getenv(env);
+  if (!ex || !*ex || !name) return 0;
+  size_t nl = strlen(name);
+  const char *p = ex;
+  while (*p) {
+    const char *comma = strchr(p, ',');
+    size_t seg = comma ? (size_t)(comma - p) : strlen(p);
+    if (seg == nl && strncmp(p, name, nl) == 0) return 1;
+    if (!comma) break;
+    p = comma + 1;
+  }
+  return 0;
+}
+
+/* The Ruby partition's verdict, which outranks the signature.
+ *
+ * cc_sig_eligible above reads the SIGNATURE ONLY. It has no idea about I/O,
+ * unbounded loops, closures, recursion or inherited impossibility -- those are
+ * what the Ruby partition (Phase 2/3) walks the body for. So the two
+ * partitioners disagree in one direction: a method can be signature-eligible
+ * here and eBPF-impossible there (`def worker_loop(port, my_idx)` is int,int->int
+ * and calls Net.sp_net_listen inside `loop do`). Emitting it anyway is how the
+ * multi-worker HTTP example ended at `CallNode not yet ported (Stage 1): loop`.
+ *
+ * Where they disagree, Ruby wins -- it is the one that looked at the body. The
+ * CLI passes the names it ruled :native in $SPNL_PARTITION_NATIVE (top-level as
+ * `name`, class-scoped as `Class#name`).
+ *
+ * NOT $SPNL_EBPF_EXCLUDE, on purpose. That variable means "userspace by
+ * construction" (consumer fns / self-instrument workload targets) and is read by
+ * cc_is_consumer_fn, which ALSO filters cc_build_ir_text -- i.e. it edits the
+ * .ir that the Ruby partition is computed from. A partition verdict must not be
+ * able to rewrite its own input.
+ *
+ * Every override is announced by cc_report_partition_overrides: an overruled
+ * method is by definition one this side WOULD have emitted, so dropping it
+ * without a word is exactly the silent drop this project forbids. */
+static int cc_partition_native(const Method *me) {
+  if (!me || !me->name) return 0;
+  if (me->cls) {
+    char q[256];
+    snprintf(q, sizeof q, "%s#%s", me->cls, me->name);
+    return cc_name_in_env_list(q, "SPNL_PARTITION_NATIVE");
+  }
+  return cc_name_in_env_list(me->name, "SPNL_PARTITION_NATIVE");
+}
+
+static int cc_method_eligible(const Method *me) {
+  return cc_sig_eligible(me) && !cc_partition_native(me);
+}
+
+/* Say what was overruled. Only the ACTUAL disagreements are named: a name in the
+ * list that this side was never going to emit (wrong signature, no body) is not a
+ * disagreement and prints nothing. So the line count is the size of the gap
+ * between the two partitioners, measured by the two of them rather than by a
+ * mirrored copy of either rule. */
+static void cc_report_partition_overrides(IR *ir) {
+  const char *env = getenv("SPNL_PARTITION_NATIVE");
+  if (!env || !*env) return;
+  for (int i = 0; i < ir->n; i++) {
+    const Method *me = &ir->m[i];
+    if (!cc_sig_eligible(me) || !cc_partition_native(me)) continue;
+    fprintf(stderr,
+            "spinel-ebpf: partition override: `%s%s%s` has an eBPF-eligible signature "
+            "but the Ruby partition ruled it native -- NOT emitted into the .bpf.c "
+            "(the reason is in the partition table above; this side only reads "
+            "signatures)\n",
+            me->cls ? me->cls : "", me->cls ? "#" : "", me->name);
+  }
 }
 
 /* a same-unit :ebpf method by this name? (a BPF-to-BPF call target). */
@@ -6486,6 +6563,7 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   if (getenv("SPNL_AMP_M7")) return amp_codegen_program(ir, ast, base);
   { const char *ef = getenv("SPNL_ENFORCEMENT"); g_monitor = (ef && !strcmp(ef, "monitor")); }
   g_ir = ir;
+  cc_report_partition_overrides(ir);   /* name every method the Ruby partition overruled */
   cc_bind_dsl_class_attach(ir, ast);   /* class/module DSL -> flat <prefix><member> */
   cc_tag_flat_struct_ops(ir);   /* flat `def <prefix>__<member>` -> struct_ops member */
   for (int i = 0; i < g_n_params; i++) free(g_param_names[i]);
@@ -7839,20 +7917,6 @@ static void cc_fill_params(Compiler *c, Scope *s, Method *me) {
  * unit. The workload methods (the self-uprobe *targets*) are eBPF-eligible (pure
  * int) but must stay native. The CLI passes their names in $SPNL_EBPF_EXCLUDE
  * (comma-separated); exclude them here too so they don't enter the eBPF IR. */
-static int cc_name_in_env_list(const char *name, const char *env) {
-  const char *ex = getenv(env);
-  if (!ex || !*ex || !name) return 0;
-  size_t nl = strlen(name);
-  const char *p = ex;
-  while (*p) {
-    const char *comma = strchr(p, ',');
-    size_t seg = comma ? (size_t)(comma - p) : strlen(p);
-    if (seg == nl && strncmp(p, name, nl) == 0) return 1;
-    if (!comma) break;
-    p = comma + 1;
-  }
-  return 0;
-}
 static int cc_is_consumer_fn(const char *name) {
   return name && (strncmp(name, "__spnl_", 7) == 0 ||
                   cc_name_in_env_list(name, "SPNL_EBPF_EXCLUDE"));

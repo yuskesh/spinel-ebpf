@@ -1,0 +1,203 @@
+# spinel-ebpf product-reachability baseline.
+#
+# The third axis over the tools/golden.rb corpus. golden.rb pins what the
+# CODEGEN emits (component); tools/golden_compile.sh pins whether that text
+# builds and loads; this pins whether `bin/spinel-ebpf compile` — the
+# PRODUCT — still reaches it at all.
+#
+# kind=golden   product: default        the default CLI run emits this golden
+#                        ebpf-dispatch  ... only with --ebpf-dispatch
+#                        no-ebpf        the CLI never calls the codegen
+#                        refused        the CLI refuses the program
+# kind=refusal  product: refused        the CLI refuses it too (gate fires for a user)
+#                        no-ebpf        the CLI exits 0: the refusal never fires
+#
+# `note` is prose and is NOT compared, but it is REQUIRED on every row whose
+# product value is not the plain one (default / refused). An unreachable
+# artifact with no note is indistinguishable from a forgotten one, so the
+# note must say why it is kept and what would make it reachable again.
+#
+# Unlike tests/golden/compile_status.tsv this does not move with the
+# toolchain: no clang, no kernel, no verifier is involved. It moves when a
+# partition rule or a CLI check moves — which is why it is a separate file
+# with a separate --update.
+#
+# Refresh: ruby tools/reach_gate.rb --update   (and review the diff.)
+#
+# artifact	kind	product	note
+02_integer_arith	golden	default	
+03_fib_recursion	golden	no-ebpf	KEPT AS EVIDENCE, not forgotten: the Ruby partition rules `fib` :native because it recurses, so the CLI never calls the codegen and writes no .bpf.c. This golden IS the thing that rule is a rule about — it pins the verifier refusing BPF-to-BPF recursion (compile_status.tsv: verifier_reject, measured on 7.1.5-ebpf). Delete it and the partition keeps the rule with its evidence gone. Reachable again only if BPF gains recursion, i.e. if that verifier_reject ever turns into ok.
+04_class_with_ivars	golden	default	
+05_closure_block	refusal	refused	
+100_path_eq	golden	default	
+101_ppid	golden	default	
+102_parent_path_eq	golden	default	
+103_emit_parent_path	golden	default	
+104_emit_connect	golden	default	
+105_emit_dns	golden	default	
+106_sock_owner_correlate	golden	default	
+107_emit_l7	golden	default	
+108_http_l7	golden	default	
+109_ssl_http_l7	golden	default	
+10_polymorphic	golden	default	
+110_offcpu_l7	golden	default	
+111_cgroup_id	golden	default	
+111_dns_latency	golden	default	
+112_caps_args	golden	default	
+113_scalar_args	golden	default	
+114_tcp_cc_reno	golden	default	
+115_path_starts_with	golden	default	
+116_path_contains	golden	default	
+117_emit_tcp_payload	golden	default	
+118_emit_tcp_stream	golden	default	
+119_redis_l7	golden	default	
+11_max_if	golden	default	
+120_go_tls_write	golden	default	
+121_go_uret	golden	default	
+122_go_tls_native	golden	default	
+123_path_unlink_deny	golden	default	
+124_bprm_exec_path	golden	default	
+125_mmap_file_path	golden	default	
+126_runtime_param	golden	default	
+127_param_unused	refusal	refused	
+128_param_bad_default	refusal	refused	
+129_common_filter	golden	default	
+12_spnl_emit	golden	default	
+130_common_filter_all	golden	default	
+131_filter_verdict_hook	refusal	refused	
+132_filter_no_handler	refusal	refused	
+133_kfield_str	golden	default	
+134_kfield_str_eq	golden	default	
+135_kfield_str_wrong_shape	golden	default	
+136_kfield_str_arity	refusal	refused	
+137_sock_accessors	golden	default	
+138_sock_accessor_arity	refusal	refused	
+139_iter_task_field	golden	default	
+13_locals	golden	default	
+140_cpumap_redirect	golden	default	
+141_sock_ops	golden	default	
+142_tail_call_dispatch	golden	default	
+143_user_ringbuf_channel	golden	default	
+144_tcp_slice	golden	default	
+145_timer_event_loop	golden	default	
+146_pkt_chain	golden	default	
+147_dsl_class_xdp	golden	default	
+148_dsl_module_xdp	golden	default	
+149_pkt_dynptr_byte_at	golden	default	
+14_calls	golden	default	
+150_cap_ns_filetype	golden	default	
+151_has_cap_packet_ctx	refusal	refused	
+152_ns_id_unknown_key	refusal	refused	
+153_attach_multi_expand	golden	default	
+154_attach_multi_multi	golden	default	
+155_attach_multi_auto	golden	default	
+156_attach_multi_unknown_symbol	refusal	refused	
+157_attached_index_outside_multi	refusal	refused	
+158_attach_multi_empty_list	refusal	refused	
+159_attach_multi_duplicate	refusal	refused	
+15_times_loop	golden	default	
+160_attach_multi_bad_via	refusal	refused	
+161_attach_multi_params	golden	default	
+162_timer_with_handlers	golden	default	
+163_timer_no_interval	refusal	refused	
+164_timer_twice	refusal	refused	
+165_timer_filter_by	refusal	refused	
+166_tail_call_wrong_ctx	refusal	refused	
+167_tail_call_slot_out_of_range	refusal	refused	
+168_reuseport_select	golden	default	
+169_worker_select_wrong_ctx	refusal	refused	
+16_closure	golden	default	
+170_user_ringbuf_no_drain	refusal	refused	
+171_user_ringbuf_twice	refusal	refused	
+172_user_ringbuf_drain_no_cb	refusal	refused	
+173_user_cmd_reactor	golden	default	
+174_tcp_slice_builtins	golden	default	
+175_payload_starts_wrong_ctx	refusal	refused	
+176_tcp_slice_twice	refusal	refused	
+177_payload_starts_not_literal	refusal	refused	
+178_path_eq_overlay_hook	refusal	refused	
+179_path_starts_with_overlay_hook	refusal	refused	
+17_kprobe	golden	default	
+180_path_contains_overlay_hook	refusal	refused	
+181_path_eq_overlay_getattr_fexit	refusal	refused	
+182_emit_path_overlay_hook	golden	default	
+18_tp_args	golden	default	
+19_emit_str	golden	default	
+20_top_ivar	golden	default	
+21_sched	golden	default	
+22_emit_pair	golden	default	
+23_indirect_float	golden	default	
+24_xdp_counter	golden	default	
+25_xdp_len	golden	default	
+26_xdp_proto_count	golden	default	
+27_xdp_drop_icmp	golden	default	
+30_tc_port_filter	golden	default	
+31_tc_blocklist	golden	default	
+32_path_counter	golden	ebpf-dispatch	Not a workaround: the fixture's own header says `spinel-ebpf compile --ebpf-dispatch`. `record_path_hit` is :ebpf and is called from <main>, so without the flag its body also reaches the native emitter and validation check (7) refuses it by name, naming this flag as the fix. Reachable by the default invocation only if calling an :ebpf method from native code stops meaning a BPF round-trip.
+33_sk_reuseport	golden	default	
+34_sk_msg	golden	default	
+35_xdp_ipv6	golden	default	
+36_emit_n_tuple	golden	default	
+37_c_keyword_collision	golden	default	
+38_uprobe_basic	golden	default	
+39_usdt_basic	golden	default	
+40_histogram	golden	default	
+41_latency_hist	golden	default	
+42_keyed_hist	golden	default	
+43_linear_hist	golden	default	
+44_reactor_block_params	golden	default	
+45_reactor_usdt_params	golden	default	
+46_comm_builtins	golden	default	
+47_reactor_pid	golden	default	
+48_stack_trace	golden	default	
+49_reactor_all_params	golden	default	
+50_reactor_named_tp	golden	default	
+51_perf_event	golden	default	
+52_off_cpu	golden	default	
+53_scx_simple	golden	default	
+54_qdisc_blackhole	golden	default	
+55_qdisc_fifo	golden	default	
+56_kfield	golden	default	
+57_cidr_blocklist	golden	default	
+58_lsm_fmod	golden	default	
+59_task_storage	golden	default	
+60_map_in_map	golden	default	
+61_cgroup_connect4	golden	default	
+62_iter_task	golden	default	
+63_queue_stack	golden	default	
+64_xsk_dev_redirect	golden	default	
+65_raw_tp	golden	default	
+66_niche_progs	golden	default	
+67_memleak	golden	default	
+68_deadlock	golden	default	
+69_execsnoop	golden	default	
+70_runqlat	golden	default	
+71_tcplife	golden	default	
+72_tcpconnect	golden	default	
+73_irq	golden	default	
+74_kfield_dotted	golden	default	
+75_slabratetop	golden	default	
+76_field_exists	golden	default	
+77_fib_lookup	golden	default	
+78_fib_lookup_kprobe	refusal	refused	
+79_skb_rewrite	golden	default	
+80_skb_rewrite_xdp	refusal	refused	
+81_nat_rewrite	golden	default	
+82_nat_xdp	refusal	refused	
+83_nat_port	golden	default	
+84_arena	golden	default	
+85_l4_lb	golden	default	
+86_arena_hash	golden	default	
+87_arena_hash_del	golden	default	
+88_arena_config	golden	default	
+89_arena_list	golden	default	
+90_l4_lb_pool	golden	default	
+91_ip_options	golden	default	
+92_fib6	golden	default	
+93_sk_lookup	golden	default	
+94_router	golden	default	
+95_sk_assign	golden	default	
+96_sk_assign_egress	refusal	refused	
+97_kprobe_conditional_emit	golden	default	
+98_bool_sig	golden	default	
+99_emit_path	golden	default	

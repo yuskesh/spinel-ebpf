@@ -1,22 +1,17 @@
-# STILL NOT BUILDABLE, FOR A REASON THAT HAS NOTHING TO DO WITH THIS FILE'S
-# BPF PROGRAM.
+# This builds and runs. It did not, until the two partitioners were made to
+# agree.
 #
-# The two builtins this example is about -- reuseport_hash and worker_select --
-# were demoted by the audit and have since been restored, so that refusal is
-# gone. What stops the build now is older and unrelated: the partitioner routes
-# worker_loop, an accept loop, to the eBPF side, and the eBPF generator cannot
-# lower an unbounded `loop`. Compiling stops there.
+# The C generator used to decide eBPF eligibility from a method's signature
+# alone. `worker_loop(port, my_idx)` is int,int -> int, so it looked eligible and
+# was emitted -- and lowering it died at `CallNode not yet ported (Stage 1):
+# loop`, because it is an accept loop. The Ruby partition had walked the body and
+# ruled it native all along; the two verdicts were simply never joined up. They
+# are now, the Ruby one wins, and the generator prints a line naming each method
+# it was overruled on.
 #
-# It is not this file's BPF program that is at fault. Its sibling
-# ../l7-path-counter/server.rb uses none of these surfaces and fails in exactly
-# the same place, in both compilation modes: `CallNode not yet ported
-# (Stage 1): loop` under --ebpf-dispatch, and upstream spinel refusing the
-# path_counter_inc call in the plain mode.
-#
-# The kernel half of the example is worth reading on its own: sk_reuseport__select
-# is generated, and `spinel-ebpf describe` on this file reports which
-# REUSEPORT_SOCKARRAY slots the arithmetic can reach and whether the userspace
-# half registers and attaches.
+# Measured after that change: `--build --ebpf-dispatch` writes a single binary,
+# two workers serve `/` with 200 and an unknown path with 404, and the kernel is
+# left with no BPF programs or maps after exit.
 #
 # examples/http_server/so-reuseport/server.rb
 #

@@ -9,6 +9,7 @@
 require_relative "parse_spinel_ir"
 require_relative "parse_spinel_ast"
 require_relative "kernel_cache"
+require_relative "capabilities"   # the attach-word vocabulary (no cycle: capabilities requires nothing)
 
 module SpinelEbpf
   module Partition
@@ -339,9 +340,113 @@ module SpinelEbpf
       info = BPF_EVENT_LOOP_KINDS[kind]
       return info if info
 
-      raise PartitionError,
-            "unknown reactor event kind `on :#{kind}` " \
-            "(valid: #{BPF_EVENT_LOOP_KINDS.keys.map { |k| ":#{k}" }.join(', ')})"
+      handler_not_realised!(
+        "unknown reactor event kind `on :#{kind}`.",
+        "inside `include BPF::EventLoop` every `on :sym` IS a handler, so a kind this table does " \
+        "not know names an event that will never be hooked. There is no fallback: the 16 kinds " \
+        "below are the definition of the reactor surface.",
+        "use one of #{BPF_EVENT_LOOP_KINDS.keys.map { |k| ":#{k}" }.join(', ')}, or write the flat " \
+        "form `def <prefix>__<target>` if you need an attach kind the reactor does not spell " \
+        "(`spinel-ebpf capabilities` lists all of them).",
+      )
+    end
+
+    # ---------- a declared handler that cannot be realised ----------
+    #
+    # THE FAILURE THIS REPLACES. When the partition could not turn something the
+    # author wrote into a handler it used to do one of three different things,
+    # and two of them reported success. Measured over the shapes that reach this
+    # code: 13 of them, 12 exited 0, and 10 of those printed no diagnostic at
+    # all.
+    #
+    #   on :no_such_kind do … end   PartitionError, raw Ruby backtrace     exit 1
+    #   on :timer do … end          "warning: … — skipping handler"        exit 0
+    #   on :xdp                     nothing whatsoever                     exit 0
+    #
+    # The third is the pure form: the author declares an XDP handler and gets a
+    # program with no XDP handler and zero diagnostics. It is the same shape an
+    # earlier audit found for `:timer` ("the body never appears in the output")
+    # except that this one is not a porting oversight — it is a `next` somebody
+    # wrote on purpose, which is why closing it needed a verdict per site rather
+    # than a patch.
+    #
+    # WHY REFUSE RATHER THAN WARN. The in-kernel common filter chose "refuse the
+    # whole declaration" over partial application because warnings are not read,
+    # and this tree has the receipts: the retired `kernel_cache` directive
+    # returned -2 into a value the shipped demo discarded, and the negative
+    # fixture `163_timer_no_interval` — whose own header says it "must not
+    # compile" — warned and exited 0 for as long as it had existed.
+    #
+    # WHY HERE AND NOT IN validate.rb. By the time Validate runs, the dropped
+    # handler is gone from Result#methods; there is nothing left to check. The
+    # partition is the last layer that still knows the author wrote `on :xdp` —
+    # the same argument that put the `kernel_cache` refusal in the pass that can
+    # still see the word.
+    #
+    # The message shape is this project's: what / why / how to fix.
+    def handler_not_realised!(what, why, fix)
+      raise PartitionError, "#{what}\n  Why: #{why}\n  Fix: #{fix}"
+    end
+
+    # Does this method name declare a kernel attach point?
+    #
+    # Derived from the affordance (Capabilities::ATTACH_KINDS) rather than from
+    # CodegenBpf::ATTACH_PATTERNS, for two reasons: codegen_bpf.rb requires
+    # partition.rb (a `require_relative` back would be a cycle), and the
+    # affordance is the authority for what attach kinds exist. Same derivation
+    # Validate::ATTACH_WORDS uses.
+    #
+    # Deliberately NOT the withdrawn kinds: those are refused by name in the C
+    # codegen with their own message, which is more specific than anything this
+    # could say.
+    #
+    # DELIBERATELY BROADER than CodegenBpf.detect_attach, in the safe direction.
+    # Six of the 25 words name two-segment kinds (`tracepoint__<cat>__<event>`,
+    # `tc__ingress__<name>`, …), so `tracepoint__probe` passes here and fails
+    # there. That over-approximation only decides whether a BODY-LESS def is
+    # refused or dropped, and refusing a malformed attach name is better than
+    # losing it: a well-formed one is a real handler, and a malformed one is a
+    # mistake either way. It must never go the other way — a word this misses is
+    # a handler that can still vanish — which is why the direction is pinned by
+    # a test rather than left to the reader.
+    ATTACH_DECL_WORDS = Capabilities::ATTACH_KINDS
+                        .filter_map { |a| a[:method_prefix][/\A([a-z0-9_]+?)__/, 1] }
+                        .uniq
+                        .sort_by { |w| -w.length }
+                        .freeze
+
+    def attach_decl?(name)
+      return false if name.nil? || name.empty?
+      ATTACH_DECL_WORDS.any? { |w| name.start_with?("#{w}__") && name.length > w.length + 2 }
+    end
+
+    # The `do … end` block of an `on` call, or a refusal.
+    # The two conditions are adjacent at every reactor site (the block may be
+    # absent, or present and empty), and they are the same mistake to the
+    # author: a declared handler with no body.
+    def reactor_block_body!(ast, call_node, spelling, where)
+      block_id = call_node.refs.fetch("block", -1)
+      if block_id < 0
+        handler_not_realised!(
+          "`#{spelling}` in #{where} declares a handler with no `do … end` block.",
+          "the block IS the handler body. Without one there is nothing to compile, so this " \
+          "declaration used to be dropped and the build exited 0 having emitted no program for it " \
+          "at all — the author asks for a hook and gets a binary that hooks nothing.",
+          "give it a body: `#{spelling} do … end`, or delete the line.",
+        )
+      end
+      body_id = ast.ref(block_id, "body", default: -1)
+      if body_id < 0
+        handler_not_realised!(
+          "`#{spelling}` in #{where} declares a handler whose block is empty.",
+          "an empty block has no body to lower, so no program is emitted and nothing is attached. " \
+          "That is not the same as a handler that does nothing: a program that exists attaches, is " \
+          "visible to `bpftool prog show`, and (for XDP) holds the interface; one that was never " \
+          "emitted does none of that, silently.",
+          "put at least one statement in the block, or delete the declaration until you need it.",
+        )
+      end
+      [block_id, body_id]
     end
 
     def program_warnings(ir)
@@ -350,20 +455,153 @@ module SpinelEbpf
       end
     end
 
+    # ---------- AST body resolution ----------
+    #
+    # The .ir and the .ast come from two DIFFERENT spinel invocations —
+    # `spinel --dump-ast` (upstream binary) and the in-process
+    # `spinel-ebpf-cc --ir` (bin/spinel-ebpf#run_spinel_to_ir). A plain
+    # `require` resolves relative to the RUNNING EXECUTABLE (/proc/self/exe;
+    # spinel_parse.c#resolve_plain_requires), so the two parses can be handed
+    # different source text and therefore number their nodes differently.
+    #
+    # Measured on examples/http_server/so-reuseport/server.rb: the word "Set"
+    # inside a *comment* trips spinel's implicit `require "set"` splice, which
+    # only the upstream binary can resolve (its `packages/set/set.rb` sits beside
+    # its own bin/). 1216 nodes exist in the .ast that the .ir never saw, so
+    # every user node in the .ast sits 1216 higher than the id the IR reports.
+    #
+    # An IR body id is therefore an id in the IR's OWN parse, not a node id in
+    # the .ast. Each artifact stays authoritative for what it actually
+    # describes: the IR for which methods exist and what their types are, the
+    # AST for where the body is. So the body is resolved out of the AST, by
+    # name within scope, and the IR's id is used only as "this method exists".
+    #
+    # Rejected alternatives: translating by an offset — the offset is only
+    # constant because `set` splices at the very front; a plain require inside a
+    # required file splices mid-tree and the offset goes piecewise — and
+    # renumbering the .ast — there is no fixed "prelude" to strip, and every
+    # other AST consumer (dsl_ast_def_id, consumer.rb, kernel_cache,
+    # param/filter_by) is already correct in .ast space.
+
+    # `bodyless` records the defs the other two tables cannot: scope (nil for
+    # top level) -> Set of names whose DefNode has no body at all. A missing
+    # entry in `top_level`/`scoped` is ambiguous — it means EITHER "the author
+    # wrote `def x; end`" OR "the IR names a method this AST never saw" (the
+    # require-splice case above, where dropping is correct). Only the first is a
+    # declaration that failed to be realised, so the two are told apart here
+    # rather than guessed at the drop site.
+    AstDefIndex = Struct.new(:top_level, :scoped, :bodyless, keyword_init: true) do
+      def bodyless?(scope, name)
+        (bodyless[scope] || []).include?(name)
+      end
+    end
+
+    # name -> [body node id, ...] for top-level defs, and
+    # class-or-module name -> name -> [body node id, ...] for the rest.
+    # Ids come out in ascending order (spinel's flatten numbers pre-order, so a
+    # later sibling gets a higher id), which is what makes `.last` mean "the
+    # definition Ruby would keep" for a redefinition.
+    def build_ast_def_index(ast)
+      top      = Hash.new { |h, k| h[k] = [] }
+      scoped   = Hash.new { |h, k| h[k] = Hash.new { |g, m| g[m] = [] } }
+      bodyless = Hash.new { |h, k| h[k] = [] }
+      idx = AstDefIndex.new(top_level: top, scoped: scoped, bodyless: bodyless)
+      return idx unless ast && ast.nodes
+
+      parent = {}
+      ast.nodes.each do |id, n|
+        n.refs.each_value { |c| parent[c] = id if c.is_a?(Integer) && c >= 0 }
+        n.arrays.each_value do |arr|
+          arr.each { |c| parent[c] = id if c.is_a?(Integer) && c >= 0 }
+        end
+      end
+
+      ast.nodes.keys.sort.each do |id|
+        n = ast.nodes[id]
+        next unless n.type == "DefNode"
+        name = n.attrs.fetch("name", "")
+        next if name.empty?
+        body = n.refs.fetch("body", -1)
+        scope = enclosing_scope_name(ast, parent, id)
+        if body < 0
+          bodyless[scope] << name   # "written, but with no body"
+          next
+        end
+        (scope ? scoped[scope] : top)[name] << body
+      end
+      idx
+    end
+
+    # Nearest enclosing ClassNode/ModuleNode name, or nil for a top-level def.
+    # A def nested inside another def is reported as nil-scope too: spinel's
+    # method tables cannot name it, so it will simply never be looked up.
+    def enclosing_scope_name(ast, parent, id)
+      cur = parent[id]
+      512.times do
+        break unless cur
+        n = ast.node(cur)
+        break unless n
+        case n.type
+        when "ClassNode", "ModuleNode"
+          cp = n.refs.fetch("constant_path", -1)
+          nm = ast.str_attr(cp, "name", default: "")
+          return nm.empty? ? nil : nm
+        when "DefNode"
+          return nil
+        end
+        cur = parent[cur]
+      end
+      nil
+    end
+
+    # Resolve one method's body. `scope_name` nil = top level. Returns nil when
+    # the AST has no such definition — the caller decides what that means.
+    def resolve_ast_body_id(idx, scope_name, method_name)
+      bucket = scope_name ? idx.scoped[scope_name] : idx.top_level
+      cands = bucket[method_name]
+      cands.empty? ? nil : cands.last
+    end
+
     # ---------- Method enumeration ----------
 
     # Yields MethodInfo objects (without filling :flags / :tag yet).
     def enumerate_methods(ir, ast)
       results = []
+      ast_defs = build_ast_def_index(ast)
 
       # Top-level methods
       names_arr   = (ir.sa("@meth_names") || []).flat_map { |s| s.split(";", -1) }.reject(&:empty?)
       bodies_arr  = ir.ia("@meth_body_ids") || []
       names_arr.zip(bodies_arr).each do |name, bid|
+        # `def xdp__main; end` — an attach handler with an empty body. Measured
+        # exit 0, no diagnostic, no XDP program. spinel reports body_id -1 for a
+        # body-less def, so this is the drop, one guard EARLIER than the AST
+        # lookup below.
+        #
+        # Two conditions keep this off the rest of the corpus. `attach_decl?`:
+        # only an attach name is a declaration that the program hooks something
+        # — a body-less plain `def spnl_emit(x); end` is the builtin-stub shape
+        # the corpus relies on and must keep being skipped. `bodyless?`: the
+        # author actually wrote a body-less def in THIS file, as opposed to the
+        # IR naming a method this AST never saw (the require-splice case above,
+        # where dropping is correct).
+        if (bid.nil? || bid < 0) && attach_decl?(name) && ast_defs.bodyless?(nil, name)
+          handler_not_realised!(
+            "`def #{name}` has an empty body.",
+            "the name is spelled as a kernel attach point, and an attach handler has no native " \
+            "execution path — an empty body means no program is emitted, so nothing is attached " \
+            "and the hook never exists. That used to compile and exit 0 with no diagnostic.",
+            "put at least one statement in `#{name}` (`spinel-ebpf capabilities` lists what the " \
+            "eBPF subset allows), or delete the declaration until you need it.",
+          )
+        end
         next if bid.nil? || bid < 0
+        # The IR says the method exists; the AST says where its body is.
+        body = resolve_ast_body_id(ast_defs, nil, name)
+        next if body.nil?
         results << MethodInfo.new(
           scope: :top_level, class_name: nil, method_name: name,
-          body_id: bid, flags: MethodFlags.default, tag: nil,
+          body_id: body, flags: MethodFlags.default, tag: nil,
         )
       end
 
@@ -388,7 +626,28 @@ module SpinelEbpf
         dsl_prefix = dsl_prefix_for_parent!(parent)
 
         m_names.zip(m_bodies).each do |name, bid|
+          # `class C < BPF::XDP; def main; end; end`. A DSL parent binds EVERY
+          # method of the class to an attach kind, so an empty body is the same
+          # silent loss as the top-level case above — and it lands on the same
+          # earlier guard, because spinel reports -1 in @cls_meth_bodies too.
+          # Plain classes are untouched: an empty method there is just an empty
+          # method, with a native execution path like any other.
+          if (bid.nil? || bid < 0) && dsl_prefix && ast_defs.bodyless?(cname, name)
+            handler_not_realised!(
+              "`def #{name}` in class `#{cname}` (< BPF::…) has an empty body.",
+              "the DSL base class binds every method of `#{cname}` to an attach kind — this one " \
+              "becomes `#{dsl_prefix}#{name}`. An empty body has nothing to lower, so no program " \
+              "is emitted and nothing is attached, with no diagnostic at all.",
+              "put at least one statement in `#{name}`, or delete it until you need it.",
+            )
+          end
           next if bid.nil? || bid < 0
+          # Same split of authority as the top-level table above. The scope key
+          # is the class-or-module's simple name, which is what @cls_names
+          # carries (spinel surfaces module methods here too).
+          body = resolve_ast_body_id(ast_defs, cname, name)
+          next if body.nil?
+          bid = body
           if dsl_prefix
             results << MethodInfo.new(
               scope: :top_level, class_name: nil,
@@ -450,7 +709,11 @@ module SpinelEbpf
         n = ast.node(sid)
         next unless n && n.type == "ModuleNode"
         body_id = n.refs.fetch("body", -1)
+        # An empty `module Foo; end` declares nothing, so there is nothing that
+        # could fail to be realised — not a drop site.
         next if body_id < 0
+        mod_name = ast.str_attr(n.refs.fetch("constant_path", -1), "name", default: "")
+        mod_where = mod_name.empty? ? "this module" : "module `#{mod_name}`"
         prefix = nil
         event_loop = false
         defs   = []
@@ -491,11 +754,21 @@ module SpinelEbpf
           reactor_multi_counter = 0   # `on :kprobe, %w[...]` sets
           on_calls.each do |cn|
             args_id = cn.refs.fetch("arguments", -1)
-            next if args_id < 0
-            arg_ids = ast.array(args_id, "arguments", default: [])
-            next if arg_ids.empty?
-            sym = ast.node(arg_ids[0])
-            next unless sym && sym.type == "SymbolNode"
+            arg_ids = args_id < 0 ? [] : ast.array(args_id, "arguments", default: [])
+            sym = arg_ids.empty? ? nil : ast.node(arg_ids[0])
+            # `on do … end`, `on()` and `on "xdp" do … end` all arrive here with
+            # no leading SymbolNode. All three used to be dropped without a word.
+            unless sym && sym.type == "SymbolNode"
+              got = sym ? sym.type : "no arguments"
+              handler_not_realised!(
+                "`on` in #{mod_where} does not name an event kind (got #{got}).",
+                "the first argument of a reactor `on` selects the kernel event to hook, and it has " \
+                "to be a symbol literal so the partition can resolve it at compile time. Anything " \
+                "else names nothing, and the handler used to be dropped silently.",
+                "write the kind as a symbol: `on :xdp do … end` " \
+                "(valid: #{BPF_EVENT_LOOP_KINDS.keys.map { |k| ":#{k}" }.join(', ')}).",
+              )
+            end
             kind = sym.attrs.fetch("value", "")
 
             # `on :kprobe, %w[a b c]` -- one body, many symbols. The list sits
@@ -510,10 +783,10 @@ module SpinelEbpf
             if (multi_syms = multi_symbol_list(ast, arg_ids))
               n = reactor_multi_counter
               reactor_multi_counter += 1
-              block_id = cn.refs.fetch("block", -1)
-              next if block_id < 0
-              handler_body_id = ast.ref(block_id, "body", default: -1)
-              next if handler_body_id < 0
+              # The multi-symbol form drops on the same two conditions as the
+              # 1-to-1 form below, so it refuses the same way.
+              block_id, handler_body_id =
+                reactor_block_body!(ast, cn, "on :#{kind}, %w[#{multi_syms.first(2).join(' ')}#{multi_syms.length > 2 ? ' …' : ''}]", mod_where)
               out << MethodInfo.new(
                 scope: :top_level, class_name: nil,
                 method_name: "kprobe_multi__set#{n}",
@@ -539,7 +812,20 @@ module SpinelEbpf
               tval = tnode.attrs.fetch("content", "")
               targets << tval unless tval.empty?
             end
-            next if targets.length != info.arity
+            # `on :kprobe do … end` with no function name. The target is what
+            # the SEC() is built from, so without it there is no event to attach
+            # to — and this used to be dropped without a word.
+            if targets.length != info.arity
+              slots = Array.new(info.arity) { '"…"' }.join(", ")
+              plural = info.arity == 1 ? "argument" : "arguments"
+              handler_not_realised!(
+                "`on :#{kind}` in #{mod_where} needs #{info.arity} target #{plural}, got #{targets.length}.",
+                "the target names the kernel object to hook and is baked into the SEC() at compile " \
+                "time (`#{info.prefix}` + target). With the wrong number of string literals there is " \
+                "no event to attach to, and the handler used to be dropped silently.",
+                "supply the target(s) as string literals: `on :#{kind}, #{slots} do … end`.",
+              )
+            end
 
             # reactor uprobe / uretprobe / usdt — split target string(s)
             # into binary path + func / provider + probe and synthesize a
@@ -573,10 +859,18 @@ module SpinelEbpf
                 # somewhere in the directory still work (rare but possible).
                 spec = targets[0]
                 idx  = spec.rindex(":")
+                # Was a warning + drop. A warning that is followed by a
+                # successful build is exactly the shape the common-filter
+                # declaration refused.
                 if idx.nil? || idx == 0 || idx == spec.length - 1
-                  $stderr.puts "spinel-ebpf: warning: `on :#{kind}, #{spec.inspect}` " \
-                               "doesn't match 'bin:func' form — skipping handler"
-                  next
+                  handler_not_realised!(
+                    "`on :#{kind}, #{spec.inspect}` in #{mod_where} is not in `binary:function` form.",
+                    "a #{kind} attaches to a symbol inside a specific executable, so the target " \
+                    "carries both halves; glue.c splits them at the last `:` to call " \
+                    "bpf_program__attach_uprobe_opts. With only one half there is nothing to attach " \
+                    "to, and this used to warn and then exit 0 anyway.",
+                    "write both halves: `on :#{kind}, \"/usr/bin/bash:readline\" do … end`.",
+                  )
                 end
                 dsl_uprobe_binary   = spec[0...idx]
                 dsl_uprobe_func     = spec[(idx + 1)..]
@@ -610,11 +904,22 @@ module SpinelEbpf
             if kind == "timer"
               kw = arg_ids[info.arity + 1] || arg_ids[1]
               interval_ns = parse_timer_interval_ns(ast, kw) if kw
-              # Without a valid interval the timer block has no way to fire,
-              # so skip silently and emit a warning to stderr.
+              # Was a warning + drop. The negative fixture
+              # tests/fixtures/163_timer_no_interval's own header says a timer
+              # that cannot fire "must not compile", and the C codegen does
+              # refuse it — but the CLI never got that far, because this drop
+              # left the eBPF method count at zero and the codegen was never
+              # called. The refusal has to be here for a user to ever see it.
               if interval_ns.nil?
-                $stderr.puts "spinel-ebpf: warning: `on :timer` without `every: N.<unit>` — skipping handler"
-                next
+                units = BPF_TIMER_UNIT_NS.keys.join(", ")
+                handler_not_realised!(
+                  "`on :timer` in #{mod_where} has no `every: N.<unit>` interval.",
+                  "the interval is folded into bpf_timer_start at compile time, so a timer without " \
+                  "one has nothing to arm and can never fire. An earlier audit measured what the " \
+                  "silence cost: the whole block vanished from the emitted C and the probe still " \
+                  "exited 0.",
+                  "give it a period: `on :timer, every: 1.seconds do … end` (units: #{units}).",
+                )
               end
             end
 
@@ -627,10 +932,11 @@ module SpinelEbpf
               perf_hz = parse_perf_event_hz(ast, kw) if kw
             end
 
-            block_id = cn.refs.fetch("block", -1)
-            next if block_id < 0
-            handler_body_id = ast.ref(block_id, "body", default: -1)
-            next if handler_body_id < 0
+            # THE headline case. `on :xdp` with no block was the purest form of
+            # the bug — no warning, no error, no XDP program.
+            spelling = "on :#{kind}" + targets.map { |t| ", #{t.inspect}" }.join
+            _block_id, handler_body_id = reactor_block_body!(ast, cn, spelling, mod_where)
+            block_id = _block_id
             out << MethodInfo.new(
               scope: :top_level, class_name: nil,
               method_name: method_name,
@@ -656,9 +962,28 @@ module SpinelEbpf
         elsif prefix
           defs.each do |dn|
             name = dn.attrs.fetch("name", "")
-            next if name.empty?
+            # Not reachable from any Ruby source — spinel always writes a
+            # DefNode's name. Kept as an invariant rather than a drop: if it
+            # ever fires it is a bug in the AST dump, not in the probe, and
+            # silently losing an attach handler is the wrong way to find out.
+            raise PartitionError,
+                  "internal: DefNode #{dn.id} in #{mod_where} (include BPF::…) has no name; " \
+                  "every method in a DSL-bound module becomes an attach handler, so it cannot be " \
+                  "skipped. Please report this with the .rb and the .ast." if name.empty?
             body_node_id = dn.refs.fetch("body", -1)
-            next if body_node_id < 0
+            # `module M; include BPF::XDP; def main; end; end`. Every method of
+            # a DSL-bound module IS an attach handler, so an empty body meant no
+            # program at all — measured exit 0, no output.
+            if body_node_id < 0
+              handler_not_realised!(
+                "`def #{name}` in #{mod_where} (include BPF::…) has an empty body.",
+                "including a BPF DSL module binds every method in it to an attach kind — this one " \
+                "becomes `#{prefix}#{name}`. An empty body has nothing to lower, so no program is " \
+                "emitted and nothing is attached, and that used to happen with no diagnostic at " \
+                "all.",
+                "put at least one statement in `#{name}`, or delete it until you need it.",
+              )
+            end
             out << MethodInfo.new(
               scope: :top_level, class_name: nil,
               method_name: "#{prefix}#{name}",
