@@ -41,6 +41,12 @@
 #      build succeeded, and the binary printed "BPF loaded and attached" and served
 #      nothing -- exit 0 all the way through.
 #
+#   7. An eBPF-only builtin sitting in a body that is ALSO compiled natively. The
+#      generated native C then reaches upstream spinel, which has no such method
+#      and refuses it with a node number. Everything needed to say so plainly --
+#      the builtin list, the partition, and whether --ebpf-dispatch was passed --
+#      is known here, one layer before that call is made.
+#
 # It also rejects enumerable blocks such as `[1,2,3].map { }`, which cannot run in
 # eBPF and which partitioning does not catch.
 #
@@ -51,6 +57,7 @@
 require "set"
 require_relative "capabilities"
 require_relative "codegen_bpf"
+require_relative "dispatch_shim"  # check (7) needs the extern-method rule
 require_relative "param"
 require_relative "kernel_cache"   # check (6) needs the declaration parser
 
@@ -101,9 +108,10 @@ module SpinelEbpf
     ZERO_ARG_STRICT = %w[latency_start latency_end].to_set.freeze
 
     # Run every check, raising on the first violation.
-    #   ast    -- ParseSpinelAst
-    #   result -- a Partition::Result, with tags already assigned
-    def validate!(ast, result)
+    #   ast            -- ParseSpinelAst
+    #   result         -- a Partition::Result, with tags already assigned
+    #   ebpf_dispatch: -- the CLI's --ebpf-dispatch (check (7) uses it)
+    def validate!(ast, result, ebpf_dispatch: false)
       return if result.nil? || ast.nil?
       check_attach_handlers_are_ebpf!(result)              # (1)
       check_attach_name_typos!(result)                     # (2)
@@ -113,7 +121,180 @@ module SpinelEbpf
       check_unknown_builtins!(unknown)                     # (4)
       check_required_sets!(used)                           # (5)
       check_kernel_cache_unported!(ast)                    # (6)
+      check_native_side_ebpf_builtins!(ast, result, ebpf_dispatch) # (7)
       nil
+    end
+
+    # ---------- the seam between the two partitioners ----------
+    #
+    # spinel-ebpf runs TWO partitions over the same program:
+    #
+    #   Ruby (Partition.classify)  walks the body -- I/O, unbounded loops,
+    #                              closures, recursion, inherited impossibility
+    #   C (cc_sig_eligible)        reads the SIGNATURE and nothing else
+    #
+    # They disagree in one direction only: a method can be int,int->int (so the C
+    # side would emit it) and still be eBPF-impossible (so the Ruby side keeps it
+    # native). `def worker_loop(port, my_idx)` in the SO_REUSEPORT example
+    # (examples/http_server/so-reuseport/server.rb) is both; it was measured dying
+    # as `CallNode not yet ported (Stage 1): loop`.
+    #
+    # Ruby wins, because it is the one that looked at the body. These are the
+    # names handed to the generator in $SPNL_PARTITION_NATIVE.
+    #
+    # WHAT MAY NOT BE ON THIS LIST: an attach handler. Attach is the author's
+    # stated intent and has no native execution path, so excluding one turns
+    # "it fires" into "it never fires" with exit 0 -- the silent drop this whole
+    # change exists to remove. Those already die in check (1) above, one layer
+    # before this list is built; keeping them out of it means the override
+    # cannot introduce that failure even if check (1) were ever narrowed.
+    # `describe` and the partition table print the reason either way, and the
+    # generator prints one line per name it actually overrules, so the
+    # disagreement is never invisible from either side.
+    def native_override_names(result)
+      return [] if result.nil?
+      result.methods.filter_map do |mi|
+        next unless mi.tag == :native
+        next if mi.scope == :main
+        name = mi.method_name
+        next if name.nil? || name.empty?
+        next if name.start_with?("__spnl_")            # consumer fns: already excluded
+        next if CodegenBpf.detect_attach(name)         # never (see above)
+        mi.scope == :class ? "#{mi.class_name}##{name}" : name
+      end.uniq
+    end
+
+    # (7) an eBPF-only builtin in a body that is ALSO compiled natively.
+    #
+    # Without --ebpf-dispatch, spinel emits a native C body for every method
+    # reachable from `<main>` -- including the :ebpf-tagged ones. So a builtin
+    # that only the eBPF generator knows (`path_counter_inc` -> a BPF map update)
+    # reaches upstream spinel, which refuses it:
+    #
+    #   spinel: server.rb:67: unsupported call: node 1408
+    #           (CallNode `path_counter_inc`) recv=-/ty-1 argc=1 arg0ty3
+    #
+    # spinel-ebpf holds all three facts before that call is made (the builtin
+    # list, the partition, and whether --ebpf-dispatch was passed), so it says
+    # so itself, with the fix.
+    #
+    # REACHABILITY IS PART OF THE CONDITION, and it was measured, not assumed:
+    # upstream does NOT emit a method nothing calls. An attach handler using
+    # `spnl_emit` with no stub compiles fine today precisely because nobody calls
+    # it from Ruby -- so a check that only asked "does an :ebpf body call an
+    # eBPF-only builtin" would reject most of the corpus. The walk starts at
+    # `<main>` and stops at any method --ebpf-dispatch turns into an extern,
+    # because that is exactly the set whose bodies still reach the native
+    # emitter.
+    #
+    # The precedent set by `param` / `filter_by` (commented out of the native
+    # copy only) does not transfer: those are top-level DECLARATIONS, one line
+    # each, and blanking them changes nothing about the method bodies. This is a
+    # call inside a body -- deleting it would silently change what the native
+    # side does (the SO_REUSEPORT example's `route` would stop counting), and
+    # rewriting the body is what --ebpf-dispatch already does, properly, through
+    # the extern hook.
+    def check_native_side_ebpf_builtins!(ast, result, ebpf_dispatch)
+      extern = ebpf_dispatch ? DispatchShim.eligible_method_names(result).to_set : Set.new
+      by_name = Hash.new { |h, k| h[k] = [] }
+      result.methods.each { |m| by_name[m.method_name] << m }
+
+      # Bodies the native emitter still reaches: from <main>, through every
+      # method that is not handed to spinel as an extern declaration.
+      reached = {}
+      order   = []
+      stack   = result.methods.select { |m| m.scope == :main }
+      until stack.empty?
+        mi = stack.pop
+        key = mi.qualified_name
+        next if reached[key]
+        reached[key] = mi
+        order << mi
+        mi.flags.calls.uniq.each do |callee|
+          next if extern.include?(callee)
+          by_name[callee].each { |cm| stack << cm }
+        end
+      end
+
+      defined_names = ast_defined_method_names(ast)
+      order.each do |mi|
+        next unless mi.tag == :ebpf
+        next if mi.body_id.nil? || mi.body_id < 0
+        walk_calls(mi.body_id, ast) do |nid|
+          next unless ast.receiver_of(nid) < 0
+          name = ast.name_of(nid)
+          next if name.nil? || name.empty?
+          next unless BUILTINS.include?(name)
+          next if defined_names.include?(name)   # `def spnl_emit(x); end` stub: upstream resolves it
+          raise Error, native_side_builtin_message(mi, name, result, ebpf_dispatch)
+        end
+      end
+    end
+
+    # Every `def <name>` in the AST, whatever its scope and whether or not it has
+    # a body. NOT method_name_set(result): partitioning skips a body-less def
+    # (`resolve_ast_body_id` finds no body), and a body-less def is exactly the
+    # shape of the builtin stub the corpus uses -- `def spnl_emit(x); end`, which
+    # is why fixtures full of `spnl_emit` compile natively today. Reading the
+    # partition here made the first version of this check reject 3 fixtures that
+    # build.
+    def ast_defined_method_names(ast)
+      s = Set.new
+      return s unless ast && ast.nodes
+      ast.nodes.each_value do |n|
+        next unless n.type == "DefNode"
+        nm = n.attrs.fetch("name", "")
+        s << nm unless nm.empty?
+      end
+      s
+    end
+
+    def native_side_builtin_message(mi, builtin, result, ebpf_dispatch)
+      dispatchable = DispatchShim.eligible?(mi)
+      fix =
+        if dispatchable && !ebpf_dispatch
+          "Fix: add `--ebpf-dispatch`. It declares `#{mi.method_name}` extern " \
+          "(the SPINEL_EXTERN_METHODS hook) so spinel emits no native body for it, and links a " \
+          "shim that forwards the native call into the BPF program -- which is what " \
+          "calling an :ebpf method from native code is supposed to mean."
+        elsif dispatchable
+          "Fix: `--ebpf-dispatch` is on but `#{mi.method_name}` was not made extern -- check the " \
+          "boundary ABI (only int/bool parameters and int/bool/void returns cross)."
+        else
+          why = CodegenBpf.detect_attach(mi.method_name) ? "it is an attach handler" : "it is not a plain top-level method"
+          "Fix: `--ebpf-dispatch` cannot cover `#{mi.method_name}` (#{why}), so it has no extern " \
+          "form. Move the `#{builtin}` call into a plain top-level :ebpf method and call THAT " \
+          "from native code, or stop calling `#{mi.method_name}` from native code."
+        end
+      "`#{mi.method_name}` calls the eBPF-only builtin `#{builtin}`, and its body is also compiled " \
+      "into the native C.\n" \
+      "  Why: `#{builtin}` exists only in the eBPF code generator; upstream spinel has no such " \
+      "method and refuses it (\"unsupported call: (CallNode `#{builtin}`)\"). " \
+      "#{ebpf_dispatch ? 'Even with --ebpf-dispatch, spinel' : 'Without --ebpf-dispatch, spinel'} emits a " \
+      "native body for every method reachable from `<main>`, and this one is reached via " \
+      "#{native_reach_path(mi, result).join(' -> ')}.\n" \
+      "  #{fix}"
+    end
+
+    # A shortest <main> -> ... -> mi path through the call graph, for the message.
+    # Over-approximate by name (the same approximation Phase 3 uses); worst case
+    # the author is shown a different true path to the same method.
+    def native_reach_path(mi, result)
+      by_name = Hash.new { |h, k| h[k] = [] }
+      result.methods.each { |m| by_name[m.method_name] << m }
+      seen  = {}
+      queue = result.methods.select { |m| m.scope == :main }.map { |m| [m, ["<main>"]] }
+      until queue.empty?
+        cur, path = queue.shift
+        key = cur.qualified_name
+        next if seen[key]
+        seen[key] = true
+        return path if cur.equal?(mi)
+        cur.flags.calls.uniq.each do |callee|
+          by_name[callee].each { |cm| queue << [cm, path + [cm.qualified_name]] }
+        end
+      end
+      ["<main>", mi.qualified_name]
     end
 
     # (6) `kernel_cache "/path", body` -- a top-level directive that reaches NOTHING.

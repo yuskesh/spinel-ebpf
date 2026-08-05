@@ -405,7 +405,17 @@ def cmd_compile(argv)
   # ebpf_mixed: parse IR + AST, run partition, print tag table.
   ir  = SpinelEbpf::ParseSpinelIR.parse_file(ir_path)
   ast = SpinelEbpf::ParseSpinelAst.parse_file(ast_path)
-  result = SpinelEbpf::Partition.classify(ir, ast, force_native: opts[:self_targets])
+  # A PartitionError means the author declared something partitioning cannot
+  # realise (an `on` with no block, a timer with no interval, an attach handler
+  # with an empty body, an unknown reactor kind). Those messages already have
+  # the shape this project uses -- what / why / how to fix -- and printing a raw
+  # Ruby backtrace on top of one buries the part the author has to read, which
+  # is what the unknown-kind case did until now.
+  begin
+    result = SpinelEbpf::Partition.classify(ir, ast, force_native: opts[:self_targets])
+  rescue SpinelEbpf::Partition::PartitionError => e
+    abort "error: #{e.message}"
+  end
 
   print_partition_table(result, base)
 
@@ -415,7 +425,7 @@ def cmd_compile(argv)
   # probe that exits 0 having emitted no span). This only adds error paths; the
   # code generated for a probe that does compile is untouched.
   begin
-    SpinelEbpf::Validate.validate!(ast, result)
+    SpinelEbpf::Validate.validate!(ast, result, ebpf_dispatch: opts[:ebpf_dispatch])
   rescue SpinelEbpf::Validate::Error => e
     abort "error: #{e.message}"
   end
@@ -471,6 +481,21 @@ def cmd_compile(argv)
       icc_env["SPNL_AMP_M7"] = "1" if opts[:amp]   # AMP codegen path (board-agnostic)
       icc_env["SPNL_ENFORCEMENT"] = "monitor" if opts[:enforcement] == "monitor"
       icc_env["SPNL_EBPF_EXCLUDE"] = opts[:self_targets].join(",") if opts[:self_targets] && !opts[:self_targets].empty?
+      # Hand the C generator the Ruby partition's verdict. Its own partition
+      # (cc_sig_eligible) reads signatures only, so without this it emits
+      # methods that do I/O or loop unboundedly and dies mid-lowering. Ruby wins
+      # where they disagree; the generator prints one line per method it
+      # actually overrules, so nothing is dropped silently
+      # (Validate#native_override_names explains why attach handlers can never
+      # be on this list).
+      #
+      # Skipped for --target amp-m7: that path deliberately ignores tags and
+      # emits whichever handler is signature-eligible, so feeding it the tags
+      # would contradict its own selection rule.
+      unless opts[:amp]
+        pn = SpinelEbpf::Validate.native_override_names(result)
+        icc_env["SPNL_PARTITION_NATIVE"] = pn.join(",") unless pn.empty?
+      end
       File.write(bpf_path, IO.popen(icc_env, [icc, input, base], &:read))
       unless $?.success?
         # The codegen writes to stdout and die()s partway, so what landed in
@@ -3718,7 +3743,14 @@ def check_stage_codegen(build_dir, ctx)
   icc = inproc_codegen_bin
   return SpinelEbpf::Check.skip_stage("codegen", "in-process codegen unavailable") unless icc
   bpf_c = File.join(build_dir, "#{ctx[:base]}.bpf.c")
-  out, err, st = Open3.capture3(icc, ctx[:input], ctx[:base])
+  # The same environment `compile` builds with. Without this, `check` runs the C
+  # partition alone and reports a codegen failure for a probe that compiles --
+  # i.e. the two surfaces would disagree about which methods are emitted, which
+  # is the very class of bug this variable exists to close.
+  icc_env = {}
+  pn = SpinelEbpf::Validate.native_override_names(ctx[:result])
+  icc_env["SPNL_PARTITION_NATIVE"] = pn.join(",") unless pn.empty?
+  out, err, st = Open3.capture3(icc_env, icc, ctx[:input], ctx[:base])
   # `check --json` is the machine-facing surface, so it must survive the
   # diagnostic it is reporting. Measured: a codegen message containing one
   # non-ASCII byte crashed this line with Encoding::CompatibilityError under the
