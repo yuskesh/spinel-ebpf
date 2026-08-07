@@ -1258,6 +1258,15 @@ do_sugar    = %w[all sugar].include?(section)
 do_syntax   = %w[all syntax].include?(section)
 do_maps     = %w[all maps].include?(section)
 
+# The codegen is what this gate is ABOUT, so its absence is reported before any
+# section's own preconditions -- otherwise the message a caller sees depends on
+# which other tool happens to be missing too (CI builds spinel in a later job,
+# so the syntax section's spinel check fired first and masked this one).
+abort "affordance gate: production codegen missing: #{CC}\n" \
+      "  It is the in-process codegen binary and needs a built deps/spinel on Linux.\n" \
+      "  Run this in the build container:\n" \
+      "    container exec spnlbuild sh -c 'cd /work && ruby tools/affordance_gate.rb'" unless File.executable?(CC)
+
 advertised = do_builtins ? CAP.all_builtins.sort : []
 withdrawn  = do_builtins ? CAP::WITHDRAWN.keys.sort : []
 akinds     = do_attach ? CAP::ATTACH_KINDS.map { |a| a[:kind] } : []
@@ -1400,10 +1409,6 @@ if do_maps
   end
 end
 
-abort "affordance gate: production codegen missing: #{CC}\n" \
-      "  It is the in-process codegen binary and needs a built deps/spinel on Linux.\n" \
-      "  Run this in the build container:\n" \
-      "    container exec spnlbuild sh -c 'cd /work && ruby tools/affordance_gate.rb'" unless File.executable?(CC)
 _o, _e, _st = Open3.capture3(CC)
 unless "#{_o}#{_e}".include?("usage:")
   abort "affordance gate: #{CC} exists but does not run here (no usage line, exit #{_st.exitstatus.inspect}).\n" \
