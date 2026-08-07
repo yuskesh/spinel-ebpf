@@ -76,7 +76,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 decoded = "DECODE_ERROR\n" + e.stderr.decode()
 
         if ARGS.out:
-            with open(ARGS.out, "w") as f:
+            # Overwrite by default, so a test that expects a single request can
+            # json.load the file as-is. --append is for probes that POST more
+            # than once: metrics are sent one metric per request, and overwriting
+            # would erase the first one, which is indistinguishable from never
+            # having sent it.
+            with open(ARGS.out, "a" if ARGS.append else "w") as f:
                 f.write(decoded)
         sys.stderr.write("----- mock-otlp decoded -----\n" + decoded +
                          "-----------------------------\n")
@@ -93,6 +98,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=4318)
     ap.add_argument("--out", default="")
+    ap.add_argument("--append", action="store_true",
+                    help="append each request instead of overwriting "
+                         "(one metric per request means more than one POST)")
     ap.add_argument("--protoc", default="protoc")
     ap.add_argument("--repo-root", default=".")
     ap.add_argument("--cert", default="")  # a PEM holding cert+key makes it listen with TLS (https)

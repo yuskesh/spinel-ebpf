@@ -1,8 +1,9 @@
 /*
- * otlp_json_test.c -- unit check of the OTLP/JSON encoder (otlp_json.c).
- * argv[1] = metrics|traces|logs: builds that JSON from sample data and writes it
- * to stdout. The runner then checks validity and the expected fields with python
- * json.loads. No nanopb dependency.
+ * otlp_json_test.c -- unit check for the OTLP/JSON encoder (otlp_json.c).
+ * argv[1] is metrics|metrics_lat|metrics_lat_hist|traces|logs; the corresponding
+ * JSON is built from sample data and written to stdout. Metrics send one metric
+ * per request, hence one argument per part. The runner validates with
+ * python json.loads and checks the expected fields. nanopb-free.
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -17,14 +18,17 @@ int main(int argc, char **argv) {
     const char *svc = "spinel-app", *ver = "1.0", *scope = "spinel-ebpf";
     uint64_t t = 1700000000000000000ULL, start = 1699999999000000000ULL;
 
-    if (strcmp(which, "metrics") == 0) {
+    if (strncmp(which, "metrics", 7) == 0) {
         otlp_method_metric_t m[2];
         memset(m, 0, sizeof m);
         m[0].method = "add"; m[0].file = "app.rb"; m[0].line = 1; m[0].calls = 500;
         m[0].buckets[10] = 300; m[0].buckets[11] = 200;
         m[1].method = "fib"; m[1].file = "app.rb"; m[1].line = 3; m[1].calls = 10;
         m[1].buckets[5] = 10;
-        n = otlp_json_metrics_build(buf, sizeof buf, svc, ver, scope, t, start, m, 2);
+        int part = (strcmp(which, "metrics_lat") == 0)      ? OTLP_MPART_LATENCY_EXP
+                 : (strcmp(which, "metrics_lat_hist") == 0) ? OTLP_MPART_LATENCY_HIST
+                                                            : OTLP_MPART_CALLS;
+        n = otlp_json_metrics_method_build(buf, sizeof buf, svc, ver, scope, part, t, start, m, 2);
     } else if (strcmp(which, "logs") == 0) {
         otlp_log_record_t r[2];
         memset(r, 0, sizeof r);
@@ -41,7 +45,8 @@ int main(int argc, char **argv) {
         otlp_method_meta_t meta = { 0, "add", "app.rb", 1 };
         n = otlp_json_traces_build(buf, sizeof buf, svc, ver, scope, &s, 1, &meta, 1);
     } else {
-        fprintf(stderr, "usage: otlp_json_test metrics|traces|logs\n"); return 2;
+        fprintf(stderr, "usage: otlp_json_test metrics|metrics_lat|metrics_lat_hist|traces|logs\n");
+        return 2;
     }
 
     if (n < 0) { fprintf(stderr, "build failed (buffer too small?)\n"); return 1; }

@@ -33,7 +33,9 @@ echo "[metric] compiling generic keyed-metric test"
   "$OTLP/otlp_metrics.c" "$OTLP/otlp_json.c" "$OTLP/otlp_http.c" "$OTLP/otlp_grpc.c" \
   "$NANOPB/pb_encode.c" "$NANOPB/pb_common.c" $PB_C -lz -o "$TMP/m"
 
-start_mock() { "$PY" tests/runtime/mock_otlp_receiver.py --port "$PORT" --out "$1" \
+# --append: this probe sends the rate and the latency as separate requests, so
+# overwriting would erase the first one and make it look like it was never sent.
+start_mock() { "$PY" tests/runtime/mock_otlp_receiver.py --port "$PORT" --out "$1" --append \
   --protoc "$PROTOC" --repo-root "$REPO_ROOT" >"$2" 2>&1 & SRV=$!; }
 
 echo "[metric] (1) protobuf: arbitrary labels + 2 series"

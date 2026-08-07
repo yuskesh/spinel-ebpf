@@ -46,14 +46,21 @@ module Otlp
 end
 
 def kprobe__udp_sendmsg(sk, msg, len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568   # 0x3500 = be16 of port 53
+  if udp_dport(sk, msg) == 53   # the destination of THIS datagram
     dns_req_start(sk, msg)
   end
   0
 end
 
+# The receive side cannot ask the same question. `msg_name` here is an OUTPUT --
+# the kernel writes the sender's address into it after the copy -- so the only
+# thing available at entry is the socket's connected peer. That means the RTT
+# half of this probe still needs a resolver that connect()s; an unconnected
+# forwarder gets its queries recorded (above) but never a duration. That limit is
+# named rather than hidden: sock_dport is the right accessor here, and its
+# ceiling is the real one.
 def kprobe__udp_recvmsg(sk, msg, len, flags, addr_len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568
+  if sock_dport(sk) == 53
     dns_resp_stash(sk, msg)
   end
   0

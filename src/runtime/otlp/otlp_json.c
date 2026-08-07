@@ -93,10 +93,18 @@ static void jw_code_attrs(jw_t *w, const char *fn, const char *file, int32_t lin
  * protobuf encoder uses. */
 static double slot_midpoint(int s) { return s <= 0 ? 1.0 : 1.5 * (double)((uint64_t)1 << s); }
 
-long otlp_json_metrics_build(char *buf, size_t cap,
-                             const char *svc, const char *ver, const char *scope,
-                             uint64_t t, uint64_t start,
-                             const otlp_method_metric_t *methods, size_t n) {
+/* One metric per request, split the same way the protobuf side
+ * (otlp_metrics_method_build) splits it. The `part` numbering has to match:
+ * fixing only one side would make the http/json path emit a different metric.
+ * The declaration is otlp_method_part_t in otlp_metrics.h. */
+_Static_assert(OTLP_MPART_CALLS == 0 && OTLP_MPART_LATENCY_EXP == 1 && OTLP_MPART_LATENCY_HIST == 2,
+               "otlp_json_metrics_method_build's part numbering must match otlp_method_part_t");
+
+long otlp_json_metrics_method_build(char *buf, size_t cap,
+                                    const char *svc, const char *ver, const char *scope,
+                                    int part,
+                                    uint64_t t, uint64_t start,
+                                    const otlp_method_metric_t *methods, size_t n) {
     jw_t w = { buf, cap, 0, 1 };
     jw_raw(&w, "{\"resourceMetrics\":[{");
     jw_resource(&w, svc, ver);
@@ -104,50 +112,72 @@ long otlp_json_metrics_build(char *buf, size_t cap,
     jw_scope(&w, scope);
     jw_raw(&w, ",\"metrics\":[");
 
-    /* spnl_method_calls_total (Sum) */
-    jw_raw(&w, "{\"name\":\"spnl_method_calls_total\",\"sum\":{\"dataPoints\":[");
-    int first = 1;
-    for (size_t i = 0; i < n; i++) {
-        const otlp_method_metric_t *m = &methods[i];
-        if (m->calls == 0) continue;
-        if (!first) jw_ch(&w, ','); first = 0;
-        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
-        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
-        jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)m->calls);
-        jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
-        jw_ch(&w, '}');
-    }
-    jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
-
-    /* spnl_method_latency_ns (ExponentialHistogram) */
-    jw_raw(&w, ",{\"name\":\"spnl_method_latency_ns\",\"unit\":\"ns\",\"exponentialHistogram\":{\"dataPoints\":[");
-    first = 1;
-    for (size_t i = 0; i < n; i++) {
-        const otlp_method_metric_t *m = &methods[i];
-        if (m->calls == 0) continue;
-        int fs = -1, ls = -1; uint64_t total = 0; double sum = 0.0;
-        for (int s = 0; s < OTLP_HIST_SLOTS; s++) {
-            uint64_t cnt = m->buckets[s];
-            if (cnt == 0) continue;
-            if (fs < 0) fs = s;
-            ls = s; total += cnt; sum += (double)cnt * slot_midpoint(s);
+    if (part == OTLP_MPART_CALLS) {
+        jw_raw(&w, "{\"name\":\"spnl_method_calls_total\",\"sum\":{\"dataPoints\":[");
+        int first = 1;
+        for (size_t i = 0; i < n; i++) {
+            const otlp_method_metric_t *m = &methods[i];
+            if (m->calls == 0) continue;
+            if (!first) jw_ch(&w, ','); first = 0;
+            jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+            jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+            jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)m->calls);
+            jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
+            jw_ch(&w, '}');
         }
-        if (!first) jw_ch(&w, ','); first = 0;
-        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
-        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
-        jw_raw(&w, ",\"count\":"); jw_u64q(&w, total);
-        jw_raw(&w, ",\"sum\":"); jw_dbl(&w, sum);
-        jw_raw(&w, ",\"scale\":0,\"zeroCount\":\"0\"");
-        if (fs >= 0) {
-            jw_raw(&w, ",\"positive\":{\"offset\":"); jw_int(&w, fs);
+        jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
+    } else if (part == OTLP_MPART_LATENCY_EXP) {
+        jw_raw(&w, "{\"name\":\"spnl_method_latency_ns\",\"unit\":\"ns\",\"exponentialHistogram\":{\"dataPoints\":[");
+        int first = 1;
+        for (size_t i = 0; i < n; i++) {
+            const otlp_method_metric_t *m = &methods[i];
+            if (m->calls == 0) continue;
+            int fs = -1, ls = -1; uint64_t total = 0; double sum = 0.0;
+            for (int s = 0; s < OTLP_HIST_SLOTS; s++) {
+                uint64_t cnt = m->buckets[s];
+                if (cnt == 0) continue;
+                if (fs < 0) fs = s;
+                ls = s; total += cnt; sum += (double)cnt * slot_midpoint(s);
+            }
+            if (!first) jw_ch(&w, ','); first = 0;
+            jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+            jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+            jw_raw(&w, ",\"count\":"); jw_u64q(&w, total);
+            jw_raw(&w, ",\"sum\":"); jw_dbl(&w, sum);
+            jw_raw(&w, ",\"scale\":0,\"zeroCount\":\"0\"");
+            if (fs >= 0) {
+                jw_raw(&w, ",\"positive\":{\"offset\":"); jw_int(&w, fs);
+                jw_raw(&w, ",\"bucketCounts\":[");
+                for (int s = fs; s <= ls; s++) { if (s > fs) jw_ch(&w, ','); jw_u64q(&w, m->buckets[s]); }
+                jw_raw(&w, "]}");
+            }
+            jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
+            jw_ch(&w, '}');
+        }
+        jw_raw(&w, "],\"aggregationTemporality\":2}}");
+    } else {
+        jw_raw(&w, "{\"name\":\"spnl_method_latency_ns\",\"unit\":\"ns\",\"histogram\":{\"dataPoints\":[");
+        int first = 1;
+        for (size_t i = 0; i < n; i++) {
+            const otlp_method_metric_t *m = &methods[i];
+            if (m->calls == 0) continue;
+            uint64_t bc[OTLP_LOG2_NBUCKETS]; uint64_t total = 0; double sum = 0.0;
+            otlp_log2_fold(m->buckets, bc, &total, &sum);
+            if (!first) jw_ch(&w, ','); first = 0;
+            jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
+            jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
+            jw_raw(&w, ",\"count\":"); jw_u64q(&w, total);
+            jw_raw(&w, ",\"sum\":"); jw_dbl(&w, sum);
             jw_raw(&w, ",\"bucketCounts\":[");
-            for (int s = fs; s <= ls; s++) { if (s > fs) jw_ch(&w, ','); jw_u64q(&w, m->buckets[s]); }
-            jw_raw(&w, "]}");
+            for (int b = 0; b < OTLP_LOG2_NBUCKETS; b++) { if (b) jw_ch(&w, ','); jw_u64q(&w, bc[b]); }
+            jw_raw(&w, "],\"explicitBounds\":[");
+            for (int b = 0; b < OTLP_LOG2_NBOUNDS; b++) { if (b) jw_ch(&w, ','); jw_dbl(&w, otlp_log2_ns_bounds()[b]); }
+            jw_raw(&w, "],");
+            jw_code_attrs(&w, m->method, m->file, m->line);
+            jw_ch(&w, '}');
         }
-        jw_ch(&w, ','); jw_code_attrs(&w, m->method, m->file, m->line);
-        jw_ch(&w, '}');
+        jw_raw(&w, "],\"aggregationTemporality\":2}}");
     }
-    jw_raw(&w, "],\"aggregationTemporality\":2}}");
 
     jw_raw(&w, "]}]}]}");
     return w.ok ? (long)w.n : -1;
@@ -248,9 +278,9 @@ static void jw_labels(jw_t *w, const otlp_kv_t *labels, int nlabels) {
 }
 static void jw_series_attrs(jw_t *w, const otlp_series_t *s) { jw_labels(w, s->labels, s->nlabels); }
 
-/* A Sum on its own, the counterpart of otlp_metrics_sum_build on the protobuf
- * side. It lives in both encoders so there is no hole where a counter can be
- * declared but not sent over http/json. */
+/* A Sum on its own; the protobuf twin is otlp_metrics_sum_build. It lives in both
+ * encoders so that a counter cannot be declarable and yet unemittable over
+ * http/json. */
 long otlp_json_metrics_sum_build(char *buf, size_t cap,
                                  const char *svc, const char *ver, const char *scope,
                                  const char *name, const char *unit,
@@ -281,36 +311,25 @@ long otlp_json_metrics_sum_build(char *buf, size_t cap,
     return w.ok ? (long)w.n : -1;
 }
 
-long otlp_json_metrics_series_build(char *buf, size_t cap,
-                                    const char *svc, const char *ver, const char *scope,
-                                    const char *name, const char *lat_name, const char *unit,
-                                    uint64_t t, uint64_t start,
-                                    const otlp_series_t *series, size_t n) {
+/* An ExponentialHistogram on its own; the protobuf twin is
+ * otlp_metrics_exphist_build. There used to be only a builder that emitted it
+ * paired with the Sum, which put two metric types in one request, so a backend
+ * refusing one of them dropped the other as well. */
+long otlp_json_metrics_exphist_build(char *buf, size_t cap,
+                                     const char *svc, const char *ver, const char *scope,
+                                     const char *name, const char *unit,
+                                     uint64_t t, uint64_t start,
+                                     const otlp_series_t *series, size_t n) {
     jw_t w = { buf, cap, 0, 1 };
     jw_raw(&w, "{\"resourceMetrics\":[{");
     jw_resource(&w, svc, ver);
     jw_raw(&w, ",\"scopeMetrics\":[{");
     jw_scope(&w, scope);
     jw_raw(&w, ",\"metrics\":[");
-
-    jw_raw(&w, "{\"name\":"); jw_jstr(&w, name); jw_raw(&w, ",\"sum\":{\"dataPoints\":[");
-    int first = 1;
-    for (size_t i = 0; i < n; i++) {
-        const otlp_series_t *s = &series[i];
-        if (s->count == 0) continue;
-        if (!first) jw_ch(&w, ','); first = 0;
-        jw_raw(&w, "{\"startTimeUnixNano\":"); jw_u64q(&w, start);
-        jw_raw(&w, ",\"timeUnixNano\":"); jw_u64q(&w, t);
-        jw_raw(&w, ",\"asInt\":"); jw_i64q(&w, (int64_t)s->count);
-        jw_ch(&w, ','); jw_series_attrs(&w, s);
-        jw_ch(&w, '}');
-    }
-    jw_raw(&w, "],\"aggregationTemporality\":2,\"isMonotonic\":true}}");
-
-    jw_raw(&w, ",{\"name\":"); jw_jstr(&w, lat_name);
+    jw_raw(&w, "{\"name\":"); jw_jstr(&w, name);
     if (unit && unit[0]) { jw_raw(&w, ",\"unit\":"); jw_jstr(&w, unit); }
     jw_raw(&w, ",\"exponentialHistogram\":{\"dataPoints\":[");
-    first = 1;
+    int first = 1;
     for (size_t i = 0; i < n; i++) {
         const otlp_series_t *s = &series[i];
         if (s->count == 0) continue;
@@ -337,7 +356,6 @@ long otlp_json_metrics_series_build(char *buf, size_t cap,
         jw_ch(&w, '}');
     }
     jw_raw(&w, "],\"aggregationTemporality\":2}}");
-
     jw_raw(&w, "]}]}]}");
     return w.ok ? (long)w.n : -1;
 }

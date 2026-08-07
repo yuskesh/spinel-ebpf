@@ -292,13 +292,19 @@ int main(void) {
         ck(spnl_rec_offcpu_unpack(buf, H + 135, &r) == -1, "shorter than MIN is rejected");
     }
 
-    printf("[mirror] dns (historical offsets -- the first channel converted, unchanged)\n");
+    printf("[mirror] dns (offsets + the raw_status append)\n");
     {
         spnl_rec_dns_t r;
         char host[128];
+        /* put_dns writes the wire as it was before raw_status was appended, so
+         * this is the append-only reading rule for dns -- the same shape the
+         * offcpu block above pins for its own appended fields. */
         size_t n = put_dns(buf, sizeof buf);
-        CKEQ(n, SPNL_REC_DNS_SIZE, "hand-written record length == schema size");
-        ck(spnl_rec_dns_unpack(buf, n, &r) == 0, "unpack ok");
+        CKEQ(n, SPNL_REC_DNS_MIN, "older record length == schema MIN");
+        ck(spnl_rec_dns_unpack(buf, n, &r) == 0, "unpack ok (older producer)");
+        CKEQ(r.raw_status, 0, "appended raw_status reads as zero");
+        ck(spnl_rec_dns_unpack(buf, SPNL_REC_DNS_MIN - 1, &r) == -1,
+           "shorter than MIN is rejected");
         CKEQ(r.pid, 31697, "pid");
         ck(strcmp(r.comm, "python3") == 0, "comm == \"python3\"");
         CKEQ(r.cgid, 178, "cgid");

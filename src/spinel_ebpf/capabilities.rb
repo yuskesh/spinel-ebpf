@@ -302,6 +302,7 @@ module SpinelEbpf
           sock_addr_ip4 sock_addr_port
           sock_sport sock_dport sock_saddr sock_daddr sock_family sock_state sock_protocol
           sock_saddr6_hi sock_saddr6_lo sock_daddr6_hi sock_daddr6_lo
+          udp_dport udp_daddr
           cpumap_redirect xsk_redirect dev_redirect
           fib_lookup fib_lookup6 sk_lookup_tcp sk_assign_tcp redirect
           skb_load_byte skb_load_u16 skb_load_u32
@@ -1171,7 +1172,7 @@ module SpinelEbpf
       "dns_req_start"    => [2, %w[sk msg],           "begin correlating a DNS query"],
       "dns_resp_stash"   => [2, %w[sk msg],           "stash the DNS response buffer"],
       "dns_emit"         => [1, %w[ret],              "DNS span emit"],
-      "emit_dns"         => [1, %w[msg],              "emit a DNS query seen on port 53 as a packed record, independent of any resolver library"],
+      "emit_dns"         => [1, %w[msg],              "emit a DNS query seen on a udp_sendmsg as a packed record. **Independent of the resolver's implementation language AND of how it sends**: connected or not, one iovec or several, the same bytes are read. What cannot be read is a send whose bytes are not in user memory at all (splice/vmsplice, an ITER_BVEC iterator); such a record carries an empty `raw` and the drain reports it as `unreadable_payload` rather than turning it into a zero-filled span. Filter the destination with udp_dport(sk, msg) -- sock_dport is 0 for an unconnected sender"],
       "emit_tcp_payload" => [1, %w[msg],              "emit the first 128 bytes of a send buffer as a string, for protocol-independent parsing in userspace"],
       "emit_tcp_stream"  => [3, %w[sk msg size],      "emit a send buffer as a packed record keyed by socket, so userspace can accumulate per connection and reassemble a stream across many of them"],
       "req_start"        => [1, %w[sk],               "record the start of an L7 round trip in tcp_sendmsg"],
@@ -1216,9 +1217,9 @@ module SpinelEbpf
       # skc_num is __u16), so the conversion is baked into each accessor: a caller who
       # applies one uniform rule is guaranteed to get one of the two silently wrong.
       "sock_sport"       => [1, %w[sk],               "source port, in host order. It reads skc_num, which is **already** in host order, so unlike dport it is not converted. Raw, that field reads as 60404 and dport reads as 47903 -- both look like ports, which is why applying ntohs everywhere and applying it nowhere are both wrong"],
-      "sock_dport"       => [1, %w[sk],               "destination port, in host order. It reads skc_dport, which is a __be16, so ntohs is applied; the raw value is what a port looks like byte-swapped"],
+      "sock_dport"       => [1, %w[sk],               "the port **this socket is connected to**, in host order. It reads skc_dport, which is a __be16, so ntohs is applied; the raw value is what a port looks like byte-swapped. **Do not use it to filter UDP sends**: a sender that passes the destination on every send (dnsmasq does) leaves skc_dport at 0, so `== 53` is always false and the probe reports nothing rather than reporting it wrong. The destination of a datagram is udp_dport(sk, msg)"],
       "sock_saddr"       => [1, %w[sk],               "source IPv4 address, in host order (skc_rcv_saddr, converted). **Only meaningful when sock_family is AF_INET**: on an AF_INET6 socket it still returns a plausible-looking number such as 0 or 127.0.0.6"],
-      "sock_daddr"       => [1, %w[sk],               "destination IPv4 address, in host order (skc_daddr, converted). **Only meaningful when sock_family is AF_INET**"],
+      "sock_daddr"       => [1, %w[sk],               "the IPv4 address **this socket is connected to**, in host order (skc_daddr, converted). **Only meaningful when sock_family is AF_INET**, and it has the same trap as sock_dport on a UDP send: 0 when the socket was never connected. The destination of a datagram is udp_daddr(sk, msg)"],
       "sock_family"      => [1, %w[sk],               "AF_INET (2) or AF_INET6 (10), in host order. Branch on this before reading any address accessor"],
       "sock_state"       => [1, %w[sk],               "TCP state, such as TCP_STATE_ESTABLISHED, in host order"],
       "sock_protocol"    => [1, %w[sk],               "IPPROTO_TCP, IPPROTO_UDP and so on, in host order"],
@@ -1226,6 +1227,13 @@ module SpinelEbpf
       "sock_saddr6_lo"   => [1, %w[sk],               "the lower 64 bits of the source IPv6 address, same convention. **Only meaningful when sock_family is AF_INET6**"],
       "sock_daddr6_hi"   => [1, %w[sk],               "the upper 64 bits of the destination IPv6 address, same convention. **Only meaningful when sock_family is AF_INET6**"],
       "sock_daddr6_lo"   => [1, %w[sk],               "the lower 64 bits of the destination IPv6 address, same convention. **Only meaningful when sock_family is AF_INET6**"],
+      # "Where is this datagram going". The sock_* accessors answer for the socket,
+      # and for UDP the two coincide only when the socket is connected -- otherwise
+      # the destination is in msg_name. udp_sendmsg's own rule (msg_name wins, else
+      # the connected peer) is folded in here, so the author neither has to know it
+      # nor can apply half of it.
+      "udp_dport"        => [2, %w[sk msg],           "the destination port **of this send**, in host order. Pass the first two arguments of `def kprobe__udp_sendmsg(sk, msg, len)` straight through. **Correct for an unconnected socket too**: the port from msg_name when there is one, otherwise the connected peer's -- which is the order udp_sendmsg itself decides in. That is the only difference from sock_dport(sk), and it is the difference between reporting a send and reporting nothing (measured: dnsmasq forwards upstream with a bare sendto, and a sock_dport probe saw none of it). Handles both AF_INET and AF_INET6. **Send hooks only**: on udp_recvmsg, msg_name is an OUTPUT the kernel is about to write the sender's address into, so reading it at entry interprets uninitialised bytes as a port. The receive side has no equivalent question, so there sock_dport -- limited to connected sockets -- really is the honest ceiling"],
+      "udp_daddr"        => [2, %w[sk msg],           "the destination IPv4 address **of this send**, in host order. Same rule as udp_dport (msg_name wins, else the connected peer) and the same limit (**send hooks only**). Returns 0 when the destination is IPv6; that is sock_daddr6_*'s territory"],
       "iter_task"        => [0, [],                   "the current task_struct pointer while iterating tasks"],
       "fib_lookup"       => [1, %w[dst],              "an IPv4 route lookup, yielding the egress interface index"],
       "fib_lookup6"      => [2, %w[dst_hi dst_lo],    "an IPv6 route lookup"],
@@ -1526,7 +1534,7 @@ module SpinelEbpf
       "dns_req_start"  => "kprobe/udp_sendmsg -- begin correlating when a port 53 query is sent; process-context; not enforced by the generator",
       "dns_resp_stash" => "kprobe/udp_recvmsg on entry -- stash the response buffer; the copied bytes are read on return; process-context; not enforced by the generator",
       "dns_emit"       => "kretprobe/udp_recvmsg -- correlate the response and emit the span; process-context; not enforced by the generator",
-      "emit_dns"       => "kprobe/udp_sendmsg -- emit a port 53 query as a packed record, independent of any resolver; process-context; not enforced by the generator",
+      "emit_dns"       => "kprobe/udp_sendmsg -- emit a DNS query as a packed record (test the destination with udp_dport(sk, msg)); process-context; not enforced by the generator",
     }.freeze
 
     # ===================================================================
@@ -1616,6 +1624,12 @@ module SpinelEbpf
       "sock_saddr6_lo"  => "lower 64 bits of the source IPv6 address, hi/lo split, host order. Only meaningful when AF_INET6",
       "sock_daddr6_hi"  => "upper 64 bits of the destination IPv6 address, hi/lo split, host order. Only meaningful when AF_INET6",
       "sock_daddr6_lo"  => "lower 64 bits of the destination IPv6 address, hi/lo split, host order. Only meaningful when AF_INET6",
+      # The value itself has the same shape as sock_dport's (a port in host order),
+      # so what is written here is not the unit but WHICH QUESTION is being answered.
+      # Confusing the two type-checks, returns the same number for every sender that
+      # connects, and shows up only as silence for the ones that do not.
+      "udp_dport"       => "the destination port **of this send**, host order (msg_name when there is one, otherwise the connected peer). sock_dport is the socket's peer, and it is 0 when the socket was never connected",
+      "udp_daddr"       => "the destination IPv4 **of this send**, host order (same rule). 0 when the destination is IPv6",
       # All three below are textbook cases of "getting it wrong passes quietly": if the
       # shape of the value is not known, the comparison itself is written wrongly, and a
       # small plausible number comes back.
@@ -1655,6 +1669,9 @@ module SpinelEbpf
       { name: "kernel_field_read",
         members: %w[kfield kptr emit_kfield_str kfield_str_eq],
         note: "Reading kernel struct fields through CO-RE, which is safe even on an untrusted pointer: kfield returns a scalar by value, kptr yields a handle for the .field dot accessors, emit_kfield_str sends a string into the string ringbuf, and kfield_str_eq compares a string with a literal as an expression. All four spell hops the same way -- a comma is a pointer hop, a dot an embedded member. To read a struct sock *, prefer the named sock_* accessors over raw kfield: they have the byte order already applied." }.freeze,
+      { name: "datagram_destination",
+        members: %w[udp_dport udp_daddr sock_dport sock_daddr],
+        note: "Two ways of asking where something is being sent. udp_dport(sk, msg) / udp_daddr(sk, msg) answer for **this datagram** and stay correct for an unconnected socket -- one that passes the address on every send. sock_dport(sk) / sock_daddr(sk) answer for **the socket's connected peer**, and are 0 when there is none. Both return the same number for any sender that connects, so mixing them up never produces a wrong value: it produces silence, in which unconnected senders alone go unreported. On a UDP send hook, use the udp_* pair." }.freeze,
       { name: "sock_accessor",
         members: %w[sock_sport sock_dport sock_saddr sock_daddr sock_family sock_state sock_protocol
                     sock_saddr6_hi sock_saddr6_lo sock_daddr6_hi sock_daddr6_lo],
@@ -2608,6 +2625,16 @@ note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.
     # loud failures partitioning raises, and the flag names match the ones it uses;
     # a test keeps them in step.
     RUBY_SUBSET = {
+      # **These fourteen strings are a summary for a human reader, not the
+      # authority.** The authority is `Capabilities::SYNTAX` (one claim = one
+      # construct + `lowers_to` + a construct-free twin), which
+      # tools/affordance_gate.rb --section syntax measures on every run.
+      # While the prose WAS the authority, **two constructs stayed advertised
+      # while dead** -- the "a literal count is unrolled" half of the n.times
+      # line, and the "including as an expression" half of the if line, i.e.
+      # `x = if ... end`. Both survived because only PART of a line was false,
+      # and a check that compiles the line's representative example cannot
+      # possibly catch that.
       supported: [
         "integer literals, arithmetic (+ - * / %), and comparison (== != < > <= >=)",
         "Underscores in integer literals (5_000_000 == 5000000): readability only, the value is unchanged",
@@ -2636,17 +2663,73 @@ note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.
       ].freeze,
       # Each flag corresponds to one of the ineligibility flags partitioning raises,
       # every one of which is an immediate error.
+      #
+      # **"It corresponds" was a claim, not a measurement.** Putting all ten
+      # constructs into an attach handler and running the product
+      # (`bin/spinel-ebpf compile`) over them, **only `uses_bignum` exited 0** --
+      # and the generated C had `9223372036854775807` baked into it, so the
+      # thirty digits the author wrote had **silently become a different number**.
+      # Two mistakes had lined up: partitioning looked for the string `"bignum"`
+      # while **spinel's type name is `bigint`**, making the assignment site
+      # unreachable; and only signatures were judged, so **nobody looked at the
+      # type of a local at all**. On top of that, a literal wider than 64 bits is
+      # clamped by spinel's own front end before it writes the AST, so **the
+      # inferred type is the only surviving trace** of what was written. Both
+      # halves are fixed (`refine_flags_from_locals` in partition.rb).
+      #
+      # The `probe` and `refusal` fields below are the **machine-readable
+      # expectation the gate reads** -- the rule everywhere in this file is that
+      # the affordance owns the expectation and the gate writes none. `probe`
+      # places the construct inside an attach handler, because **an attach handler
+      # has no native execution path**: only there does "kept native" become
+      # indistinguishable from "refused loudly", which is what makes the
+      # measurement mean anything.
       rejected: [
-        { flag: :uses_float,               construct: "floating-point arithmetic",            reason: "no FPU in BPF" },
-        { flag: :uses_regex,               construct: "regular expressions",              reason: "no regex helper in BPF" },
-        { flag: :uses_io,                  construct: "any I/O",            reason: "host side only" },
-        { flag: :uses_thread,              construct: "creating a thread",           reason: "the kernel side cannot create threads" },
-        { flag: :uses_fiber,               construct: "Fiber",                 reason: "BPF has no notion of a fiber" },
-        { flag: :uses_closure,             construct: "a closure capturing an outer variable, other than the supported form", reason: "only n.times is supported" },
-        { flag: :uses_recursion,           construct: "recursion",          reason: "a BPF call graph must be acyclic" },
-        { flag: :uses_bignum,              construct: "bignum",                reason: "BPF integers are 64 bits" },
-        { flag: :uses_unbounded_loop,      construct: "an unbounded loop",        reason: "the verifier requires a bound" },
-        { flag: :uses_unsupported_type,    construct: "a signature naming a non-integer type (string, array, hash, ...)", reason: "only integer types are eligible for eBPF" },
+        { flag: :uses_float, construct: "floating-point arithmetic", reason: "no FPU in BPF",
+          probe: "def kprobe__do_sys_openat2(a)\n  n = 1.5\n  0\nend\n",
+          refusal: "uses Float arithmetic" },
+        { flag: :uses_regex, construct: "regular expressions", reason: "no regex helper in BPF",
+          probe: "def kprobe__do_sys_openat2(a)\n  n = (\"x\" =~ /y/)\n  0\nend\n",
+          refusal: "uses regex" },
+        { flag: :uses_io, construct: "any I/O", reason: "host side only",
+          probe: "def kprobe__do_sys_openat2(a)\n  puts a\n  0\nend\n",
+          refusal: "performs I/O" },
+        { flag: :uses_thread, construct: "creating a thread",
+          reason: "the kernel side cannot create threads",
+          probe: "def kprobe__do_sys_openat2(a)\n  t = Thread.new { 1 }\n  0\nend\n",
+          refusal: "creates Thread" },
+        { flag: :uses_fiber, construct: "Fiber", reason: "BPF has no notion of a fiber",
+          probe: "def kprobe__do_sys_openat2(a)\n  f = Fiber.new { 1 }\n  0\nend\n",
+          refusal: "uses Fiber" },
+        { flag: :uses_closure,
+          construct: "a closure capturing an outer variable, other than the supported form",
+          reason: "only n.times is supported",
+          probe: "def kprobe__do_sys_openat2(a)\n  f = ->(x) { x }\n  0\nend\n",
+          refusal: "uses closure",
+          note: "**The spelling decides which layer refuses (measured)**: `->(x){}` is a LambdaNode " \
+                "and raises this flag, but `lambda { |x| x }` is a **CallNode**, which partitioning " \
+                "passes straight through and the generator then rejects with " \
+                "`CallNode not yet ported (Stage 1): lambda`. Both are loud; only the first is " \
+                "**this** flag" },
+        { flag: :uses_recursion, construct: "recursion", reason: "a BPF call graph must be acyclic",
+          probe: "def kprobe__do_sys_openat2(a)\n  n = rec(a)\n  0\nend\n\n" \
+                 "def rec(x)\n  if x > 0\n    rec(x - 1)\n  else\n    0\n  end\nend\n",
+          refusal: "recursiv" },
+        { flag: :uses_bignum, construct: "bignum", reason: "BPF integers are 64 bits",
+          probe: "def kprobe__do_sys_openat2(a)\n  n = 123456789012345678901234567890\n  0\nend\n",
+          refusal: "uses bignum",
+          note: "**The one flag that used to exit 0.** A literal wider than 64 bits is rounded to " \
+                "INT64_MAX by spinel before the AST is written, so a different value was reaching " \
+                "the generated C" },
+        { flag: :uses_unbounded_loop, construct: "an unbounded loop",
+          reason: "the verifier requires a bound",
+          probe: "def kprobe__do_sys_openat2(a)\n  x = 0\n  while x < 3\n    x = x + 1\n  end\n  0\nend\n",
+          refusal: "without static upper bound" },
+        { flag: :uses_unsupported_type,
+          construct: "a signature naming a non-integer type (string, array, hash, ...)",
+          reason: "only integer types are eligible for eBPF",
+          probe: "def kprobe__do_sys_openat2(a)\n  \"str\"\nend\n",
+          refusal: "non-int type" },
       ].freeze,
       note: "A partitioning failure is an immediate error; there is no silent fallback. Ineligibility propagates to any method that calls an ineligible one.",
     }.freeze
@@ -2780,6 +2863,21 @@ note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.
   sugar: "pkt.byte_at(14)", flat: "pkt_dynptr_byte_at(14)",
   note: "the chain's only one-argument member. Its flat name is not `pkt_byte_at`, so it is " \
         "not covered by the machine derivation (dot to underscore) and is listed here on its own" },
+      # Two alternative spellings of `if`, measured to produce C byte-identical to
+      # the canonical block form. They are claimed HERE rather than in
+      # Capabilities::SYNTAX on purpose: node-type coverage cannot tell them apart
+      # from `if ... end` -- the parser gives all three the same IfNode -- so the
+      # only statement worth making about them is the pair equivalence, which is
+      # the sugar criterion and is the stronger one.
+      { id: :ternary, family: "alternative spellings of if",
+        form: :expr, shape: :kprobe_arg, equiv: :identical,
+        sugar: "a > 1 ? 1 : 2", flat: "if a > 1\n    1\n  else\n    2\n  end",
+        note: "a ternary is also an IfNode, so it came alive the moment the " \
+              "EXPRESSION-position IfNode was ported -- until then it fell over " \
+              "together with `x = if ... end`" },
+      { id: :postfix_if, family: "alternative spellings of if",
+        form: :stmt, shape: :kprobe_arg, equiv: :identical,
+        sugar: "@h = @h + 1 if a > 1", flat: "if a > 1\n    @h = @h + 1\n  end" },
       { id: :kptr_dot, family: "kptr binding + dot accessor",
         form: :stmt, shape: :kprobe_sk, equiv: :compiles,
         sugar: "t = kptr(sk, \"sock\")\n  n = t.sk_sndbuf",
@@ -2844,6 +2942,242 @@ WITHDRAWN_SUGAR = {}.freeze
       end
       (out + SUGAR_SINGLES).freeze
     end
+
+    # =====================================================================
+    # The syntax vocabulary -- the fifth. **`RUBY_SUBSET[:supported]` used to be
+    # the authority, and it is fourteen strings of prose.**
+    #
+    # Prose was already diagnosed as the reason `pkt.*` could be advertised for a
+    # year while dead, and the SUGAR half of it was made machine-readable then.
+    # `RUBY_SUBSET[:supported]` itself stayed prose, and the "a literal count is
+    # unrolled" half of its n.times line named a lowering the production generator
+    # **did not have**, lost in the move from the Ruby generator to the C one.
+    # Three lines above it, the "including as an expression" half -- `x = if ...
+    # end` -- was dead for the same reason. Neither is a builtin, an attach kind,
+    # a sugar pair or a map, so none of the four existing gates swept them.
+    #
+    # **One claim = one construct.** Not one claim per line of prose, and that
+    # follows from what was measured: the n.times line covers three constructs and
+    # exactly **one** of them was dead, so the line's representative example
+    # (`n.times { |i| ... }`, with `n` a variable) travels the LIVE path and the
+    # line passes. The if line was worse: one construct out of seven. **At line
+    # granularity, "the line is true" and "every construct in it works" are
+    # different statements.**
+    #
+    # **Passing takes two stages plus a twin:**
+    #   1. the advertised spelling **compiles** (this is where the two dead ones fell)
+    #   2. the declared `lowers_to` **appears in the generated C**, and does **not**
+    #      appear in the construct-free twin (`without`)
+    #
+    # Stage 2 is needed because constructs have a silent failure mode of their own:
+    # `3.times` (literal) and `a.times` (dynamic) **both compile and both are
+    # advertised**, yet they must reach different machinery (`bpf_iter_num_*` vs
+    # `bpf_loop`). Lose the open-coded path and a literal count quietly becomes a
+    # bpf_loop -- exit 0, same semantics, different machinery, **different kernel
+    # floor** (6.4 vs 5.17). Stage 1 cannot see any of that. The twin is what makes
+    # the needle **load-bearing**: `%`, `else` and `if (` all occur in the
+    # boilerplate, so a needle nobody requires to be ABSENT from the twin is
+    # satisfied by scaffolding.
+    #
+    # `lowers_to` is also a **shippable, useful fact** in its own right: the
+    # affordance now says out loud that `5_000_000` becomes `5000000`, that
+    # `3.times` becomes `bpf_iter_num_new`, and that `@h` becomes a map lookup.
+    # The gate holds no expectation of its own; it never has.
+    #
+    #   form  :expr / :stmt / :attach  ... **the same harness sugar uses**
+    #                                      (SUGAR_SHAPES), which is one of the
+    #                                      measured reasons the two live together
+    #   shape for :expr and :stmt, the context the probe is written in
+    #
+    # **The alternative spellings (ternary, trailing if, `@x += 1`) belong in the
+    # sugar table, not here** -- "two spellings reach the same C" is the stronger
+    # claim of the two.
+    SYNTAX = [
+      # ---- integer literals and arithmetic -------------------------------
+      { id: :int_literal, family: "integer literals",
+        form: :expr, shape: :kprobe_arg, syntax: "7", without: "8", lowers_to: "= 7;" },
+      { id: :op_add, family: "integer arithmetic", form: :expr, shape: :kprobe_arg,
+        syntax: "a + 3", without: "a", lowers_to: "a + 3" },
+      { id: :op_sub, family: "integer arithmetic", form: :expr, shape: :kprobe_arg,
+        syntax: "a - 3", without: "a", lowers_to: "a - 3" },
+      { id: :op_mul, family: "integer arithmetic", form: :expr, shape: :kprobe_arg,
+        syntax: "a * 3", without: "a", lowers_to: "a * 3" },
+      { id: :op_div, family: "integer arithmetic", form: :expr, shape: :kprobe_arg,
+        syntax: "a / 3", without: "a", lowers_to: "a / 3",
+        note: "the verifier can refuse a signed division. Use divu(a, b) when an unsigned one is meant" },
+      { id: :op_mod, family: "integer arithmetic", form: :expr, shape: :kprobe_arg,
+        syntax: "a % 3", without: "a", lowers_to: "a % 3" },
+      # ---- comparison ----------------------------------------------------
+      { id: :cmp_eq, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a == 3)", without: "a", lowers_to: "(a == 3)" },
+      { id: :cmp_ne, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a != 3)", without: "a", lowers_to: "(a != 3)" },
+      { id: :cmp_lt, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a < 3)", without: "a", lowers_to: "(a < 3)" },
+      { id: :cmp_gt, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a > 3)", without: "a", lowers_to: "(a > 3)" },
+      { id: :cmp_le, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a <= 3)", without: "a", lowers_to: "(a <= 3)" },
+      { id: :cmp_ge, family: "comparison", form: :expr, shape: :kprobe_arg,
+        syntax: "(a >= 3)", without: "a", lowers_to: "(a >= 3)" },
+      # ---- bitwise -------------------------------------------------------
+      { id: :bit_and, family: "bitwise", form: :expr, shape: :kprobe_arg,
+        syntax: "(a & 3)", without: "a", lowers_to: "(a & 3)" },
+      { id: :bit_or, family: "bitwise", form: :expr, shape: :kprobe_arg,
+        syntax: "(a | 3)", without: "a", lowers_to: "(a | 3)" },
+      { id: :bit_xor, family: "bitwise", form: :expr, shape: :kprobe_arg,
+        syntax: "(a ^ 3)", without: "a", lowers_to: "(a ^ 3)" },
+      { id: :bit_shl, family: "bitwise", form: :expr, shape: :kprobe_arg,
+        syntax: "(a << 3)", without: "a", lowers_to: "(a << 3)" },
+      { id: :bit_shr, family: "bitwise", form: :expr, shape: :kprobe_arg,
+        syntax: "(a >> 3)", without: "a", lowers_to: "(a >> 3)" },
+      # ---- short-circuit logic and parentheses ---------------------------
+      { id: :bool_or, family: "short-circuit logic", form: :expr, shape: :kprobe_arg,
+        syntax: "(a == 1 || a == 2)", without: "a", lowers_to: "(a == 1 || a == 2)" },
+      { id: :bool_and, family: "short-circuit logic", form: :expr, shape: :kprobe_arg,
+        syntax: "(a > 1 && a < 9)", without: "a", lowers_to: "(a > 1 && a < 9)" },
+      { id: :paren, family: "explicit parentheses", form: :expr, shape: :kprobe_arg,
+        syntax: "(a + 1) * 2", without: "a * 2", lowers_to: "(a + 1) * 2",
+        note: "required against bitwise precedence -- `(flags & TCP_FLAG_RST) != 0`" },
+      # ---- control flow ---------------------------------------------------
+      { id: :if_then, family: "if / elsif / else", form: :stmt, shape: :kprobe_arg,
+        syntax: "if a > 1\n    @h = @h + 1\n  end", without: "@h = @h + 1",
+        lowers_to: "if (a > 1) {" },
+      { id: :if_else, family: "if / elsif / else", form: :stmt, shape: :kprobe_arg,
+        syntax: "if a > 1\n    @h = @h + 1\n  else\n    @h = @h + 2\n  end",
+        without: "if a > 1\n    @h = @h + 1\n  end", lowers_to: "} else {" },
+      { id: :if_elsif, family: "if / elsif / else", form: :stmt, shape: :kprobe_arg,
+        syntax: "if a > 1\n    @h = @h + 1\n  elsif a > 0\n    @h = @h + 2\n  else\n    @h = @h + 3\n  end",
+        without: "if a > 1\n    @h = @h + 1\n  else\n    @h = @h + 2\n  end",
+        lowers_to: "if (a > 0) {",
+        note: "an elsif expands to a nested if/else with a nested temp. Verbose, and clang -O2 folds it" },
+      # The second thing the syntax sweep found. The temp-variable lowering was
+      # built for exactly this shape, and the retired Ruby generator carried a
+      # dedicated path for "an if in EXPRESSION position (`x = if ... end` and so
+      # on)". The C port wired IfNode into the statement lowering only, so **only
+      # the value form died** -- the statement form, the return-value form and the
+      # parenthesised form (ParenthesesNode -> StatementsNode) all kept working,
+      # which is why the prose line "if / elsif / else, including as an
+      # expression" was six-sevenths true.
+      { id: :if_value, family: "if / elsif / else", form: :expr, shape: :kprobe_arg,
+        syntax: "if a > 1\n    1\n  else\n    2\n  end", without: "1",
+        lowers_to: "_if1;",
+        note: "an if in expression position: declare `__s64 _ifN`, assign it in both branches, " \
+              "and yield _ifN as the value. `@x = if ... end` and an operand inside a larger " \
+              "expression take the same path" },
+      # ---- local variables and methods -----------------------------------
+      { id: :local_var, family: "local variables", form: :stmt, shape: :kprobe_arg,
+        syntax: "x = a + 1\n  n = x * 2", without: "n = a", lowers_to: "x = a + 1;",
+        note: "locals are all declared together at the top of the function, as `__s64 x = 0;`" },
+      { id: :bpf_to_bpf, family: "BPF-to-BPF call", form: :attach,
+        syntax: "def helper(x)\n  x * 2\nend\n\ndef kprobe__do_sys_openat2(a)\n<BODY>\n  helper(a)\nend",
+        without: "def helper(x)\n  x * 2\nend\n\ndef kprobe__do_sys_openat2(a)\n<BODY>\n  a\nend",
+        ret: "0", lowers_to: "helper_inner(a)",
+        note: "calls the `_inner` of another eBPF-eligible method in the same unit directly " \
+              "(eBPF has no recursion)" },
+      # ---- how many arguments an attach handler declares ------------------
+      { id: :attach_args_0, family: "arguments declared by an attach handler", form: :attach,
+        syntax: "def kprobe__do_sys_openat2\n<BODY>\nend", ret: "0",
+        without: "def kprobe__do_sys_openat2(a)\n<BODY>\nend",
+        lowers_to: "_inner();",
+        note: "kernel arguments that go unused can simply be left out; a kprobe taking none is legal" },
+      { id: :attach_args_n, family: "arguments declared by an attach handler", form: :attach,
+        syntax: "def kprobe__do_sys_openat2(a, b)\n<BODY>\n  a + b\nend", ret: "0",
+        without: "def kprobe__do_sys_openat2\n<BODY>\nend",
+        lowers_to: "PT_REGS_PARM2(ctx)",
+        note: "whatever is declared maps positionally onto that kind's calling convention " \
+              "(PT_REGS_PARM<N> for a kprobe)" },
+      # ---- instance variables ---------------------------------------------
+      { id: :ivar_read, family: "instance variables", form: :expr, shape: :kprobe_arg,
+        syntax: "@h", without: "a", lowers_to: "bpf_map_lookup_elem(&u_top_h" },
+      { id: :ivar_write, family: "instance variables", form: :stmt, shape: :kprobe_arg,
+        syntax: "@h = 7", without: "n = 7", lowers_to: "bpf_map_update_elem(&u_top_h" },
+      { id: :ivar_opwrite, family: "instance variables", form: :stmt, shape: :kprobe_arg,
+        syntax: "@h += 7", without: "n = 7", lowers_to: "bpf_map_update_elem(&u_top_h",
+        note: "`@x += n` is a read-modify-write. It is **not** byte-identical to `@x = @x + n` " \
+              "(measured: an extra pair of parentheses and a different temp number). The meaning " \
+              "is the same" },
+      { id: :top_ivar, family: "top-level instance variables", form: :attach,
+        syntax: "@h = 0\n\ndef kprobe__do_sys_openat2(a)\n<BODY>\n  @h\nend",
+        without: "def kprobe__do_sys_openat2(a)\n<BODY>\n  a\nend", ret: "0",
+        lowers_to: "u_top_h SEC(\".maps\")",
+        note: "one top-level ivar = one per-unit hash map, shared between the attach handlers" },
+      { id: :class_ivar, family: "instance variables of a class", form: :attach,
+        syntax: "class C\n  def incr(d)\n<BODY>\n    @x = @x + d\n    @x\n  end\nend",
+        without: "class C\n  def incr(d)\n<BODY>\n    d\n  end\nend", ret: "0",
+        lowers_to: "c_at_x SEC(\".maps\")",
+        note: "one ivar = one hash map (a singleton keyed by __u32)" },
+      # ---- loops ----------------------------------------------------------
+      # These two are why stage 2 exists: **both compile and both are
+      # advertised**, and they must reach different machinery. Lose the open-coded
+      # path and a literal count quietly becomes a bpf_loop -- exit 0, the same
+      # semantics, a different kernel floor.
+      { id: :times_literal, family: "n.times", form: :stmt, shape: :kprobe_arg,
+        syntax: "3.times do |i|\n    @h = @h + i\n  end", without: "@h = @h + 1",
+        lowers_to: "bpf_iter_num_new",
+        note: "a literal count becomes an open-coded iterator inlined into the caller, with no " \
+              "callback and no capture struct. **The kernel floor is 6.4**" },
+      { id: :times_dynamic, family: "n.times", form: :stmt, shape: :kprobe_arg,
+        syntax: "a.times do |i|\n    @h = @h + i\n  end", without: "@h = @h + 1",
+        lowers_to: "bpf_loop(",
+        note: "a dynamic count becomes bpf_loop plus a generated callback. The kernel floor is 5.17" },
+      { id: :times_capture, family: "n.times", form: :stmt, shape: :kprobe_arg,
+        syntax: "t = 0\n  a.times do |i|\n    t = t + i\n  end\n  n = t", without: "n = a",
+        lowers_to: "_caps",
+        note: "a block capturing an outer local gets a per-loop caps struct, passed by pointer" },
+      # ---- constants -------------------------------------------------------
+      { id: :const_read, family: "constants", form: :expr, shape: :kprobe_arg,
+        syntax: "IPPROTO_TCP", without: "0", lowers_to: "= 6;",
+        note: "a known constant name resolves to an integer literal; nothing is looked up at run time" },
+      { id: :const_path, family: "constants", form: :expr, shape: :kprobe_arg,
+        syntax: "IP::Proto::TCP", without: "0", lowers_to: "= 6;",
+        note: "the namespaced path resolves to the same integer (eight prefixes). That the two " \
+              "spellings agree is a sugar claim" },
+      # ---- fixed string literals -------------------------------------------
+      { id: :string_literal, family: "fixed string literals", form: :expr,
+        shape: :kprobe_sk, syntax: "kfield(sk, \"sock\", \"sk_sndbuf\")",
+        without: "kfield(sk, \"sock\", \"sk_rcvbuf\")", lowers_to: "sk_sndbuf",
+        note: "strings exist at compile time only (BPF has no string heap). Field names, paths " \
+              "and comparison literals are all baked in ahead of time" },
+      # ---- compound assignment through a receiver ---------------------------
+      { id: :dot_op_assign, family: "receiver dot accessor", form: :stmt,
+        shape: :tcp_cc, syntax: "sk.snd_cwnd += 1", without: "sk.snd_cwnd = 1",
+        lowers_to: "->snd_cwnd += ",
+        note: "a CallOperatorWriteNode. tcp_sock fields inside a congestion-control context only" },
+    ].freeze
+
+    # Withdrawn syntax. Empty is a true statement about the tree, not a hole:
+    # this is an inventory, and the gate's detection power lives in its
+    # synthesised self-checks.
+    WITHDRAWN_SYNTAX = {}.freeze
+
+    # **The authority for the check that runs the other way round.**
+    #
+    # A gate that only asks whether a CLAIM holds stays green while the affordance
+    # says nothing at all -- which is how the map vocabulary failed. The syntax
+    # equivalent of "what the implementation actually does" is **the node types
+    # the production generator accepts**, and the authority for that is the two
+    # lowering dispatchers in `src/codegen_c/spinel_ebpf_cc.c` (`cc_lower_expr` /
+    # `cc_lower_stmt`) and their `strcmp(ty, "XxxNode")` arms. The gate reads them
+    # out of the source and reports any node type **no claim's probe contains**
+    # (start accepting `WhileNode` and it shows up the same day).
+    #
+    # **The granularity limit is stated on purpose** (measured): a node type is
+    # coarser than a construct. The ternary `a > 1 ? 1 : 2` and `if ... else ...
+    # end` are the **same IfNode**, so node-type coverage cannot separate them.
+    # CallNode is worse still -- builtins, sugar and operators are all one type.
+    # So the operator members of CallNode get a second authority,
+    # `cc_is_binary_op()`'s table of sixteen, and are covered **per operator**;
+    # the remaining CallNode members (builtins, sugar) are covered by name by the
+    # builtin and sugar sections.
+    SYNTAX_COVERAGE_AUTHORITIES = {
+      node_types: { file: "src/codegen_c/spinel_ebpf_cc.c",
+                    functions: %w[cc_lower_expr cc_lower_stmt],
+                    what: "the AST node types it accepts (strcmp(ty, \"XxxNode\"))" },
+      binary_ops: { file: "src/codegen_c/spinel_ebpf_cc.c",
+                    functions: %w[cc_is_binary_op],
+                    what: "the table of binary operators" },
+    }.freeze
 
     # ===================================================================
     # Making the sugar spellings VISIBLE TO INTROSPECTION.
@@ -3125,6 +3459,10 @@ WITHDRAWN_SUGAR = {}.freeze
           record_metric_series_bound: record_metrics.sum { |m| m[:series_bound].to_i },
           map_count: MAPS.length,
           map_type_count: MAPS.map { |m| m[:type] }.uniq.length,
+          # The fifth vocabulary. Until it existed, the Ruby subset was fourteen
+          # strings of prose, and two of the constructs they advertised were dead.
+          syntax_count: SYNTAX.length,
+          syntax_rejected_count: RUBY_SUBSET[:rejected].length,
         },
         domains: DOMAINS.each_with_object({}) { |(d, s), h|
           h[d] = { summary: s[:summary], attach_kinds: s[:attach_kinds] }
@@ -3186,6 +3524,17 @@ WITHDRAWN_SUGAR = {}.freeze
                   flat:  s[:flat].to_s.gsub("<BODY>", "  ..."))
         },
         withdrawn_sugar: WITHDRAWN_SUGAR,
+        # The syntax vocabulary. The prose in `ruby_subset[:supported]` is still
+        # there but is **no longer the authority**: one claim = one construct,
+        # each carrying what it lowers to (`lowers_to`) and a twin with the
+        # construct removed (`without`). tools/affordance_gate.rb --section syntax
+        # measures on every run that the advertised spelling compiles, that it
+        # becomes what is claimed, and that the needle is not merely satisfied by
+        # boilerplate -- and, in the opposite direction, that every node type and
+        # operator the generator accepts is advertised by some claim.
+        syntax: SYNTAX,
+        withdrawn_syntax: WITHDRAWN_SYNTAX,
+        syntax_coverage_authorities: SYNTAX_COVERAGE_AUTHORITIES,
         # The map vocabulary. While this was empty, nothing in the affordance said that
         # writing `@x += 1` creates a map, or that a ring buffer is 256 KiB and drops
         # silently when it overflows. The implementation was sound throughout: this was

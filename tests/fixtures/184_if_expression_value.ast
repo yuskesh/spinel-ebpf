@@ -1,0 +1,263 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/184_if_expression_value.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 InstanceVariableWriteNode
+S 5 name @last
+N 6 IntegerNode
+I 6 value 0
+R 5 value 6
+N 7 DefNode
+S 7 name classify
+N 8 ParametersNode
+N 9 RequiredParameterNode
+S 9 name a
+A 8 requireds 9
+A 8 optionals 
+A 8 keywords 
+A 8 posts 
+R 7 parameters 8
+N 10 StatementsNode
+N 11 LocalVariableWriteNode
+S 11 name n
+N 12 IfNode
+N 13 CallNode
+S 13 name >
+N 14 LocalVariableReadNode
+S 14 name a
+R 13 receiver 14
+N 15 ArgumentsNode
+N 16 IntegerNode
+I 16 value 10
+A 15 arguments 16
+R 13 arguments 15
+R 13 block -1
+S 13 call_operator .
+R 12 predicate 13
+N 17 StatementsNode
+N 18 IntegerNode
+I 18 value 2
+A 17 body 18
+R 12 statements 17
+N 19 IfNode
+N 20 CallNode
+S 20 name >
+N 21 LocalVariableReadNode
+S 21 name a
+R 20 receiver 21
+N 22 ArgumentsNode
+N 23 IntegerNode
+I 23 value 0
+A 22 arguments 23
+R 20 arguments 22
+R 20 block -1
+S 20 call_operator .
+R 19 predicate 20
+N 24 StatementsNode
+N 25 IntegerNode
+I 25 value 1
+A 24 body 25
+R 19 statements 24
+N 26 ElseNode
+N 27 StatementsNode
+N 28 IntegerNode
+I 28 value 0
+A 27 body 28
+R 26 statements 27
+R 19 subsequent 26
+R 12 subsequent 19
+R 11 value 12
+N 29 LocalVariableReadNode
+S 29 name n
+A 10 body 11,29
+R 7 body 10
+R 7 receiver -1
+N 30 DefNode
+S 30 name kprobe__do_sys_openat2
+N 31 ParametersNode
+N 32 RequiredParameterNode
+S 32 name a
+A 31 requireds 32
+A 31 optionals 
+A 31 keywords 
+A 31 posts 
+R 30 parameters 31
+N 33 StatementsNode
+N 34 InstanceVariableWriteNode
+S 34 name @last
+N 35 IfNode
+N 36 CallNode
+S 36 name >
+N 37 LocalVariableReadNode
+S 37 name a
+R 36 receiver 37
+N 38 ArgumentsNode
+N 39 IntegerNode
+I 39 value 0
+A 38 arguments 39
+R 36 arguments 38
+R 36 block -1
+S 36 call_operator .
+R 35 predicate 36
+N 40 StatementsNode
+N 41 IntegerNode
+I 41 value 1
+A 40 body 41
+R 35 statements 40
+N 42 ElseNode
+N 43 StatementsNode
+N 44 IntegerNode
+I 44 value 0
+A 43 body 44
+R 42 statements 43
+R 35 subsequent 42
+R 34 value 35
+N 45 CallNode
+S 45 name spnl_emit
+R 45 receiver -1
+N 46 ArgumentsNode
+N 47 CallNode
+S 47 name +
+N 48 CallNode
+S 48 name classify
+R 48 receiver -1
+N 49 ArgumentsNode
+N 50 LocalVariableReadNode
+S 50 name a
+A 49 arguments 50
+R 48 arguments 49
+R 48 block -1
+S 48 call_operator .
+R 47 receiver 48
+N 51 ArgumentsNode
+N 52 ParenthesesNode
+N 53 StatementsNode
+N 54 IfNode
+N 55 CallNode
+S 55 name >
+N 56 LocalVariableReadNode
+S 56 name a
+R 55 receiver 56
+N 57 ArgumentsNode
+N 58 IntegerNode
+I 58 value 100
+A 57 arguments 58
+R 55 arguments 57
+R 55 block -1
+S 55 call_operator .
+R 54 predicate 55
+N 59 StatementsNode
+N 60 IntegerNode
+I 60 value 1
+A 59 body 60
+R 54 statements 59
+N 61 ElseNode
+N 62 StatementsNode
+N 63 IntegerNode
+I 63 value 0
+A 62 body 63
+R 61 statements 62
+R 54 subsequent 61
+A 53 body 54
+R 52 body 53
+A 51 arguments 52
+R 47 arguments 51
+R 47 block -1
+S 47 call_operator .
+A 46 arguments 47
+R 45 arguments 46
+R 45 block -1
+S 45 call_operator .
+A 33 body 34,45
+R 30 body 33
+R 30 receiver -1
+N 64 DefNode
+S 64 name sign
+N 65 ParametersNode
+N 66 RequiredParameterNode
+S 66 name a
+A 65 requireds 66
+A 65 optionals 
+A 65 keywords 
+A 65 posts 
+R 64 parameters 65
+N 67 StatementsNode
+N 68 IfNode
+N 69 CallNode
+S 69 name >
+N 70 LocalVariableReadNode
+S 70 name a
+R 69 receiver 70
+N 71 ArgumentsNode
+N 72 IntegerNode
+I 72 value 0
+A 71 arguments 72
+R 69 arguments 71
+R 69 block -1
+S 69 call_operator .
+R 68 predicate 69
+N 73 StatementsNode
+N 74 IntegerNode
+I 74 value 1
+A 73 body 74
+R 68 statements 73
+N 75 ElseNode
+N 76 StatementsNode
+N 77 IntegerNode
+I 77 value -1
+A 76 body 77
+R 75 statements 76
+R 68 subsequent 75
+A 67 body 68
+R 64 body 67
+R 64 receiver -1
+N 78 CallNode
+S 78 name puts
+R 78 receiver -1
+N 79 ArgumentsNode
+N 80 CallNode
+S 80 name classify
+R 80 receiver -1
+N 81 ArgumentsNode
+N 82 IntegerNode
+I 82 value 42
+A 81 arguments 82
+R 80 arguments 81
+R 80 block -1
+S 80 call_operator .
+A 79 arguments 80
+R 78 arguments 79
+R 78 block -1
+S 78 call_operator .
+N 83 CallNode
+S 83 name puts
+R 83 receiver -1
+N 84 ArgumentsNode
+N 85 CallNode
+S 85 name sign
+R 85 receiver -1
+N 86 ArgumentsNode
+N 87 IntegerNode
+I 87 value -3
+A 86 arguments 87
+R 85 arguments 86
+R 85 block -1
+S 85 call_operator .
+A 84 arguments 85
+R 83 arguments 84
+R 83 block -1
+S 83 call_operator .
+A 1 body 2,5,7,30,64,78,83
+R 0 statements 1

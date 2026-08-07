@@ -7,8 +7,8 @@
 #include "otlp_http.h"
 #include "otlp_grpc.h"    /* otlp_transport_send (http/grpc routing) */
 #include "otlp_json.h"    /* otlp_want_json / otlp_endpoint_is_grpc / otlp_json_metrics_build */
-
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <pb_encode.h>
@@ -25,11 +25,43 @@ static bool enc_code_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
 
 /* ---- histograms ---- */
 
-/* Representative value for slot s, which holds floor(log2(v)): about 1.5 * 2^s,
- * and about 1 for slot 0. */
+/* A representative value for slot s (floor(log2)): ~1.5 * 2^s; slot 0 is ~1. */
 static double slot_midpoint(int s) {
     if (s <= 0) return 1.0;
     return 1.5 * (double)((uint64_t)1 << s);
+}
+
+/* ---- log2 slot -> explicit bucket --------------------------------------
+ * The folding (otlp_log2_fold) and the boundaries (otlp_log2_ns_bounds) live in
+ * otlp_metrics.h as static inline, because both the protobuf side and the JSON
+ * side call them: putting them in one translation unit would give the other one
+ * a second copy of the folding. */
+
+/* The OpenTelemetry spec's default is explicit_bucket_histogram. Defaulting to
+ * the exponential one was a departure from the spec, and worse, there was no way
+ * to declare the departure. An unknown spelling is refused rather than folded
+ * into the default: silently exporting a different metric type than the one that
+ * was asked for is the failure this whole path was fixed to avoid. */
+otlp_hist_agg_t otlp_hist_aggregation(void) {
+    static int cached = -1;
+    if (cached >= 0) return (otlp_hist_agg_t)cached;
+    const char *v = getenv("OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION");
+    if (!v || !v[0] || strcmp(v, "explicit_bucket_histogram") == 0)
+        cached = OTLP_HIST_AGG_EXPLICIT;
+    else if (strcmp(v, "base2_exponential_bucket_histogram") == 0)
+        cached = OTLP_HIST_AGG_EXPONENTIAL;
+    else {
+        fprintf(stderr,
+                "[otlp] OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION=\"%s\" is not a "
+                "value this exporter knows.\n"
+                "       The OpenTelemetry spec defines exactly two: \"explicit_bucket_histogram\" "
+                "(the spec default, and the only one Splunk Observability Cloud ingests) and "
+                "\"base2_exponential_bucket_histogram\".\n"
+                "       Refusing rather than falling back, because falling back would export a "
+                "different metric type than the one you asked for, silently.\n", v);
+        exit(1);
+    }
+    return (otlp_hist_agg_t)cached;
 }
 
 typedef struct {
@@ -38,7 +70,7 @@ typedef struct {
     int len;
 } buckets_ctx_t;
 
-/* repeated UINT64 bucket_counts, unpacked -- accepted by both protoc and nanopb. */
+/* repeated UINT64 bucket_counts (unpacked; both protoc and nanopb accept it) */
 static bool enc_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const buckets_ctx_t *b = (const buckets_ctx_t *)(*arg);
     for (int i = 0; i < b->len; i++) {
@@ -48,7 +80,32 @@ static bool enc_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void
     return true;
 }
 
-/* ---- data points, looping over the methods array ---- */
+/* repeated double explicit_bounds (unpacked; both protoc and nanopb accept it) */
+typedef struct { const double *b; int n; } bounds_ctx_t;
+static bool enc_explicit_bounds(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    const bounds_ctx_t *b = (const bounds_ctx_t *)(*arg);
+    for (int i = 0; i < b->n; i++) {
+        double d = b->b[i];
+        if (!pb_encode_tag_for_field(st, fld)) return false;
+        if (!pb_encode_fixed64(st, &d)) return false;  /* a double is 64-bit fixed */
+    }
+    return true;
+}
+
+/* HistogramDataPoint.bucket_counts is repeated *fixed64* -- a different wire type
+ * from ExponentialHistogram's repeated uint64. The tag comes out of fld as 64-bit,
+ * so the value has to go out as 8 bytes through pb_encode_fixed64 as well. */
+static bool enc_hist_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    const buckets_ctx_t *b = (const buckets_ctx_t *)(*arg);
+    for (int i = 0; i < b->len; i++) {
+        uint64_t v = b->buckets[b->offset + i];
+        if (!pb_encode_tag_for_field(st, fld)) return false;
+        if (!pb_encode_fixed64(st, &v)) return false;
+    }
+    return true;
+}
+
+/* ---- data points: a loop over the methods array ---- */
 
 typedef struct {
     const otlp_method_metric_t *methods;
@@ -114,7 +171,7 @@ static bool enc_lat_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *cons
             bctx.offset = first;
             bctx.len = last - first + 1;
             dp.has_positive = true;
-            dp.positive.offset = first;  /* slot s maps to positive bucket s */
+            dp.positive.offset = first;  /* slot s -> positive bucket index s */
             dp.positive.bucket_counts.funcs.encode = enc_bucket_counts;
             dp.positive.bucket_counts.arg = &bctx;
         }
@@ -127,47 +184,97 @@ static bool enc_lat_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *cons
     return true;
 }
 
-/* ScopeMetrics.metrics: [calls(Sum), latency(ExponentialHistogram)] */
-static bool enc_metrics(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
-    dp_ctx_t *c = (dp_ctx_t *)(*arg);
+/* The explicit-bucket HistogramDataPoints of spnl_method_latency_ns. The data
+ * points are built from the *same* log2 histogram enc_lat_dps reads; only the
+ * representation differs. */
+static bool enc_lat_hist_dps(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    const dp_ctx_t *c = (const dp_ctx_t *)(*arg);
+    for (size_t i = 0; i < c->n; i++) {
+        const otlp_method_metric_t *m = &c->methods[i];
+        if (m->calls == 0) continue;
 
-    opentelemetry_proto_metrics_v1_Metric m_calls =
-        opentelemetry_proto_metrics_v1_Metric_init_zero;
-    m_calls.name.funcs.encode = otlp_enc_string;
-    m_calls.name.arg = (void *)"spnl_method_calls_total";
-    m_calls.which_data = opentelemetry_proto_metrics_v1_Metric_sum_tag;
-    m_calls.data.sum.data_points.funcs.encode = enc_calls_dps;
-    m_calls.data.sum.data_points.arg = c;
-    m_calls.data.sum.aggregation_temporality =
-        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
-    m_calls.data.sum.is_monotonic = true;
-    if (!pb_encode_tag_for_field(st, fld)) return false;
-    if (!pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m_calls))
-        return false;
+        uint64_t bc[OTLP_LOG2_NBUCKETS];
+        uint64_t total = 0;
+        double sum = 0.0;
+        otlp_log2_fold(m->buckets, bc, &total, &sum);
 
-    opentelemetry_proto_metrics_v1_Metric m_lat =
-        opentelemetry_proto_metrics_v1_Metric_init_zero;
-    m_lat.name.funcs.encode = otlp_enc_string;
-    m_lat.name.arg = (void *)"spnl_method_latency_ns";
-    m_lat.unit.funcs.encode = otlp_enc_string;
-    m_lat.unit.arg = (void *)"ns";
-    m_lat.which_data = opentelemetry_proto_metrics_v1_Metric_exponential_histogram_tag;
-    m_lat.data.exponential_histogram.data_points.funcs.encode = enc_lat_dps;
-    m_lat.data.exponential_histogram.data_points.arg = c;
-    m_lat.data.exponential_histogram.aggregation_temporality =
-        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
-    if (!pb_encode_tag_for_field(st, fld)) return false;
-    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m_lat);
+        opentelemetry_proto_metrics_v1_HistogramDataPoint dp =
+            opentelemetry_proto_metrics_v1_HistogramDataPoint_init_zero;
+        dp.time_unix_nano = c->t;
+        dp.start_time_unix_nano = c->start;
+        dp.count = total;
+        dp.has_sum = true;
+        dp.sum = sum;
+        buckets_ctx_t bctx = { bc, 0, OTLP_LOG2_NBUCKETS };
+        dp.bucket_counts.funcs.encode = enc_hist_bucket_counts;
+        dp.bucket_counts.arg = &bctx;
+        bounds_ctx_t bn = { otlp_log2_ns_bounds(), OTLP_LOG2_NBOUNDS };
+        dp.explicit_bounds.funcs.encode = enc_explicit_bounds;
+        dp.explicit_bounds.arg = &bn;
+        dp.attributes.funcs.encode = enc_code_attrs;
+        dp.attributes.arg = (void *)m;
+        if (!pb_encode_tag_for_field(st, fld)) return false;
+        if (!pb_encode_submessage(st,
+                opentelemetry_proto_metrics_v1_HistogramDataPoint_fields, &dp)) return false;
+    }
+    return true;
 }
 
-/* ---- top-level ---- */
+/* ScopeMetrics.metrics: exactly one.
+ *
+ * This used to put calls (a Sum) and latency (an ExponentialHistogram) side by
+ * side. An OTLP request carries a single status for the whole body, so that
+ * arrangement structurally meant "if latency is refused, the rate disappears
+ * too" -- which is exactly what a backend that rejects one of the two types
+ * does. */
+typedef struct { dp_ctx_t *dp; otlp_method_part_t part; } mpart_ctx_t;
 
-long otlp_metrics_build(uint8_t *buf, size_t cap,
-                        const char *service_name, const char *service_version,
-                        const char *scope_name,
-                        uint64_t time_unix_nano, uint64_t start_time_unix_nano,
-                        const otlp_method_metric_t *methods, size_t nmethods) {
-    dp_ctx_t dpctx = { methods, nmethods, time_unix_nano, start_time_unix_nano };
+static bool enc_metrics_one(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    mpart_ctx_t *c = (mpart_ctx_t *)(*arg);
+    opentelemetry_proto_metrics_v1_Metric m = opentelemetry_proto_metrics_v1_Metric_init_zero;
+
+    if (c->part == OTLP_MPART_CALLS) {
+        m.name.funcs.encode = otlp_enc_string;
+        m.name.arg = (void *)"spnl_method_calls_total";
+        m.which_data = opentelemetry_proto_metrics_v1_Metric_sum_tag;
+        m.data.sum.data_points.funcs.encode = enc_calls_dps;
+        m.data.sum.data_points.arg = c->dp;
+        m.data.sum.aggregation_temporality =
+            opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
+        m.data.sum.is_monotonic = true;
+    } else {
+        m.name.funcs.encode = otlp_enc_string;
+        m.name.arg = (void *)"spnl_method_latency_ns";
+        m.unit.funcs.encode = otlp_enc_string;
+        m.unit.arg = (void *)"ns";
+        if (c->part == OTLP_MPART_LATENCY_EXP) {
+            m.which_data = opentelemetry_proto_metrics_v1_Metric_exponential_histogram_tag;
+            m.data.exponential_histogram.data_points.funcs.encode = enc_lat_dps;
+            m.data.exponential_histogram.data_points.arg = c->dp;
+            m.data.exponential_histogram.aggregation_temporality =
+                opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
+        } else {
+            m.which_data = opentelemetry_proto_metrics_v1_Metric_histogram_tag;
+            m.data.histogram.data_points.funcs.encode = enc_lat_hist_dps;
+            m.data.histogram.data_points.arg = c->dp;
+            m.data.histogram.aggregation_temporality =
+                opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
+        }
+    }
+    if (!pb_encode_tag_for_field(st, fld)) return false;
+    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m);
+}
+
+/* ---- top-level ----
+ *
+ * The outside of an ExportMetricsServiceRequest (Resource, InstrumentationScope,
+ * ScopeMetrics, ResourceMetrics) is identical in every build function; the only
+ * thing that differs is what goes into ScopeMetrics.metrics. The envelope is
+ * written once here rather than copied per builder. */
+static long metrics_envelope_encode(uint8_t *buf, size_t cap,
+                                    const char *service_name, const char *service_version,
+                                    const char *scope_name,
+                                    pb_callback_t metrics_cb) {
     otlp_resource_t rctx = { service_name, service_version };
 
     opentelemetry_proto_resource_v1_Resource res =
@@ -184,8 +291,7 @@ long otlp_metrics_build(uint8_t *buf, size_t cap,
         opentelemetry_proto_metrics_v1_ScopeMetrics_init_zero;
     sm.has_scope = true;
     sm.scope = scope;
-    sm.metrics.funcs.encode = enc_metrics;
-    sm.metrics.arg = &dpctx;
+    sm.metrics = metrics_cb;
     otlp_one_sub_t sm_sub = { opentelemetry_proto_metrics_v1_ScopeMetrics_fields, &sm };
 
     opentelemetry_proto_metrics_v1_ResourceMetrics rm =
@@ -206,6 +312,19 @@ long otlp_metrics_build(uint8_t *buf, size_t cap,
             opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_fields, &req))
         return -1;
     return (long)st.bytes_written;
+}
+
+long otlp_metrics_method_build(uint8_t *buf, size_t cap,
+                               const char *service_name, const char *service_version,
+                               const char *scope_name, otlp_method_part_t part,
+                               uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                               const otlp_method_metric_t *methods, size_t nmethods) {
+    dp_ctx_t dpctx = { methods, nmethods, time_unix_nano, start_time_unix_nano };
+    mpart_ctx_t mctx = { &dpctx, part };
+    pb_callback_t cb = {{0}, 0};
+    cb.funcs.encode = enc_metrics_one;
+    cb.arg = &mctx;
+    return metrics_envelope_encode(buf, cap, service_name, service_version, scope_name, cb);
 }
 
 /* ---- generic keyed metrics: arbitrary labels, nothing to do with --instrument ---- */
@@ -274,95 +393,83 @@ static bool enc_series_lat(pb_ostream_t *st, const pb_field_iter_t *fld, void *c
     return true;
 }
 
-typedef struct { sdp_ctx_t *dp; const char *name; const char *lat_name; const char *unit; } smetrics_ctx_t;
-
-static bool enc_series_metrics(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
-    smetrics_ctx_t *c = (smetrics_ctx_t *)(*arg);
-
-    opentelemetry_proto_metrics_v1_Metric m_calls =
-        opentelemetry_proto_metrics_v1_Metric_init_zero;
-    m_calls.name.funcs.encode = otlp_enc_string;
-    m_calls.name.arg = (void *)c->name;
-    m_calls.which_data = opentelemetry_proto_metrics_v1_Metric_sum_tag;
-    m_calls.data.sum.data_points.funcs.encode = enc_series_calls;
-    m_calls.data.sum.data_points.arg = c->dp;
-    m_calls.data.sum.aggregation_temporality =
-        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
-    m_calls.data.sum.is_monotonic = true;
-    if (!pb_encode_tag_for_field(st, fld)) return false;
-    if (!pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m_calls))
-        return false;
-
-    opentelemetry_proto_metrics_v1_Metric m_lat =
-        opentelemetry_proto_metrics_v1_Metric_init_zero;
-    m_lat.name.funcs.encode = otlp_enc_string;
-    m_lat.name.arg = (void *)c->lat_name;
-    if (c->unit && c->unit[0]) { m_lat.unit.funcs.encode = otlp_enc_string; m_lat.unit.arg = (void *)c->unit; }
-    m_lat.which_data = opentelemetry_proto_metrics_v1_Metric_exponential_histogram_tag;
-    m_lat.data.exponential_histogram.data_points.funcs.encode = enc_series_lat;
-    m_lat.data.exponential_histogram.data_points.arg = c->dp;
-    m_lat.data.exponential_histogram.aggregation_temporality =
-        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
-    if (!pb_encode_tag_for_field(st, fld)) return false;
-    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m_lat);
-}
-
-long otlp_metrics_series_build(uint8_t *buf, size_t cap,
-                               const char *service_name, const char *service_version,
-                               const char *scope_name,
-                               const char *name, const char *lat_name, const char *unit,
-                               uint64_t time_unix_nano, uint64_t start_time_unix_nano,
-                               const otlp_series_t *series, size_t nseries) {
-    sdp_ctx_t dpctx = { series, nseries, time_unix_nano, start_time_unix_nano };
-    smetrics_ctx_t mctx = { &dpctx, name, lat_name, unit };
-    otlp_resource_t rctx = { service_name, service_version };
-
-    opentelemetry_proto_resource_v1_Resource res =
-        opentelemetry_proto_resource_v1_Resource_init_zero;
-    res.attributes.funcs.encode = otlp_enc_resource_attrs;
-    res.attributes.arg = &rctx;
-
-    opentelemetry_proto_common_v1_InstrumentationScope scope =
-        opentelemetry_proto_common_v1_InstrumentationScope_init_zero;
-    scope.name.funcs.encode = otlp_enc_string;
-    scope.name.arg = (void *)(scope_name ? scope_name : "spinel-ebpf");
-
-    opentelemetry_proto_metrics_v1_ScopeMetrics sm =
-        opentelemetry_proto_metrics_v1_ScopeMetrics_init_zero;
-    sm.has_scope = true;
-    sm.scope = scope;
-    sm.metrics.funcs.encode = enc_series_metrics;
-    sm.metrics.arg = &mctx;
-    otlp_one_sub_t sm_sub = { opentelemetry_proto_metrics_v1_ScopeMetrics_fields, &sm };
-
-    opentelemetry_proto_metrics_v1_ResourceMetrics rm =
-        opentelemetry_proto_metrics_v1_ResourceMetrics_init_zero;
-    rm.has_resource = true;
-    rm.resource = res;
-    rm.scope_metrics.funcs.encode = otlp_enc_one_sub;
-    rm.scope_metrics.arg = &sm_sub;
-    otlp_one_sub_t rm_sub = { opentelemetry_proto_metrics_v1_ResourceMetrics_fields, &rm };
-
-    opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest req =
-        opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_init_zero;
-    req.resource_metrics.funcs.encode = otlp_enc_one_sub;
-    req.resource_metrics.arg = &rm_sub;
-
-    pb_ostream_t st = pb_ostream_from_buffer(buf, cap);
-    if (!pb_encode(&st,
-            opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_fields, &req))
-        return -1;
-    return (long)st.bytes_written;
-}
-
-/* ---- a monotonic Sum on its own, for a counter that comes from a record channel ----
+/* ---- one builder per metric type ------------------------------------------
  *
- * otlp_metrics_series_build always emits a Sum and an ExponentialHistogram as a
- * pair, because the rate and the latency of an instrumented method always come
- * as a pair. A record channel's counter has no value to distribute -- a
- * connection is a point event, with no duration -- so this emits the Sum alone
- * rather than fabricating a latency to go with it. The data points share
- * enc_series_calls; the buckets of otlp_series_t simply stay unused. */
+ * These started as an experiment: a backend was returning HTTP 500 for metrics
+ * and there was no way to tell which type it objected to, because the generic
+ * builder always emitted a Sum and an ExponentialHistogram as a pair. Being able
+ * to build one payload per type answered that question -- and then turned out to
+ * be the right way to send in production too, so the shipping paths were moved
+ * onto it and the bundling builders were removed. */
+
+typedef struct { sdp_ctx_t *dp; const char *name; const char *unit; } onemetric_ctx_t;
+
+/* A Gauge: a non-monotonic instantaneous value. The data point is the same
+ * NumberDataPoint a Sum uses. */
+static bool enc_gauge_metric(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    onemetric_ctx_t *c = (onemetric_ctx_t *)(*arg);
+    opentelemetry_proto_metrics_v1_Metric m = opentelemetry_proto_metrics_v1_Metric_init_zero;
+    m.name.funcs.encode = otlp_enc_string;
+    m.name.arg = (void *)c->name;
+    if (c->unit && c->unit[0]) { m.unit.funcs.encode = otlp_enc_string; m.unit.arg = (void *)c->unit; }
+    m.which_data = opentelemetry_proto_metrics_v1_Metric_gauge_tag;
+    m.data.gauge.data_points.funcs.encode = enc_series_calls;
+    m.data.gauge.data_points.arg = c->dp;
+    if (!pb_encode_tag_for_field(st, fld)) return false;
+    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m);
+}
+
+long otlp_metrics_gauge_build(uint8_t *buf, size_t cap,
+                              const char *service_name, const char *service_version,
+                              const char *scope_name,
+                              const char *name, const char *unit,
+                              uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                              const otlp_series_t *series, size_t nseries) {
+    sdp_ctx_t dpctx = { series, nseries, time_unix_nano, start_time_unix_nano };
+    onemetric_ctx_t mctx = { &dpctx, name, unit };
+    pb_callback_t cb = {{0}, 0};
+    cb.funcs.encode = enc_gauge_metric;
+    cb.arg = &mctx;
+    return metrics_envelope_encode(buf, cap, service_name, service_version, scope_name, cb);
+}
+
+/* An ExponentialHistogram on its own -- the latency half, without the rate. */
+static bool enc_exphist_metric(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
+    onemetric_ctx_t *c = (onemetric_ctx_t *)(*arg);
+    opentelemetry_proto_metrics_v1_Metric m = opentelemetry_proto_metrics_v1_Metric_init_zero;
+    m.name.funcs.encode = otlp_enc_string;
+    m.name.arg = (void *)c->name;
+    if (c->unit && c->unit[0]) { m.unit.funcs.encode = otlp_enc_string; m.unit.arg = (void *)c->unit; }
+    m.which_data = opentelemetry_proto_metrics_v1_Metric_exponential_histogram_tag;
+    m.data.exponential_histogram.data_points.funcs.encode = enc_series_lat;
+    m.data.exponential_histogram.data_points.arg = c->dp;
+    m.data.exponential_histogram.aggregation_temporality =
+        opentelemetry_proto_metrics_v1_AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE;
+    if (!pb_encode_tag_for_field(st, fld)) return false;
+    return pb_encode_submessage(st, opentelemetry_proto_metrics_v1_Metric_fields, &m);
+}
+
+long otlp_metrics_exphist_build(uint8_t *buf, size_t cap,
+                                const char *service_name, const char *service_version,
+                                const char *scope_name,
+                                const char *name, const char *unit,
+                                uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                                const otlp_series_t *series, size_t nseries) {
+    sdp_ctx_t dpctx = { series, nseries, time_unix_nano, start_time_unix_nano };
+    onemetric_ctx_t mctx = { &dpctx, name, unit };
+    pb_callback_t cb = {{0}, 0};
+    cb.funcs.encode = enc_exphist_metric;
+    cb.arg = &mctx;
+    return metrics_envelope_encode(buf, cap, service_name, service_version, scope_name, cb);
+}
+
+/* ---- a monotonic Sum on its own: the counter of a record channel ------------
+ *
+ * A record channel's counter has no value to distribute -- a connection is a
+ * point event with no duration -- so this emits a Sum without inventing a
+ * latency. The data points are shared with enc_series_calls (otlp_series_t's
+ * buckets simply go unread). This path has always sent one metric per request;
+ * the other two were brought into line with it, not the other way round. */
 typedef struct { sdp_ctx_t *dp; const char *name; const char *unit; } sumonly_ctx_t;
 
 static bool enc_sum_metric(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
@@ -389,74 +496,17 @@ long otlp_metrics_sum_build(uint8_t *buf, size_t cap,
                             const otlp_series_t *series, size_t nseries) {
     sdp_ctx_t dpctx = { series, nseries, time_unix_nano, start_time_unix_nano };
     sumonly_ctx_t mctx = { &dpctx, name, unit };
-    otlp_resource_t rctx = { service_name, service_version };
-
-    opentelemetry_proto_resource_v1_Resource res =
-        opentelemetry_proto_resource_v1_Resource_init_zero;
-    res.attributes.funcs.encode = otlp_enc_resource_attrs;
-    res.attributes.arg = &rctx;
-
-    opentelemetry_proto_common_v1_InstrumentationScope scope =
-        opentelemetry_proto_common_v1_InstrumentationScope_init_zero;
-    scope.name.funcs.encode = otlp_enc_string;
-    scope.name.arg = (void *)(scope_name ? scope_name : "spinel-ebpf");
-
-    opentelemetry_proto_metrics_v1_ScopeMetrics sm =
-        opentelemetry_proto_metrics_v1_ScopeMetrics_init_zero;
-    sm.has_scope = true;
-    sm.scope = scope;
-    sm.metrics.funcs.encode = enc_sum_metric;
-    sm.metrics.arg = &mctx;
-    otlp_one_sub_t sm_sub = { opentelemetry_proto_metrics_v1_ScopeMetrics_fields, &sm };
-
-    opentelemetry_proto_metrics_v1_ResourceMetrics rm =
-        opentelemetry_proto_metrics_v1_ResourceMetrics_init_zero;
-    rm.has_resource = true;
-    rm.resource = res;
-    rm.scope_metrics.funcs.encode = otlp_enc_one_sub;
-    rm.scope_metrics.arg = &sm_sub;
-    otlp_one_sub_t rm_sub = { opentelemetry_proto_metrics_v1_ResourceMetrics_fields, &rm };
-
-    opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest req =
-        opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_init_zero;
-    req.resource_metrics.funcs.encode = otlp_enc_one_sub;
-    req.resource_metrics.arg = &rm_sub;
-
-    pb_ostream_t st = pb_ostream_from_buffer(buf, cap);
-    if (!pb_encode(&st,
-            opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_fields, &req))
-        return -1;
-    return (long)st.bytes_written;
+    pb_callback_t cb = {{0}, 0};
+    cb.funcs.encode = enc_sum_metric;
+    cb.arg = &mctx;
+    return metrics_envelope_encode(buf, cap, service_name, service_version, scope_name, cb);
 }
 
-/* ---- explicit-bounds Histogram, as used by http.server.request.duration ---- */
+/* ---- explicit-bounds Histogram (semconv http.server.request.duration) ----
+ * The bounds and bucket_counts encoders are at the top of the file, shared with
+ * the log2 folding. */
 
-/* repeated double explicit_bounds, unpacked -- accepted by both protoc and nanopb. */
-typedef struct { const double *b; int n; } bounds_ctx_t;
-static bool enc_explicit_bounds(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
-    const bounds_ctx_t *b = (const bounds_ctx_t *)(*arg);
-    for (int i = 0; i < b->n; i++) {
-        double d = b->b[i];
-        if (!pb_encode_tag_for_field(st, fld)) return false;
-        if (!pb_encode_fixed64(st, &d)) return false;  /* a double is 64-bit fixed */
-    }
-    return true;
-}
-
-/* HistogramDataPoint.bucket_counts is repeated *fixed64*, a different wire type
- * from the repeated uint64 of ExponentialHistogram. The tag is emitted as 64-bit
- * from the field descriptor, so the values go out as 8 bytes each too. */
-static bool enc_hist_bucket_counts(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
-    const buckets_ctx_t *b = (const buckets_ctx_t *)(*arg);
-    for (int i = 0; i < b->len; i++) {
-        uint64_t v = b->buckets[b->offset + i];
-        if (!pb_encode_tag_for_field(st, fld)) return false;
-        if (!pb_encode_fixed64(st, &v)) return false;
-    }
-    return true;
-}
-
-/* A series' arbitrary labels; arg is a const otlp_hseries_t*. */
+/* Per-series arbitrary labels; arg is a const otlp_hseries_t*. */
 static bool enc_hseries_attrs(pb_ostream_t *st, const pb_field_iter_t *fld, void *const *arg) {
     const otlp_hseries_t *s = (const otlp_hseries_t *)(*arg);
     for (int i = 0; i < s->nlabels; i++)
@@ -524,66 +574,33 @@ long otlp_metrics_hist_build(uint8_t *buf, size_t cap,
                              const otlp_hseries_t *series, size_t nseries) {
     hdp_ctx_t dpctx = { series, nseries, bounds, nbounds, time_unix_nano, start_time_unix_nano };
     hmetric_ctx_t mctx = { &dpctx, name, unit };
-    otlp_resource_t rctx = { service_name, service_version };
-
-    opentelemetry_proto_resource_v1_Resource res =
-        opentelemetry_proto_resource_v1_Resource_init_zero;
-    res.attributes.funcs.encode = otlp_enc_resource_attrs;
-    res.attributes.arg = &rctx;
-
-    opentelemetry_proto_common_v1_InstrumentationScope scope =
-        opentelemetry_proto_common_v1_InstrumentationScope_init_zero;
-    scope.name.funcs.encode = otlp_enc_string;
-    scope.name.arg = (void *)(scope_name ? scope_name : "spinel-ebpf");
-
-    opentelemetry_proto_metrics_v1_ScopeMetrics sm =
-        opentelemetry_proto_metrics_v1_ScopeMetrics_init_zero;
-    sm.has_scope = true;
-    sm.scope = scope;
-    sm.metrics.funcs.encode = enc_hist_metric;
-    sm.metrics.arg = &mctx;
-    otlp_one_sub_t sm_sub = { opentelemetry_proto_metrics_v1_ScopeMetrics_fields, &sm };
-
-    opentelemetry_proto_metrics_v1_ResourceMetrics rm =
-        opentelemetry_proto_metrics_v1_ResourceMetrics_init_zero;
-    rm.has_resource = true;
-    rm.resource = res;
-    rm.scope_metrics.funcs.encode = otlp_enc_one_sub;
-    rm.scope_metrics.arg = &sm_sub;
-    otlp_one_sub_t rm_sub = { opentelemetry_proto_metrics_v1_ResourceMetrics_fields, &rm };
-
-    opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest req =
-        opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_init_zero;
-    req.resource_metrics.funcs.encode = otlp_enc_one_sub;
-    req.resource_metrics.arg = &rm_sub;
-
-    pb_ostream_t st = pb_ostream_from_buffer(buf, cap);
-    if (!pb_encode(&st,
-            opentelemetry_proto_collector_metrics_v1_ExportMetricsServiceRequest_fields, &req))
-        return -1;
-    return (long)st.bytes_written;
+    pb_callback_t cb = {{0}, 0};
+    cb.funcs.encode = enc_hist_metric;
+    cb.arg = &mctx;
+    return metrics_envelope_encode(buf, cap, service_name, service_version, scope_name, cb);
 }
 
-int otlp_metrics_export(const char *endpoint,
-                        const char *service_name, const char *service_version,
-                        const char *scope_name,
-                        uint64_t time_unix_nano, uint64_t start_time_unix_nano,
-                        const otlp_method_metric_t *methods, size_t nmethods,
-                        int *http_status, char *err, size_t errlen) {
-    static uint8_t buf[1 << 18]; /* 256 KB, ample even for the ~1024-method ceiling */
+/* One part, one request: build it and send it. */
+static int metrics_export_part(const char *endpoint, otlp_method_part_t part,
+                               const char *service_name, const char *service_version,
+                               const char *scope_name,
+                               uint64_t t, uint64_t start,
+                               const otlp_method_metric_t *methods, size_t nmethods,
+                               int *http_status, char *err, size_t errlen) {
+    static uint8_t buf[1 << 18]; /* 256KB; plenty even for the ~1024-method cap */
     long n;
     const char *ct;
     const uint8_t *body;
-    /* JSON when http/json was asked for and the endpoint is not gRPC; protobuf
-     * otherwise, since gRPC always carries protobuf. */
+    /* JSON when http/json is asked for and the endpoint is not gRPC; protobuf
+     * otherwise (gRPC is always protobuf). */
     if (otlp_want_json() && !otlp_endpoint_is_grpc(endpoint)) {
         static char jbuf[1 << 19];
-        n = otlp_json_metrics_build(jbuf, sizeof jbuf, service_name, service_version, scope_name,
-                                    time_unix_nano, start_time_unix_nano, methods, nmethods);
+        n = otlp_json_metrics_method_build(jbuf, sizeof jbuf, service_name, service_version,
+                                           scope_name, (int)part, t, start, methods, nmethods);
         body = (const uint8_t *)jbuf; ct = "application/json";
     } else {
-        n = otlp_metrics_build(buf, sizeof buf, service_name, service_version, scope_name,
-                               time_unix_nano, start_time_unix_nano, methods, nmethods);
+        n = otlp_metrics_method_build(buf, sizeof buf, service_name, service_version, scope_name,
+                                      part, t, start, methods, nmethods);
         body = buf; ct = "application/x-protobuf";
     }
     if (n < 0) {
@@ -592,4 +609,50 @@ int otlp_metrics_export(const char *endpoint,
     }
     return otlp_transport_send(endpoint, "/v1/metrics", OTLP_GRPC_PATH_METRICS,
                                ct, body, (size_t)n, http_status, err, errlen);
+}
+
+/* Send the per-method RED measurements as *two* requests.
+ *
+ * They used to be bundled: the rate (a Sum) and the latency (a histogram) in one
+ * request. An OTLP request carries a single status for the whole body, so a
+ * backend that rejects the histogram type took the rate down with it, and direct
+ * export to such a backend failed entirely -- including the half it would have
+ * accepted. Split, one refusal no longer reaches the other metric.
+ *
+ * *http_status is 200 when both were 200, otherwise the first non-200. The
+ * caller prints a single line, so the status stays a single value, but *which*
+ * one failed is written to stderr rather than folded away into that number. */
+int otlp_metrics_export(const char *endpoint,
+                        const char *service_name, const char *service_version,
+                        const char *scope_name,
+                        uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                        const otlp_method_metric_t *methods, size_t nmethods,
+                        int *http_status, char *err, size_t errlen) {
+    const otlp_method_part_t lat = (otlp_hist_aggregation() == OTLP_HIST_AGG_EXPONENTIAL)
+                                 ? OTLP_MPART_LATENCY_EXP : OTLP_MPART_LATENCY_HIST;
+    const struct { otlp_method_part_t part; const char *label; } parts[] = {
+        { OTLP_MPART_CALLS, "spnl_method_calls_total" },
+        { lat,              "spnl_method_latency_ns"  },
+    };
+    int worst = 200, rc_any = 0;
+    for (size_t i = 0; i < sizeof parts / sizeof parts[0]; i++) {
+        int status = 0;
+        char e[256] = {0};
+        int rc = metrics_export_part(endpoint, parts[i].part, service_name, service_version,
+                                     scope_name, time_unix_nano, start_time_unix_nano,
+                                     methods, nmethods, &status, e, sizeof e);
+        if (rc != 0) {
+            fprintf(stderr, "[otlp] %s push error: %s\n", parts[i].label, e);
+            if (!rc_any) { rc_any = rc; if (err && errlen) snprintf(err, errlen, "%s: %s", parts[i].label, e); }
+            if (worst == 200) worst = 0;
+            continue;
+        }
+        if (status != 200) {
+            fprintf(stderr, "[otlp] %s -> HTTP %d (the other metric is sent separately and is "
+                            "unaffected)\n", parts[i].label, status);
+            if (worst == 200) worst = status;
+        }
+    }
+    if (http_status) *http_status = worst;
+    return rc_any;
 }

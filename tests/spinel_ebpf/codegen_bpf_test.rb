@@ -2340,7 +2340,7 @@ end
   end
 
   def test_dns_event_carries_cgid
-    c = emit_for("105_emit_dns")
+    c = emit_for("185_emit_dns_kfield_filter")
     assert_match(/struct \w+_dns_event \{.*__u64 cgid;.*\};/m, c)
     assert_match(/->cgid = bpf_get_current_cgroup_id\(\);/, c)
   end
@@ -2703,8 +2703,11 @@ end
 
   # ---------- emit_dns (resolver-independent DNS query) ----------
 
+  # 185, not 105: the canonical DNS fixture moved to udp_dport(sk, msg) and this
+  # retired codegen predates it (it also predates the sock_* accessors). 185 is
+  # the same probe written with the raw kfield read, which is what this can read.
   def test_emit_dns_copies_raw_payload_from_msghdr
-    c = emit_for("105_emit_dns")
+    c = emit_for("185_emit_dns_kfield_filter")
     inner = c[/kprobe__udp_sendmsg_inner\(.*?\n\}/m]
     refute_nil inner
     assert_includes c, "_dns_events SEC(\".maps\");"
@@ -2838,7 +2841,7 @@ end
 
   def test_emit_dns_query_only_sets_duration_zero
     # emit_dns coexists: query-only record must zero duration_ns explicitly
-    c = emit_for("105_emit_dns")
+    c = emit_for("185_emit_dns_kfield_filter")
     assert_match(/->duration_ns = 0;/, c)
   end
 

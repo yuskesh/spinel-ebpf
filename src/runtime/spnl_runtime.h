@@ -100,19 +100,20 @@ void          spnl_oneshot_exit(void);         /* clean exit(0): destructors det
  * Only inbound records are counted here. What a consumer then does with a
  * record -- turn it into a span, print it, or skip it -- is the consumer's to
  * report, and "the runtime discarded it" and "the probe filtered it out" must
- * not be conflated: the first is a symptom, the second is the feature. */
+ * not be conflated: the first is a symptom, the second is the feature. The
+ * second has no counter of its own; it is `in` minus `out`. */
 /* The channel exists in the loaded object. Called by the loader for every
  * ringbuf map before anything drains, so a channel that no userspace code ever
  * reads can still be named at exit -- the emit-but-never-drain failure. */
 void          spnl_channel_declare(const char *map_name);
 void          spnl_channel_seen(const char *map_name);
-/* A record became an output (span pushed, line printed, ...). Consumer-side. */
+/* A record became an output (span pushed, line printed, ...). Consumer-side.
+ * Every consumer path that produces output must call this, or the report cannot
+ * distinguish a probe that filtered from one that did not. */
 void          spnl_channel_out(const char *map_name, long n);
 /* The runtime discarded a record because it did not satisfy the channel's
  * contract. `reason`/`hint` must be literals (stored by pointer). */
 void          spnl_channel_dropped(const char *map_name, const char *reason, const char *hint);
-/* The probe's own consumer skipped it. Never reported as a problem. */
-void          spnl_channel_filtered(const char *map_name, long n);
 void          spnl_channel_in(const char *map_name, long n);
 int           spnl_channel_count(void);            /* channels registered so far */
 const char   *spnl_channel_name(int i);            /* NULL when i is out of range */

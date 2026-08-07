@@ -69,7 +69,20 @@ static unsigned long g_spnl_event_count = 0;
  * to become an output are not the same thing: the runtime discarding it because
  * it does not satisfy the channel's contract is a symptom, whereas the probe's
  * own consumer skipping it is the probe working as designed. Reporting them
- * with the same word would tell a reader to go fix a feature. */
+ * with the same word would tell a reader to go fix a feature.
+ *
+ * A record the consumer skipped is therefore NOT counted anywhere -- it is read
+ * as `in` minus `out`. There used to be a third counter for it,
+ * spnl_channel_filtered(), which nothing ever called, so its report line could
+ * never print; and because the line was conditional, "nobody counted" and "none
+ * were filtered" looked identical. It cannot be counted uniformly: a consumer's
+ * `next` and a declared `keep_if` both lower to `return 0` in the generated
+ * handler and the driver does not look at the return value, so only a counter
+ * the generator inserts could see one of the two spellings -- which would leave
+ * the other spelling silently uncounted, exactly the ambiguity being removed.
+ * The subtraction covers both. What that requires is that `out` is counted on
+ * every path that produces output; the typed-consumer path did not, and now
+ * does (see spnl_otlp_span_send). */
 #define SPNL_CHAN_MAX      16
 #define SPNL_CHAN_NAME_MAX 64
 
@@ -81,11 +94,11 @@ struct spnl_chan_stat {
     unsigned long out;
     /* Reasons the runtime discarded a record, kept apart from `out` because
      * they mean different things to a reader. A record the probe's own filter
-     * skipped is neither: see spnl_channel_filtered. */
+     * skipped is neither, and has no field: it is `in` minus `out` (see the
+     * note above the struct). */
     struct { const char *reason; const char *hint; unsigned long n; }
                   drops[SPNL_CHAN_DROPS_MAX];
     int           ndrops;
-    unsigned long filtered;
     /* Whether a drain ever touched this channel. A channel declared by the
      * loader but never drained is a different failure from one that drained
      * nothing, and needs the opposite advice -- see the report. */
@@ -151,7 +164,12 @@ static struct spnl_chan_stat *chan_find(const char *map_name)
 }
 
 /* A record became an output: a span, a printed line, whatever the consumer
- * produces. Counted by the consumer, since only it knows what "produced" means. */
+ * produces. Counted by the consumer, since only it knows what "produced" means.
+ *
+ * This is also what makes a userspace filter readable, since `in` minus `out` is
+ * the only account of it there is -- so a consumer path that produces output and
+ * does not call this leaves the report saying `in N` and nothing else, which
+ * reads as "no filter" no matter how much was filtered. */
 void spnl_channel_out(const char *map_name, long n)
 {
     struct spnl_chan_stat *s = chan_find(map_name);
@@ -163,8 +181,9 @@ void spnl_channel_out(const char *map_name, long n)
  * stable id and `hint` is what to do about it; both are expected to be string
  * literals owned by the caller, so they are stored by pointer.
  *
- * Distinct from spnl_channel_filtered on purpose. This one is a symptom worth
- * surfacing; that one is the probe working as designed. */
+ * Distinct on purpose from a record the probe's own consumer skipped: this one
+ * is a symptom worth surfacing, that one is the probe working as designed and is
+ * left to the `in`/`out` difference rather than given a word of its own. */
 void spnl_channel_dropped(const char *map_name, const char *reason, const char *hint)
 {
     struct spnl_chan_stat *s = chan_find(map_name);
@@ -177,15 +196,6 @@ void spnl_channel_dropped(const char *map_name, const char *reason, const char *
     s->drops[s->ndrops].hint   = hint;
     s->drops[s->ndrops].n      = 1;
     s->ndrops++;
-}
-
-/* The probe's own consumer chose to skip this record. Never reported as a
- * problem: emitting broadly and narrowing in userspace is a supported design,
- * and a warning here would contradict it. */
-void spnl_channel_filtered(const char *map_name, long n)
-{
-    struct spnl_chan_stat *s = chan_find(map_name);
-    if (s && n > 0) s->filtered += (unsigned long)n;
 }
 
 int spnl_channel_count(void) { return g_spnl_nchans; }
@@ -305,7 +315,6 @@ static void spnl_channel_report_kv_fd(int fd)
         w_str(fd, " in=");            w_num(fd, s->in);
         w_str(fd, " out=");           w_num(fd, s->out);
         w_str(fd, " dropped=");       w_num(fd, dropped);
-        w_str(fd, " filtered=");      w_num(fd, s->filtered);
         w_str(fd, "\n");
     }
     /* Unit-wide kernel-side ringbuf-full drops. Emitted whenever a lost map is
@@ -368,7 +377,6 @@ static void spnl_channel_report_fd(int fd)
         w_chan(fd, s->name);
         w_str(fd, "in ");       w_num(fd, s->in);
         if (s->out)      { w_str(fd, "   out ");      w_num(fd, s->out); }
-        if (s->filtered) { w_str(fd, "   filtered "); w_num(fd, s->filtered); }
         if (dropped)     { w_str(fd, "   dropped ");  w_num(fd, dropped); }
         w_str(fd, "\n");
 

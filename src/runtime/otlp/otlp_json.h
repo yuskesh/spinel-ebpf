@@ -29,11 +29,15 @@ int otlp_endpoint_is_grpc(const char *endpoint);
 
 /* Write the OTLP/JSON form of each signal into buf. Returns the byte count, or
  * -1 if buf is too small or encoding failed. */
-long otlp_json_metrics_build(char *buf, size_t cap,
-                             const char *service_name, const char *service_version,
-                             const char *scope_name,
-                             uint64_t time_unix_nano, uint64_t start_time_unix_nano,
-                             const otlp_method_metric_t *methods, size_t nmethods);
+/* --instrument's per-method RED, one metric per request (the protobuf twin is
+ * otlp_metrics_method_build). `part` holds an otlp_method_part_t value; this
+ * header does not include otlp_metrics.h, so it is taken as an int, and a
+ * _Static_assert in otlp_json.c pins the two numberings together. */
+long otlp_json_metrics_method_build(char *buf, size_t cap,
+                                    const char *service_name, const char *service_version,
+                                    const char *scope_name, int part,
+                                    uint64_t time_unix_nano, uint64_t start_time_unix_nano,
+                                    const otlp_method_metric_t *methods, size_t nmethods);
 
 long otlp_json_traces_build(char *buf, size_t cap,
                             const char *service_name, const char *service_version,
@@ -51,13 +55,15 @@ long otlp_json_http_span_build(char *buf, size_t cap,
                                const char *service_name, const char *service_version,
                                const char *scope_name, const otlp_http_span_t *span);
 
-/* Generic keyed metrics with arbitrary labels, as JSON. */
-long otlp_json_metrics_series_build(char *buf, size_t cap,
-                                    const char *service_name, const char *service_version,
-                                    const char *scope_name,
-                                    const char *name, const char *lat_name, const char *unit,
-                                    uint64_t time_unix_nano, uint64_t start_time_unix_nano,
-                                    const otlp_series_t *series, size_t nseries);
+/* An ExponentialHistogram on its own, as JSON (the protobuf twin is
+ * otlp_metrics_exphist_build) -- the latency half of a generic keyed metric.
+ * There used to be only a builder that bundled it with the Sum, which put two
+ * metric types in one request and made one refusal take down both. */
+long otlp_json_metrics_exphist_build(char *buf, size_t cap,
+                                     const char *svc, const char *ver, const char *scope,
+                                     const char *name, const char *unit,
+                                     uint64_t t, uint64_t start,
+                                     const otlp_series_t *series, size_t n);
 
 /* A Sum on its own -- the counter of a record channel. Counterpart of
  * otlp_metrics_sum_build on the protobuf side. */

@@ -121,6 +121,9 @@
 180_path_contains_overlay_hook	refusal	refused	
 181_path_eq_overlay_getattr_fexit	refusal	refused	
 182_emit_path_overlay_hook	golden	default	
+183_open_coded_loop	golden	default	
+184_if_expression_value	golden	default	
+185_emit_dns_kfield_filter	golden	default	
 18_tp_args	golden	default	
 19_emit_str	golden	default	
 20_top_ivar	golden	default	

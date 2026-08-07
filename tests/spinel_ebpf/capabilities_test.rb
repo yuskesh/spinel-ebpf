@@ -945,7 +945,7 @@ class CapabilitiesTest < Minitest::Test
     refute_nil dns, "there is no dns channel"
     assert_equal "<unit>_dns_event", dns[:record_struct]
     assert_equal "<unit>_dns_events", dns[:ringbuf_map]
-    assert_equal 120, dns[:record_bytes]
+    assert_equal 128, dns[:record_bytes]
     assert_equal %w[emit_dns dns_emit], dns[:producers]
     # Every channel has a record struct, a ringbuf map and a producer -- the minimum contract
     chans.each do |c|
@@ -1637,10 +1637,10 @@ class CapabilitiesTest < Minitest::Test
     assert_equal DECLARED_CHANNELS.length, doc["summary"]["record_channel_count"]
     dns = doc["record_channels"].find { |c| c["id"] == "dns" }
     refute_nil dns, "record_channels is missing from the affordance"
-    assert_equal 120, dns["record_bytes"]
+    assert_equal 128, dns["record_bytes"]
     e = doc["builtins"].find { |b| b["name"] == "emit_dns" }
     assert_equal "dns", e["record_channel"]
-    assert_equal %w[hdr pid comm raw cgid duration_ns], e["record_schema"]["fields"].map { |f| f["name"] }
+    assert_equal %w[hdr pid comm raw cgid duration_ns raw_status], e["record_schema"]["fields"].map { |f| f["name"] }
     assert_equal "spnl_otlp_dns_span_push", e["record_schema"]["egress"]["push_fn"]
     # A builtin that writes no record gets null -- do not invent a contract.
     assert_nil doc["builtins"].find { |b| b["name"] == "hist_observe" }["record_channel"]
@@ -1764,6 +1764,73 @@ class CapabilitiesTest < Minitest::Test
     refute wm.key?("USER_RINGBUF"), "USER_RINGBUF was ported back, so it must not remain in the withdrawn record"
   end
 
+  # ---------- the syntax vocabulary ----------
+  #
+  # The fifth vocabulary. Once prose had been diagnosed as ungateable,
+  # `RUBY_SUBSET[:supported]` itself stayed fourteen strings, and **two constructs
+  # inside it went on being advertised while dead** (a literal `n.times`,
+  # `x = if ... end`). It goes into the JSON too -- leaving it out would mean that
+  # to a consumer who reads the affordance only as JSON, "what syntax can I write"
+  # is still prose and nothing else.
+  def test_affordance_json_carries_the_syntax_vocabulary
+    require "json"
+    a = JSON.parse(CAP.affordance_json)
+    syn = a.fetch("syntax")
+    refute_empty syn
+    assert_equal syn.size, a["summary"]["syntax_count"]
+    # one entry = "this spelling becomes this C" + "the same thing without the construct"
+    syn.each do |s|
+      refute_empty s["lowers_to"].to_s,
+                   "#{s['id']}: no lowers_to, so the claim degenerates to \"it compiles\""
+      refute_nil s["without"],
+                 "#{s['id']}: no twin, so a needle satisfied by boilerplate goes unnoticed"
+      refute_equal s["syntax"], s["without"], "#{s['id']}: the twin is identical to the claim"
+    end
+    # The two that were ported are named, each with its own lowering claim.
+    lit = syn.find { |s| s["id"] == "times_literal" }
+    assert_match(/bpf_iter_num/, lit["lowers_to"])
+    dyn = syn.find { |s| s["id"] == "times_dynamic" }
+    assert_match(/bpf_loop/, dyn["lowers_to"])
+    refute_equal lit["lowers_to"], dyn["lowers_to"],
+                 "if two constructs that both compile and are both advertised reached the same " \
+                 "machinery, losing the open-coded path would go unnoticed"
+    ifv = syn.find { |s| s["id"] == "if_value" }
+    refute_nil ifv, "the expression-position if is not advertised"
+    # The authority for the reverse check is published too: where to read what the
+    # codegen actually accepts.
+    auth = a.fetch("syntax_coverage_authorities")
+    assert auth.key?("node_types") && auth.key?("binary_ops")
+    refute_nil a["withdrawn_syntax"]
+  end
+
+  # The prose may stay, but the affordance has to say it is not the authority.
+  # Without that, the next person to add a construct adds a fifteenth string and
+  # stops there.
+  def test_the_prose_subset_says_it_is_not_the_authority
+    src = File.read(File.expand_path("../../src/spinel_ebpf/capabilities.rb", __dir__), encoding: "UTF-8")
+    block = src[/RUBY_SUBSET = \{(.*?)supported:/m]
+    refute_nil block
+    assert_match(/authority/, block,
+                 "nothing directly above RUBY_SUBSET says the prose is not the authority")
+    assert_match(/SYNTAX/, block, "nothing says where the authority is")
+  end
+
+  # The rejected half was machine-readable from the start, and **was never
+  # measured**. Each row now carries its own input and the refusal it expects.
+  def test_rejected_rows_carry_their_own_probe_and_expected_refusal
+    require "json"
+    a = JSON.parse(CAP.affordance_json)
+    rej = a["ruby_subset"]["rejected"]
+    assert_equal rej.size, a["summary"]["syntax_rejected_count"]
+    rej.each do |r|
+      refute_empty r["probe"].to_s, "#{r['flag']}: no probe, so this refusal is never measured"
+      refute_empty r["refusal"].to_s, "#{r['flag']}: no expected refusal reason"
+    end
+    big = rej.find { |r| r["flag"] == "uses_bignum" }
+    assert_match(/exit 0/, big["note"].to_s,
+                 "this was the one flag that used to exit 0; that fact belongs in the affordance")
+  end
+
   # The four forms that never appear in `SEC(".maps")` -- struct_ops, .rodata,
   # private(A) and the libbpf headers -- are listed too. Leaving them out would ship
   # the same misreading a text scanner makes first: "no declaration means no map".
@@ -1800,7 +1867,7 @@ class CapabilitiesTest < Minitest::Test
   def test_catalog_report_shows_record_channels
     r = CAP.catalog_report
     assert_match(/record channels/, r)
-    assert_match(/<unit>_dns_event \(120 B\)/, r)
+    assert_match(/<unit>_dns_event \(128 B\)/, r)
     assert_match(/@112\s+duration_ns/, r)
     assert_match(/egress: spnl_otlp_dns_span_push -> span "resolve \{dns\.question\.name\}"/, r)
     assert_match(/spnl\.dns\.latency_ns\s+spinel/, r)

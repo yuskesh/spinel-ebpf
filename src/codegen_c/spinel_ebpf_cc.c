@@ -604,6 +604,11 @@ static int g_uses_offcpu = 0;      /* unit uses offcpu_* -> off-CPU-during-reque
 static int g_uses_dns_lat = 0;     /* unit uses dns_req_start/dns_resp_stash/dns_emit -> DNS RTT (txid-keyed) */
 static int g_uses_redis_l7 = 0;    /* unit uses redis_req_start/redis_resp_stash/redis_emit -> Redis L7 RED */
 static int g_uses_dynptr = 0;      /* unit uses pkt_dynptr_byte_at / pkt.byte_at -> emit the dynptr helper */
+/* Any builtin that reads the bytes of a send/recv resolves the user buffer
+ * through spnl_msg_ubuf() instead of reading one arm of the msg_iter union. One
+ * flag for all eleven of them -- the resolver is emitted once per unit. */
+static int g_uses_msg_ubuf = 0;
+static int g_uses_udp_dst = 0;     /* udp_dport/udp_daddr -> msg_name-aware destination helpers */
 /* how many `def xdp_tail__<name>` this unit declares. Counted in the
  * pre-scan (before any body is lowered) because `tail_call_to(<literal>)` is
  * checked against it: the loader populates exactly slots 0..N-1, and a tail call
@@ -2535,6 +2540,21 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
     free(v);
     return;
   }
+  /* An `if` in EXPRESSION position -- `x = if a > 1 then 1 else 2 end`,
+   * `@x = if ... end`. The temp-variable lowering was built for precisely this
+   * case, and the retired Ruby generator kept a dedicated expression-position
+   * path for it; the move to the in-process C generator wired IfNode into the
+   * statement lowering only, so the value form died while the statement form and
+   * the parenthesised form (ParenthesesNode -> StatementsNode -> here) kept
+   * working. Same delegation as StatementsNode above: cc_lower_stmt emits the
+   * `__s64 _ifN = 0; if (...) {...} else {...}` lines into g_body and hands back
+   * the temp as the value. */
+  if (!strcmp(ty, "IfNode")) {
+    char *v = cc_lower_stmt(ast, nid, g_body);
+    buf_puts(b, v ? v : "0");
+    free(v);
+    return;
+  }
   if (!strcmp(ty, "ConstantReadNode")) {   /* XDP_PASS etc. -> literal int */
     const char *nm = nt_str(ast, nid, "name");
     long long v = 0;
@@ -2649,6 +2669,28 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
         free(ptr);
         return;
       }
+    }
+    /* udp_dport(sk, msg) / udp_daddr(sk, msg) -- where this datagram is going,
+     * as opposed to what socket it left. The two coincide only for a connected
+     * socket; a sender that passes the address on every send leaves skc_dport at
+     * 0, so a `sock_dport(sk) == 53` filter is simply false and the probe reports
+     * NOTHING (measured with dnsmasq). The rule ("msg_name wins, else the
+     * connected peer") is udp_sendmsg's own, folded in here so the author neither
+     * has to know it nor can apply half of it. */
+    if (name && (!strcmp(name, "udp_dport") || !strcmp(name, "udp_daddr"))) {
+      int args_id = nt_ref(ast, nid, "arguments");
+      int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
+      if (na != 2)
+        die("udp_dport/udp_daddr expect two arguments: the socket and the message "
+            "(e.g. udp_dport(sk, msg) inside def kprobe__udp_sendmsg(sk, msg, len)) -- "
+            "both are needed because an unconnected sender carries the destination in "
+            "the message, and a connected one in the socket", name);
+      char *sk = cc_expr_str(ast, ids[0]);
+      char *msg = cc_expr_str(ast, ids[1]);
+      buf_printf(b, "spnl_%s((struct sock *)(unsigned long)(%s), (struct msghdr *)(unsigned long)(%s))",
+                 name, sk, msg);
+      free(sk); free(msg);
+      return;
     }
     /* kfield_str_eq(ptr, "struct", "field"..., "literal") -- does a kernel
      * struct's STRING field equal a compile-time literal? The expression form (it
@@ -4772,6 +4814,53 @@ static void cc_collect_captures(AST *ast, int body_id, const char *block_param, 
   lines_free(&outer); lines_free(&outloc); lines_free(&refs);
 }
 
+/* open-coded iterator for `N.times { |i| ... }` where N is an integer
+ * literal. The loop is lowered INLINE into the caller's function with the
+ * `bpf_iter_num_*` kfuncs -- no callback, no capture struct, no BPF-to-BPF call.
+ * Three things follow from "same function" and are load-bearing:
+ *   - captures need no wiring at all (the body reads the parent's locals
+ *     directly), so this path builds no capture set and leaves g_captures as-is
+ *     (an enclosing bpf_loop callback's captures stay in force);
+ *   - g_if_counter must NOT be reset (unlike the callback path, whose temps live
+ *     in a fresh function) or inline temps would collide with the parent's;
+ *   - block-body locals must NOT be re-declared -- the method prologue's
+ *     cc_collect_locals already recursed through the BlockNode and declared them.
+ * Kernel floor 6.4 (bpf_iter_num_new), which portability.rb
+ * reads back off the emitted marker. */
+static char *cc_times_open_coded(AST *ast, int recv, const char *bp, int body_id, Lines *body) {
+  long long n = nt_int(ast, recv, "value", 0);
+  if (n < 0) die("n.times open-coded: n must be >= 0", NULL);
+  int lc = ++g_loop_counter;
+
+  lines_push(body, strdup("{"));
+  lines_push(body, msprintf("    struct bpf_iter_num _it%d;", lc));
+  lines_push(body, msprintf("    bpf_iter_num_new(&_it%d, 0, %lld);", lc, n));
+  lines_push(body, msprintf("    int *_itp%d;", lc));
+  lines_push(body, msprintf("    while ((_itp%d = bpf_iter_num_next(&_it%d))) {", lc, lc));
+  lines_push(body, msprintf("        __s64 %s = (__s64)*_itp%d;", bp, lc));
+
+  /* lower the block body into its own line list so it can be indented as a unit;
+   * g_body follows so statements emitted from expression lowering (ivar reads,
+   * map lookups) land inside the loop rather than before it. */
+  Lines sub; memset(&sub, 0, sizeof sub);
+  Lines *saved_body = g_body;
+  g_body = &sub;
+  free(cc_lower_stmt(ast, body_id, &sub));
+  g_body = saved_body;
+  for (int i = 0; i < sub.n; i++) {
+    char *t1 = cc_indent_each(sub.v[i]);
+    char *t2 = cc_indent_each(t1);
+    free(t1);
+    lines_push(body, t2);
+  }
+  lines_free(&sub);
+
+  lines_push(body, strdup("    }"));
+  lines_push(body, msprintf("    bpf_iter_num_destroy(&_it%d);", lc));
+  lines_push(body, strdup("}"));
+  return strdup("0");   /* n.times: side-effecting, no expression value */
+}
+
 /* lower `n.times { |i| ... }`. Dynamic N -> a deferred bpf_loop callback
  * (+ a capture struct if the block references outer locals); the call site emits
  * the optional caps instance and `bpf_loop(...)`. Mirrors Ruby times_call. */
@@ -4786,9 +4875,13 @@ static char *cc_times_call(AST *ast, int nid, Lines *body) {
   int body_id = nt_ref(ast, block_id, "body");
   if (body_id < 0) die("block body missing", NULL);
 
+  /* compile-time literal N -> open-coded iterator, inline (no callback). */
   const char *rty = nt_type(ast, recv);
-  if (rty && !strcmp(rty, "IntegerNode"))
-    die("n.times open-coded iterator (literal N) not yet ported (Stage 1)", NULL);
+  if (rty && !strcmp(rty, "IntegerNode")) {
+    char *r = cc_times_open_coded(ast, recv, bp, body_id, body);
+    free(bp);
+    return r;
+  }
 
   char *fn = cc_func_name(g_method), *qn = cc_qual_name(g_method);
   int lc = ++g_loop_counter;
@@ -6580,6 +6673,7 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   g_uses_dns_lat = 0;      /* reset per unit */
   g_uses_redis_l7 = 0;     /* reset per unit */
   g_uses_dynptr = 0;       /* reset per unit */
+  g_uses_msg_ubuf = 0; g_uses_udp_dst = 0;
   g_n_tail_targets = 0;    /* reset per unit */
   int n_ebpf = 0, uses_pt_regs = 0, uses_usdt = 0, emit_flags = 0;
   int uses_blocklist = 0, uses_cidr = 0, uses_path_counter = 0;
@@ -6705,6 +6799,27 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
         cc_body_uses_call(ast, bdy, "emit_tcp_stream") ||
         cc_body_uses_call(ast, bdy, "redis_req_start") || cc_body_uses_call(ast, bdy, "redis_resp_stash") ||
         cc_body_uses_call(ast, bdy, "offcpu_recv_stash") || cc_body_uses_call(ast, bdy, "offcpu_emit")) uses_kfield = 1;  /* ppid + the srtt + the msg + the peer + the http + the offcpu msg + the dns req/resp msg + the tcp payload msg + the tcp stream msg + the redis msg -> BPF_CORE_READ */
+    /* The builtins that read the BYTES of a send/recv. Every one of them starts
+     * from a `struct msghdr *` whose msg_iter is a tagged union, and they all
+     * resolve it through the one spnl_msg_ubuf(). The list here is the
+     * resolver's user list: keeping it in a single place is what makes "eleven
+     * call sites, one union discipline" a thing a reader can check. */
+    {
+      static const char *const CC_MSGBUF_USERS[] = {
+        "emit_dns", "dns_req_start", "dns_resp_stash",
+        "http_req_start", "http_resp_stash",
+        "redis_req_start", "redis_resp_stash",
+        "offcpu_recv_stash", "offcpu_emit",
+        "emit_tcp_payload", "emit_tcp_stream", NULL
+      };
+      for (int u = 0; CC_MSGBUF_USERS[u]; u++)
+        if (cc_body_uses_call(ast, bdy, CC_MSGBUF_USERS[u])) { g_uses_msg_ubuf = 1; uses_kfield = 1; break; }
+    }
+    /* udp_dport/udp_daddr -- the destination of THIS datagram (msg_name wins
+     * over the connected peer, exactly as udp_sendmsg itself decides). */
+    if (cc_body_uses_call(ast, bdy, "udp_dport") || cc_body_uses_call(ast, bdy, "udp_daddr")) {
+      g_uses_udp_dst = 1; uses_kfield = 1; uses_sock_endian = 1;
+    }
     /* kfield_str family -- the SPNL_KFIELD_STR preamble, and BPF_CORE_READ*
      * from the same header kfield needs. */
     if (cc_body_uses_call(ast, bdy, "emit_kfield_str") || cc_body_uses_call(ast, bdy, "kfield_str_eq")) {
@@ -6978,6 +7093,21 @@ static char *ebpf_codegen_program(IR *ir, AST *ast, const char *base) {
   if (any_emit) {
     SECTION_SEP();
     tpl_emit(&out, tpl_ringbuf_lost, (TplSlot[]){ {"@UNIT@", g_unit} }, 1);
+  }
+
+  /* msghdr -> user buffer, resolved once for every builtin that reads the bytes
+   * of a send or a receive. Emitted ahead of the channels because every method
+   * body that reads a payload calls it. */
+  if (g_uses_msg_ubuf) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_msg_ubuf);
+  }
+
+  /* udp_dport/udp_daddr -- the destination of the datagram in hand, which is
+   * msg_name when the sender did not connect. */
+  if (g_uses_udp_dst) {
+    SECTION_SEP();
+    buf_puts(&out, tpl_udp_dst);
   }
 
   /* per-unit int-event ringbuf channel. */

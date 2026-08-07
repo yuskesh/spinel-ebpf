@@ -314,10 +314,20 @@ module SpinelEbpf
     # exactly the shape this file exists to forbid, and it is closed here -- at the
     # layer that can still see the word the author wrote, rather than at a
     # `find_map_by_name` that returns NULL.
+    #
+    # The first line of that trace is gone now: partitioning used to synthesize
+    # `xdp__tcp_slice__kernel_cache` and print it in the tag table of a program
+    # this check was about to refuse -- the tool announcing an eBPF method and
+    # then contradicting itself two lines later. The synthesis fed only the
+    # retired generator, so deleting it costs nothing and stops the tag table
+    # from claiming something that cannot exist.
+    #
+    # What is left of the surface is the DETECTOR (SpinelEbpf::KernelCache),
+    # which exists for this check and nothing else. Its file says so.
     def check_kernel_cache_unported!(ast)
-      decls = SpinelEbpf::KernelCache.declarations(ast)
+      decls = SpinelEbpf::KernelCache.declared_paths(ast)
       return if decls.empty?
-      paths = decls.map { |d| d.path.inspect }.join(", ")
+      paths = decls.map(&:inspect).join(", ")
       raise Error,
             "`kernel_cache` is not implemented by the production codegen (#{decls.length} " \
             "declaration(s): #{paths}).\n" \
@@ -467,10 +477,41 @@ module SpinelEbpf
               "unknown builtin `#{name}` in `#{method}` — did you mean `#{best}`#{hint}? " \
               "#{sig[:summary]} (run `spinel-ebpf capabilities --json` for all #{BUILTINS.size} builtins)."
       end
+      # Edit distance only bridges typos. An author who does not know the
+      # vocabulary reaches for a *plausible* name instead, and that lands far
+      # away in edit distance while staying close in meaning: `parent_is` is 6
+      # edits from `parent_path_eq` but shares the token that matters. Measured
+      # with a model authoring from errors alone: told only "unknown builtin", it
+      # guessed the replacement and happened to be right. A loud error that sends
+      # the reader back to guessing has done half its job.
+      rel = related_builtins(name)
+      if rel.any?
+        listed = rel.map do |b|
+          sig = Capabilities.signature_for(b)
+          ps  = sig && sig[:params] ? "(#{sig[:params].join(', ')})" : ""
+          "`#{b}`#{ps}"
+        end
+        raise Error,
+              "unknown builtin `#{name}` in `#{method}` — no builtin by that name. These share a " \
+              "name part with it: #{listed.join(' / ')}. If none of them is what you meant, run " \
+              "`spinel-ebpf capabilities --json` for all #{BUILTINS.size} builtins."
+      end
       raise Error,
             "unknown builtin/method `#{name}` in `#{method}` — not a known builtin, defined method, or " \
             "eBPF construct. Run `spinel-ebpf capabilities` (#{BUILTINS.size} builtins) or define it."
     end
+
+    # Builtins sharing a snake_case token with `name`, best overlap first. Tokens
+    # shorter than 3 chars are dropped: `is`/`to`/`of` are glue and match half
+    # the registry, and a suggestion list that is always long is one nobody reads.
+    def related_builtins(name, limit: 4)
+      toks = name.to_s.split("_").select { |t| t.length >= 3 }
+      return [] if toks.empty?
+      BUILTINS.select { |b| (b.split("_") & toks).any? }
+              .sort_by { |b| [-(b.split("_") & toks).size, b.length, b] }
+              .first(limit)
+    end
+
 
     # (5) Reject an incomplete set of required calls.
     def check_required_sets!(used)

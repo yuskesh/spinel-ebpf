@@ -146,7 +146,7 @@ def check_program(rel, ast, methods)
   findings = []
   methods.each do |mi|
     bid = mi.body_id
-    next if bid.nil? || bid < 0            # kernel_cache slice: no body by design
+    next if bid.nil? || bid < 0            # bodyless by design (declared-but-empty defs)
     unless ast.node(bid)
       findings << Finding.new(program: rel, method: mi.qualified_name,
                               kind: "orphan", detail: "id #{bid} is not a node in this AST")

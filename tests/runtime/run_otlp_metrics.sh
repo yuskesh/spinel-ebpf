@@ -2,9 +2,12 @@
 #
 # run_otlp_metrics.sh -- verifies per-method RED counters turning into OTLP metrics.
 #
-# Decodes the ExportMetricsServiceRequest that otlp_metrics_build produces with
-# `protoc --decode` and asserts that the Sum (counter) and the ExponentialHistogram
-# (log2 buckets, so scale=0) were assembled correctly.
+# Decodes the ExportMetricsServiceRequests that otlp_metrics_method_build produces
+# with `protoc --decode` and asserts all three parts: the Sum (counter), the
+# ExponentialHistogram (log2 buckets, so scale=0) and the explicit-bucket
+# Histogram. One request = one metric; the assertion that earns its keep here is
+# that the calls payload contains no latency, because that bundling is what let a
+# backend's refusal of one type take the other one down with it.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,40 +38,76 @@ echo "[metrics] compiling metrics encoder test"
 
 # The operator's own labels. The values are checked against the wire below.
 export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=staging, spnl.tagged = yes ,broken-pair,=novalue"
-echo "[metrics] building sample OTLP -> $TMP/out.pb"
-"$TMP/otlp_metrics" "$TMP/out.pb"
+echo "[metrics] building sample OTLP parts -> $TMP"
+"$TMP/otlp_metrics" "$TMP"
 
 echo "[metrics] decoding with protoc"
-"$PROTOC" --decode=opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest \
-  -I "$PROTO_ROOT" \
-  opentelemetry/proto/collector/metrics/v1/metrics_service.proto \
-  < "$TMP/out.pb" > "$TMP/decoded.txt"
-
-echo "----- decoded -----"; cat "$TMP/decoded.txt"; echo "-------------------"
-
-echo "[metrics] asserting Sum + ExponentialHistogram mapping"
 . "$REPO_ROOT/tests/runtime/otlp_common.sh"
+for k in calls latency_exp latency_hist; do
+  "$PROTOC" --decode=opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest \
+    -I "$PROTO_ROOT" \
+    opentelemetry/proto/collector/metrics/v1/metrics_service.proto \
+    < "$TMP/$k.pb" > "$TMP/$k.txt"
+done
+cp "$TMP/calls.txt" "$TMP/decoded.txt"   # the resource assertions hold for any part
+
+echo "----- decoded (calls) -----"; cat "$TMP/calls.txt"; echo "---------------------------"
+
+echo "[metrics] asserting: one request = one metric"
 assert() { otlp_assert "$TMP/decoded.txt" "$1"; }
-# metric names
-assert 'name: "spnl_method_calls_total"'
-assert 'name: "spnl_method_latency_ns"'
-assert 'unit: "ns"'
-# Sum (counter) data points
-assert 'as_int: 177'
-assert 'as_int: 500'
-assert 'is_monotonic: true'
-assert 'aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE'
-# ExponentialHistogram (log2 -> scale=0)
-assert 'offset: 9'
-assert 'offset: 10'
-assert 'bucket_counts: 100'
-assert 'bucket_counts: 77'
-assert 'bucket_counts: 500'
-assert 'count: 177'
-assert 'count: 500'
+# The calls payload carries no latency -- that is what un-bundling means.
+otlp_assert "$TMP/calls.txt" 'name: "spnl_method_calls_total"'
+otlp_count  "$TMP/calls.txt" '    metrics {' 1
+if grep -q 'spnl_method_latency_ns' "$TMP/calls.txt"; then
+  echo "  UNEXPECTED: the calls payload has the latency bundled in"; OTLP_FAIL=1
+else echo "  ok: no latency in the calls payload"; fi
+otlp_assert "$TMP/latency_exp.txt" 'name: "spnl_method_latency_ns"'
+otlp_count  "$TMP/latency_exp.txt" '    metrics {' 1
+if grep -q 'spnl_method_calls_total' "$TMP/latency_exp.txt"; then
+  echo "  UNEXPECTED: the latency payload has the calls bundled in"; OTLP_FAIL=1
+else echo "  ok: no calls in the latency payload"; fi
+
+echo "[metrics] asserting Sum data points"
+otlp_assert "$TMP/calls.txt" 'as_int: 177'
+otlp_assert "$TMP/calls.txt" 'as_int: 500'
+otlp_assert "$TMP/calls.txt" 'is_monotonic: true'
+otlp_assert "$TMP/calls.txt" 'aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE'
+
+echo "[metrics] asserting ExponentialHistogram (log2 -> scale=0)"
+otlp_assert "$TMP/latency_exp.txt" 'exponential_histogram {'
+otlp_assert "$TMP/latency_exp.txt" 'unit: "ns"'
+otlp_assert "$TMP/latency_exp.txt" 'offset: 9'
+otlp_assert "$TMP/latency_exp.txt" 'offset: 10'
+otlp_assert "$TMP/latency_exp.txt" 'bucket_counts: 100'
+otlp_assert "$TMP/latency_exp.txt" 'bucket_counts: 77'
+otlp_assert "$TMP/latency_exp.txt" 'bucket_counts: 500'
+otlp_assert "$TMP/latency_exp.txt" 'count: 177'
+otlp_assert "$TMP/latency_exp.txt" 'count: 500'
 # the approximated sum (sum over s of count_s * 1.5*2^s)
-assert 'sum: 313344'
-assert 'sum: 768000'
+otlp_assert "$TMP/latency_exp.txt" 'sum: 313344'
+otlp_assert "$TMP/latency_exp.txt" 'sum: 768000'
+
+echo "[metrics] asserting explicit-bucket Histogram (the log2_ns_31 bounds set)"
+otlp_assert "$TMP/latency_hist.txt" 'histogram {'
+otlp_assert "$TMP/latency_hist.txt" 'unit: "ns"'
+# The boundaries are the upper edges of the log2 slots, 2^(k+1)-1. 1048575 is the
+# one a %g in the generator used to round to 1.04858e+06 = 1048580, which moves
+# five integers into the neighbouring bucket and quietly falsifies the property
+# the whole bounds set rests on.
+otlp_assert "$TMP/latency_hist.txt" 'explicit_bounds: 1048575'
+otlp_assert "$TMP/latency_hist.txt" 'explicit_bounds: 34359738367'
+otlp_count  "$TMP/latency_hist.txt" 'explicit_bounds:' 62   # 31 boundaries x 2 data points
+otlp_count  "$TMP/latency_hist.txt" 'bucket_counts:' 64     # 32 buckets x 2 data points
+# The same numbers appear -- changing the representation never splits a count.
+otlp_assert "$TMP/latency_hist.txt" 'bucket_counts: 100'
+otlp_assert "$TMP/latency_hist.txt" 'bucket_counts: 77'
+otlp_assert "$TMP/latency_hist.txt" 'bucket_counts: 500'
+otlp_assert "$TMP/latency_hist.txt" 'count: 177'
+otlp_assert "$TMP/latency_hist.txt" 'count: 500'
+# The sum does not move when the representation changes.
+otlp_assert "$TMP/latency_hist.txt" 'sum: 313344'
+otlp_assert "$TMP/latency_hist.txt" 'sum: 768000'
+
 # resource and code.* attributes
 assert 'string_value: "spinel-app"'
 assert 'key: "code.function"'

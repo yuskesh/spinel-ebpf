@@ -36,6 +36,10 @@
 /* bounds set "otel_duration_s", in s -- OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read */
 #define SPNL_BOUNDS_OTEL_DURATION_S_N 15
 #define SPNL_BOUNDS_OTEL_DURATION_S_INIT { 0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10 }
+
+/* bounds set "log2_ns_31", in ns -- derived from the kernel's own histogram: every boundary is 2^k - 1, the exclusive upper edge of a spnl_hist_log2 slot, so each bucket is a whole number of slots and no count is ever split. The count 31 is Splunk Observability Cloud's documented ceiling ("Use no more than 31 bucket boundaries when sending histograms"; more are dropped -- measured, and dropped silently behind HTTP 200). The split point between one-to-one and paired buckets is measured, not chosen */
+#define SPNL_BOUNDS_LOG2_NS_31_N 31
+#define SPNL_BOUNDS_LOG2_NS_31_INIT { 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535, 131071, 262143, 524287, 1048575, 2097151, 4194303, 8388607, 16777215, 33554431, 67108863, 134217727, 536870911, 2147483647, 8589934591, 34359738367 }
 #endif /* SPNL_RECORD_MIRROR_BOUNDS_H */
 
 #ifndef SPNL_RECORD_MIRROR_MACROS_ONLY
@@ -121,7 +125,7 @@ extern void spnl_recmetric_observe(int metric, const char *const *label_values,
                                    int nlabels, int has_value, double value);
 /* ===================== channel "dns" =====================
  * record struct: <unit>_dns_event   ringbuf map: <unit>_dns_events (256 * 1024)
- * 6 fields, 120 bytes on the wire. */
+ * 7 fields, 128 bytes on the wire. */
 
 enum {
     SPNL_REC_DNS_OFF_HDR         =   0,   /* struct spnl_event_hdr, 16 B */
@@ -130,8 +134,9 @@ enum {
     SPNL_REC_DNS_OFF_RAW         =  36,   /* unsigned char[64], 64 B */
     SPNL_REC_DNS_OFF_CGID        = 104,   /* __u64, 8 B */
     SPNL_REC_DNS_OFF_DURATION_NS = 112,   /* __u64, 8 B */
-    SPNL_REC_DNS_SIZE            = 120,   /* whole record, incl. trailing pad */
-    SPNL_REC_DNS_MIN             = 120,   /* the whole record is required */
+    SPNL_REC_DNS_OFF_RAW_STATUS  = 120,   /* __s32, 4 B */
+    SPNL_REC_DNS_SIZE            = 128,   /* whole record, incl. trailing pad */
+    SPNL_REC_DNS_MIN             = 120,   /* accepted prefix: through `duration_ns` (later fields read as zero) */
 };
 
 typedef struct spnl_rec_dns {
@@ -141,6 +146,7 @@ typedef struct spnl_rec_dns {
     unsigned char raw[64];                   /* @36   first 64B of the DNS payload; QNAME parsed in userspace */
     uint64_t cgid;                           /* @104  cgroup id -> k8s.* pod attribution */
     uint64_t duration_ns;                    /* @112  resolution RTT; 0 = query-only */
+    int32_t raw_status;                      /* @120  what happened when the kernel tried to fill `raw`. 0 = the bytes are the sender's; -1 = there was no user buffer to read (msg_iter described pages or kernel memory); anything else = the errno bpf_probe_read_user returned. The return value used to be discarded, so a record carrying no bytes was indistinguishable from one whose bytes did not parse, and the drain reported the second reason for the first cause. NOT exposed to Ruby: a bare errno is exactly the kind of number the value-map rule is about, and what a consumer wants -- `ev.qname` -- is already empty in both cases. The drain reads it to pick the drop reason it prints */
 } spnl_rec_dns_t;
 
 /* The mirror is a byte image of the wire record: these assertions fail the
@@ -157,6 +163,8 @@ _Static_assert(offsetof(spnl_rec_dns_t, cgid) == SPNL_REC_DNS_OFF_CGID,
                "spnl_rec_dns_t.cgid moved away from the schema offset");
 _Static_assert(offsetof(spnl_rec_dns_t, duration_ns) == SPNL_REC_DNS_OFF_DURATION_NS,
                "spnl_rec_dns_t.duration_ns moved away from the schema offset");
+_Static_assert(offsetof(spnl_rec_dns_t, raw_status) == SPNL_REC_DNS_OFF_RAW_STATUS,
+               "spnl_rec_dns_t.raw_status moved away from the schema offset");
 _Static_assert(sizeof(spnl_rec_dns_t) == SPNL_REC_DNS_SIZE,
                "spnl_rec_dns_t size differs from the record contract");
 
@@ -165,6 +173,7 @@ _Static_assert(sizeof(spnl_rec_dns_t) == SPNL_REC_DNS_SIZE,
 static inline int spnl_rec_dns_unpack(const void *data, size_t size, spnl_rec_dns_t *out) {
     const unsigned char *p = (const unsigned char *)data;
     if (!data || !out || size < (size_t)SPNL_REC_DNS_MIN) return -1;
+    memset(out, 0, sizeof *out);   /* appended fields read as zero on an older producer */
     memcpy(&out->hdr, p + SPNL_REC_DNS_OFF_HDR, sizeof out->hdr);
     memcpy(&out->pid, p + SPNL_REC_DNS_OFF_PID, sizeof out->pid);
     memcpy(out->comm, p + SPNL_REC_DNS_OFF_COMM, sizeof out->comm);
@@ -172,6 +181,7 @@ static inline int spnl_rec_dns_unpack(const void *data, size_t size, spnl_rec_dn
     memcpy(out->raw, p + SPNL_REC_DNS_OFF_RAW, sizeof out->raw);
     memcpy(&out->cgid, p + SPNL_REC_DNS_OFF_CGID, sizeof out->cgid);
     memcpy(&out->duration_ns, p + SPNL_REC_DNS_OFF_DURATION_NS, sizeof out->duration_ns);
+    if (size >= (size_t)124) memcpy(&out->raw_status, p + SPNL_REC_DNS_OFF_RAW_STATUS, sizeof out->raw_status);
     return 0;
 }
 
@@ -1085,7 +1095,7 @@ typedef struct {
 } spnl_metric_desc_t;
 
 #define SPNL_RECMETRIC_MAX_LABELS         2
-#define SPNL_RECMETRIC_MAX_BOUNDS         15
+#define SPNL_RECMETRIC_MAX_BOUNDS         31
 #define SPNL_RECMETRIC_LABEL_VAL_MAX      16
 #define SPNL_RECMETRIC_COUNT              2
 #define SPNL_RECMETRIC_MAX_SERIES         256
@@ -1097,6 +1107,7 @@ typedef struct {
 
 #ifdef SPNL_RECMETRIC_IMPL
 static const double spnl_bounds_otel_duration_s[SPNL_BOUNDS_OTEL_DURATION_S_N] = SPNL_BOUNDS_OTEL_DURATION_S_INIT;
+static const double spnl_bounds_log2_ns_31[SPNL_BOUNDS_LOG2_NS_31_N] = SPNL_BOUNDS_LOG2_NS_31_INIT;
 static const spnl_metric_label_t spnl_ml_conn_count[1] = {
     { "spnl.conn.direction", (const char *const *)0, 0, (const char *)0, 3 },
 };

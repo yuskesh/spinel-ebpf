@@ -626,4 +626,144 @@ class AffordanceGateTest < Minitest::Test
     refute_predicate $?, :success?, "exited successfully with no codegen present"
     assert_match(/production codegen missing/, out)
   end
+
+  # ---------- the syntax vocabulary ----------
+  #
+  # Two of these claims were dead while advertised (a literal `n.times`,
+  # `x = if ... end`), and nothing measured them because a construct is not a
+  # builtin, an attach kind, a sugar pair or a map. These tests pin the part that
+  # decides WHAT the syntax section measures -- the same second-order worry as the
+  # builtin half above: a section that runs and no longer reaches anything looks
+  # exactly like one that passes.
+
+  def test_every_syntax_claim_has_a_writable_shape
+    bad = CAP::SYNTAX.reject { |s| s[:form] == :attach || G::SUGAR_SHAPES.key?(s[:shape]) }
+    assert_empty bad.map { |s| s[:id] },
+                 "syntax claims with no probe shape: the gate cannot measure them"
+  end
+
+  def test_syntax_claim_ids_are_unique
+    dups = CAP::SYNTAX.map { |s| s[:id] }.tally.select { |_, v| v > 1 }.keys
+    assert_empty dups
+  end
+
+  # The declared lowering IS the claim. Without it a syntax claim degenerates to
+  # "it compiles", which is stage 1 -- and stage 1 cannot tell a literal `n.times`
+  # (open-coded, kernel floor 6.4) from a silent fall back to bpf_loop.
+  def test_every_syntax_claim_declares_what_it_lowers_to
+    bad = CAP::SYNTAX.reject { |s| s[:lowers_to].is_a?(String) && !s[:lowers_to].empty? }
+    assert_empty bad.map { |s| s[:id] }
+  end
+
+  # ...and a twin that does NOT contain the construct. `%`, `else` and `if (` all
+  # occur in the scaffolding, so a needle nobody requires to be ABSENT from the
+  # twin can be satisfied by boilerplate and proves nothing.
+  def test_every_syntax_claim_has_a_twin_that_differs
+    missing = CAP::SYNTAX.reject { |s| s[:without].is_a?(String) }
+    assert_empty missing.map { |s| s[:id] }, "no `without` (construct-free twin) declared"
+    same = CAP::SYNTAX.select { |s| s[:without] == s[:syntax] }
+    assert_empty same.map { |s| s[:id] },
+                 "a twin identical to the claim makes the absence half structurally meaningless"
+  end
+
+  # :attach claims are whole-file shapes, so both spellings must carry the
+  # substitution point and a return literal, or sugar_source writes a broken probe.
+  def test_attach_form_syntax_claims_carry_body_and_ret
+    CAP::SYNTAX.select { |s| s[:form] == :attach }.each do |s|
+      assert_includes s[:syntax], "<BODY>", "#{s[:id]}: no <BODY> in `syntax`"
+      assert_includes s[:without], "<BODY>", "#{s[:id]}: no <BODY> in `without`"
+      refute_nil s[:ret], "#{s[:id]}: the :attach form needs a `ret:`"
+    end
+  end
+
+  # ---------- the coverage authorities ----------
+  #
+  # The reverse direction reads the codegen's own lowering dispatch. Two ways to
+  # read it wrong, and both make the gate QUIETLY WEAKER rather than fail:
+
+  # cc_lower_stmt has two forward declarations before its definition (it is
+  # mutually recursive with cc_lower_expr). Matching one of those and then taking
+  # the next `{` lands in an unrelated function -- measured: 11 accepted node
+  # types instead of 16, i.e. five types silently uncoverable.
+  def test_function_body_extraction_skips_forward_declarations
+    body = G.cc_function_body("cc_lower_stmt")
+    refute_nil body, "cannot read the body of cc_lower_stmt"
+    assert_includes body, "LocalVariableWriteNode",
+                    "a forward declaration was matched, so this is another function's body"
+    assert_includes body, "InstanceVariableOperatorWriteNode"
+  end
+
+  def test_both_lowering_dispatchers_contribute_node_types
+    types = G.cc_lowering_node_types
+    refute_nil types
+    # one that only cc_lower_expr has, one that only cc_lower_stmt has
+    assert_includes types, "IntegerNode"
+    assert_includes types, "CallOperatorWriteNode"
+    assert_operator types.size, :>=, 15,
+                    "a sudden drop in accepted node types suggests the extraction broke"
+  end
+
+  # The other measurement trap: the AST dump is space-separated, so operator
+  # names are percent-encoded. `%` arrives as `%25`, and a scanner that does not
+  # decode reports the modulo operator uncovered while a claim exercises it.
+  def test_dump_strings_are_percent_decoded
+    assert_equal "%", G.decode_dump_str("%25")
+    assert_equal "<<", G.decode_dump_str("<<")
+    assert_equal "+", G.decode_dump_str("+")
+  end
+
+  def test_binary_operator_table_is_readable_and_complete
+    ops = G.cc_binary_ops
+    refute_nil ops, "cannot read the table in cc_is_binary_op()"
+    %w[+ - * / % == != < > <= >= & | ^ << >>].each { |o| assert_includes ops, o }
+  end
+
+  # The self-checks' anchors. The rule everywhere in this gate: a control anchored
+  # on something that can disappear must say so rather than quietly stop referring
+  # to anything.
+  def test_syntax_self_check_anchors_are_live
+    assert CAP::SYNTAX.any? { |s| s[:id] == G::SELFCHECK_SYNTAX },
+           "SELFCHECK_SYNTAX does not point at a live claim"
+    assert CAP::RUBY_SUBSET[:rejected].any? { |r| r[:flag] == G::SELFCHECK_SYNTAX_REJECT_FLAG },
+           "the absence self-check is anchored on the affordance's own refusal of " \
+           "#{G::SELFCHECK_SYNTAX_REJECT_FLAG}"
+  end
+
+  # ---------- the rejected half ----------
+  #
+  # "Each flag corresponds to a partition flag (loud failure)" was a claim, and
+  # measuring it found `uses_bignum` exiting 0 with a different number baked into
+  # the kernel program. These pin the inputs that make the measurement meaningful.
+
+  def test_every_rejected_row_carries_a_probe_and_the_refusal_it_expects
+    CAP::RUBY_SUBSET[:rejected].each do |r|
+      refute_nil r[:probe], "#{r[:flag]}: no probe declared, so this row is never measured"
+      refute_empty r[:refusal].to_s, "#{r[:flag]}: no refusal declared, so the reason is not measured"
+    end
+  end
+
+  # The construct goes in an ATTACH HANDLER on purpose: a plain method that
+  # cannot be lowered is correctly and quietly kept native, so "loud" is only
+  # meaningful where there is no native path to fall back to.
+  def test_rejected_probes_put_the_construct_in_an_attach_handler
+    CAP::RUBY_SUBSET[:rejected].each do |r|
+      assert_match(/def kprobe__/, r[:probe].to_s,
+                   "#{r[:flag]}: the probe is not an attach handler")
+    end
+  end
+
+  # The join that broke. The affordance names a flag and the text it expects;
+  # partitioning renders that text. Nothing else connects the two tables, and the
+  # bug that produced this section was exactly a name no producer emits.
+  def test_each_rejected_row_expects_text_partition_actually_renders
+    require "spinel_ebpf/partition"
+    CAP::RUBY_SUBSET[:rejected].each do |r|
+      flags = SpinelEbpf::Partition::MethodFlags.default
+      assert flags.respond_to?(r[:flag]), "#{r[:flag]} is not a member of MethodFlags"
+      flags[r[:flag]] = true
+      assert flags.reasons.any? { |t| t.include?(r[:refusal]) },
+             "#{r[:flag]}: the affordance expects #{r[:refusal].inspect}, and " \
+             "MethodFlags#reasons does not produce it (#{flags.reasons.inspect})"
+    end
+  end
 end

@@ -1,20 +1,38 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# affordance_gate.rb -- one invariant over four vocabularies: builtins, attach
-# kinds, surface sugar and maps. Everything the affordance advertises must
+# affordance_gate.rb -- one invariant over five vocabularies: builtins, attach
+# kinds, surface sugar, syntax and maps. Everything the affordance advertises must
 # actually work in the production codegen, and -- since the map section was
 # added -- everything the production codegen creates must actually be advertised.
 #
 #   ruby tools/affordance_gate.rb            # exit 1 on any problem
 #   ruby tools/affordance_gate.rb --list     # show the plan without compiling
 #   ruby tools/affordance_gate.rb --only NAME
-#   ruby tools/affordance_gate.rb --section builtins|attach|sugar|maps
+#   ruby tools/affordance_gate.rb --section builtins|attach|sugar|syntax|maps
 #
-# WHY ALL FOUR SECTIONS LIVE HERE
+# THE SYNTAX SECTION IS THE FIFTH VOCABULARY
 #
-# They are one invariant measured over four vocabularies, and the vocabularies
+# Prose was already diagnosed as the reason `pkt.*` could be advertised for a
+# year while dead, and the SUGAR half of that prose was made machine-readable
+# then. RUBY_SUBSET[:supported] itself stayed fourteen strings -- and two
+# constructs inside them were dead: a literal `n.times` (the open-coded iterator)
+# and `x = if ... end`. Neither is a builtin, an attach kind, a sugar pair or a
+# map, so none of the four sections above swept them. A syntax claim is one
+# construct, its declared `lowers_to`, and a construct-free twin that proves the
+# needle is load-bearing; the section also runs the direction the map section
+# taught (the node types and operators the codegen ACCEPTS must all be exercised
+# by some claim) and, in a third part, the REJECTED half of the same prose --
+# which turned out to be advertising one refusal that never happened.
+#
+# WHY ALL FIVE SECTIONS LIVE HERE
+#
+# They are one invariant measured over five vocabularies, and the vocabularies
 # are entangled: sock_ops_op exists only because the sock_ops KIND does;
+# `a > 1 ? 1 : 2` only became writable once the EXPRESSION-position IfNode was
+# ported, and it is claimed as sugar (same C as `if ... end`) while `if_value` is
+# claimed as syntax -- one port, two vocabularies; the syntax probes are written
+# with sugar's own harness (SUGAR_SHAPES/sugar_source);
 # tail_call_to is withdrawn BECAUSE xdp_tail is; `pkt.l4.proto` is a claim about
 # the builtin `pkt_l4_proto`, and `pkt.byte_at` is withdrawn BECAUSE
 # pkt_dynptr_byte_at is; the PROG_ARRAY map type is gone BECAUSE both of those
@@ -186,6 +204,8 @@ SHAPE_OVERRIDE = {
   "sock_daddr" => :kprobe, "sock_family" => :kprobe, "sock_state" => :kprobe,
   "sock_protocol" => :kprobe, "sock_saddr6_hi" => :kprobe, "sock_saddr6_lo" => :kprobe,
   "sock_daddr6_hi" => :kprobe, "sock_daddr6_lo" => :kprobe,
+  # same -- a socket and a msghdr, both handed over by a probe argument
+  "udp_dport" => :kprobe, "udp_daddr" => :kprobe,
   # observability domain, but the drain is only legal beside the
   # callback it drains into -- the `user_ringbuf` shape carries that declaration.
   "user_ringbuf_drain" => :user_ringbuf,
@@ -541,6 +561,12 @@ module AffordanceGate
   #                    tier, and it is the one place `diverged` cannot be seen.
   SUGAR_SHAPES = {
     kprobe:       { def_line: "def kprobe__do_sys_openat2", params: [], ret: "0" },
+    # The same hook with one declared argument. Most syntax claims need an operand
+    # that is a LOCAL -- `a % 3` with `a` undefined is not even parsed as a binary
+    # operator (measured: the `%` claim's probe contained no CallNode named "%"
+    # until `a` became a parameter), so a claim written against a param-less shape
+    # would be testing something else.
+    kprobe_arg:   { def_line: "def kprobe__do_sys_openat2", params: %w[a], ret: "0" },
     kprobe_sk:    { def_line: "def kprobe__tcp_sendmsg", params: %w[sk], ret: "0" },
     xdp:          { def_line: "def xdp__probe", params: [], ret: "XDP_PASS" },
     tc_ingress:   { def_line: "def tc__ingress__probe", params: [], ret: "TC_ACT_OK" },
@@ -619,6 +645,260 @@ module AffordanceGate
     _o, err, st = cap3(CC, path, tag)
     return [:refused, err.lines.map(&:strip).reject(&:empty?).first.to_s] unless st.success?
     [:accepted, nil]
+  end
+
+  # ---- syntax -------------------------------------------------------------
+  # The fifth vocabulary, and the one that was still fourteen prose strings after
+  # prose had been diagnosed as the reason `pkt.*` could lie for a year. Two dead
+  # constructs were sitting in it (a literal `n.times`, `x = if ... end`), and
+  # none of the four gates above sweeps this vocabulary: a construct is not a
+  # builtin, an attach kind, a sugar pair or a map.
+  #
+  # A syntax claim is a claim about ONE construct and what it becomes:
+  #   1. the advertised spelling must COMPILE          (both dead ones fail here)
+  #   2. the declared `lowers_to` must be IN the emitted C, and NOT in the
+  #      construct-free twin (`without`)
+  #
+  # Stage 2 is not decoration. `3.times` and `a.times` are both advertised and
+  # both compile, and they must reach DIFFERENT machinery (`bpf_iter_num_*` vs
+  # `bpf_loop`) with different kernel floors -- lose the open-coded path and a
+  # literal count silently becomes a bpf_loop: exit 0, same semantics, wrong
+  # floor. Stage 1 cannot see that. The twin is what makes the needle
+  # load-bearing: `%`, `else` and `if (` all occur in boilerplate, so a needle
+  # that is not required to be ABSENT from the twin can be satisfied by the
+  # scaffolding.
+  #
+  # The probe harness is SUGAR_SHAPES/sugar_source, unchanged -- syntax and sugar
+  # write the same three probe forms, which is one of the measured reasons this
+  # section lives in this file rather than its own.
+  SYNTAX_UNIT = "u"   # fixed so a claim can name `u_top_h` in its `lowers_to`
+
+  def syntax_source(entry, which)
+    sugar_source(entry.merge(sugar: entry.fetch(which)), :sugar)
+  end
+
+  # [:ok | :die | :wrong_lowering | :not_load_bearing | :other, message].
+  # `other` (the twin failed too) is the gate's own bug, never the codegen's --
+  # same rule as check_sugar.
+  #
+  # `want` is overridable ONLY for the self-checks, which perturb the gate's own
+  # expectation in memory so the run re-proves it can still produce each verdict.
+  def check_syntax(dir, tag, entry, want: nil)
+    ap = File.join(dir, "#{tag}_a.rb")
+    bp = File.join(dir, "#{tag}_b.rb")
+    File.write(ap, syntax_source(entry, :syntax))
+    File.write(bp, syntax_source(entry, :without))
+    aout, aerr, ast = cap3(CC, ap, SYNTAX_UNIT)
+    needle = want || entry.fetch(:lowers_to)
+    unless ast.success?
+      return [:die, aerr.lines.map(&:strip).reject(&:empty?).first.to_s]
+    end
+    bout, berr, bst = cap3(CC, bp, SYNTAX_UNIT)
+    unless bst.success?
+      return [:other, "the `without` twin did not compile either, so this gate wrote a bad " \
+                      "pair: #{berr.lines.map(&:strip).reject(&:empty?).first}"]
+    end
+    unless aout.include?(needle)
+      return [:wrong_lowering, "compiled, but #{needle.inspect} is not in the emitted C -- " \
+                               "the construct was accepted and lowered to something else"]
+    end
+    if bout.include?(needle)
+      return [:not_load_bearing, "#{needle.inspect} is also in the twin that does NOT contain " \
+                                 "the construct, so the needle is satisfied by boilerplate and " \
+                                 "proves nothing about #{entry[:syntax].to_s.lines.first.to_s.strip.inspect}"]
+    end
+    [:ok, nil]
+  end
+
+  # A withdrawn construct must be REFUSED (the attach section's rule: taking it
+  # out of the affordance does not stop the codegen from accepting it).
+  def check_withdrawn_syntax(dir, tag, spelling, info)
+    e = { form: info[:form] || :expr, shape: info[:shape] || :kprobe,
+          syntax: info[:syntax] || spelling, ret: info[:ret] }
+    path = File.join(dir, "#{tag}.rb")
+    File.write(path, syntax_source(e, :syntax))
+    _o, err, st = cap3(CC, path, SYNTAX_UNIT)
+    return [:refused, err.lines.map(&:strip).reject(&:empty?).first.to_s] unless st.success?
+    [:accepted, nil]
+  end
+
+  # ---- the direction that sees SILENCE ------------------------------------
+  # The map section's lesson: a gate that only asks "does the claim hold" is
+  # green while the affordance says nothing at all. For syntax the
+  # implementation-side authority is the codegen's own lowering dispatch -- the
+  # node types it accepts, read out of the C source, and the binary-operator
+  # table.
+  #
+  # Both authorities are named by the affordance (SYNTAX_COVERAGE_AUTHORITIES);
+  # what follows is only how to read them.
+  def cc_function_body(name)
+    return nil unless File.exist?(CC_SOURCE)
+    src = File.read(CC_SOURCE)
+    # `[^;{]*\)\s*\{` and not just `\(`: cc_lower_stmt has TWO forward
+    # declarations before its definition (it is mutually recursive with
+    # cc_lower_expr), and matching one of those made `src.index("{")` land in a
+    # completely different function's body. Measured, not reasoned about -- the
+    # bad extractor reported 11 accepted node types instead of 16, i.e. it made
+    # the coverage direction quietly weaker rather than failing.
+    i = src.index(/^static [A-Za-z_]+ \*?#{name}\([^;{]*\)\s*\{/) or return nil
+    j = src.index("{", i) or return nil
+    depth = 0
+    k = j
+    while k < src.length
+      depth += 1 if src[k] == "{"
+      if src[k] == "}"
+        depth -= 1
+        break if depth.zero?
+      end
+      k += 1
+    end
+    src[j..k]
+  end
+
+  # nil (not []) when unreadable: an empty authority and an unreadable one must
+  # not look alike, or coverage passes vacuously -- the same rule the C refusal
+  # table is read under.
+  def cc_lowering_node_types
+    out = []
+    CAP::SYNTAX_COVERAGE_AUTHORITIES[:node_types][:functions].each do |fn|
+      body = cc_function_body(fn) or return nil
+      out.concat(body.scan(/strcmp\(ty,\s*"([A-Za-z]+Node)"\)/).flatten)
+    end
+    out.uniq.sort
+  end
+
+  def cc_binary_ops
+    body = cc_function_body(CAP::SYNTAX_COVERAGE_AUTHORITIES[:binary_ops][:functions].first) or return nil
+    decl = body[/static const char \*ops\[\][^;]*;/m] or return nil
+    decl.scan(/"([^"]+)"/).flatten
+  end
+
+  # The parser the codegen itself uses (`spinel --dump-ast`), so "which node types
+  # does this probe contain" is answered by the same front end that will lower it,
+  # not by a second parser that could disagree.
+  SPINEL = ENV["SPNL_SPINEL_BIN"] ||
+           [File.join(ROOT, "deps/spinel/bin/spinel"),
+            File.join(ROOT, "deps/spinel/build/spinel")].find { |p| File.executable?(p) }.to_s
+
+  # The dump is space-separated, so string attributes are percent-encoded: the
+  # modulo operator arrives as `%25`. Measured -- without this the `%` claim's
+  # probe looked as though it contained no modulo at all, and the coverage half
+  # reported the operator uncovered while a claim was exercising it. Its own
+  # function so a unit test can pin it without the front end.
+  def decode_dump_str(s)
+    s.to_s.strip.gsub(/%([0-9A-Fa-f]{2})/) { $1.hex.chr }
+  end
+
+  # [node types, operator names] present in one probe source, or nil if the dump
+  # failed. Dump format is one `N <id> <TypeName>` per node and `S <id> name <v>`
+  # for its string attributes.
+  def probe_vocab(dir, tag, src)
+    path = File.join(dir, "#{tag}.rb")
+    File.write(path, src)
+    out, _err, st = cap3(SPINEL, "--dump-ast", "--no-line-map", path)
+    return nil unless st.success?
+    types = {}
+    names = {}
+    out.each_line do |l|
+      if (m = l.match(/\AN (\d+) (\w+)/)) then types[m[1]] = m[2]
+      elsif (m = l.match(/\AS (\d+) name (.*)\n?\z/)) then names[m[1]] = decode_dump_str(m[2])
+      end
+    end
+    ops = names.select { |id, _| types[id] == "CallNode" }.values
+    [types.values.uniq, ops.uniq]
+  end
+
+  # ---- the REJECTED half of the vocabulary --------------------------------
+  # RUBY_SUBSET[:rejected] has been machine-readable since it was written (ten
+  # `flag`/`construct`/`reason` rows) and says each one corresponds to a loud
+  # partition failure. That is a CLAIM, and measuring it found nine holding and
+  # `uses_bignum` exiting 0 with a different number baked into the kernel program.
+  # A gate that only measures the SUPPORTED half is the syntax version of what the
+  # map section named -- checking one direction and calling it coverage.
+  #
+  # This half needs the whole product, not just the codegen: the refusal is a
+  # partition decision, and the codegen never sees the construct (spinel's front
+  # end has already clamped the literal). So the probe goes through
+  # `bin/spinel-ebpf compile`, and the expected refusal text is a field the
+  # affordance publishes (`refusal:`), never a string written here.
+  #
+  # The construct is placed in an ATTACH HANDLER on purpose: a plain method that
+  # cannot be lowered is correctly and quietly kept native, so "loud" is only
+  # meaningful where there is no native path to fall back to.
+  CLI = File.join(ROOT, "bin/spinel-ebpf")
+
+  def check_rejected(dir, tag, entry)
+    path = File.join(dir, "#{tag}.rb")
+    File.write(path, entry.fetch(:probe))
+    out, err, st = cap3("ruby", CLI, "compile", path, "-o", File.join(dir, "#{tag}_out"))
+    txt = out + err
+    if st.success?
+      hint = txt[/n = (-?\d+);/, 1]
+      return [:accepted, "compiled with exit 0 -- the construct the affordance calls impossible " \
+                         "was accepted#{hint ? ", and the emitted C carries #{hint}" : ''}"]
+    end
+    want = entry[:refusal].to_s
+    unless want.empty? || txt.include?(want)
+      return [:wrong_reason, "refused, but the diagnostic never says #{want.inspect} -- " \
+                             "the affordance attributes this to #{entry[:flag]}, and something " \
+                             "else refused it, so the flag may still be dead " \
+                             "(first line: #{txt.lines.map(&:strip).reject(&:empty?).first.to_s[0, 120]})"]
+    end
+    [:refused, nil]
+  end
+
+  # ---- controls that do not depend on anything being broken ---------------
+  SELFCHECK_SYNTAX = :op_mod          # live, :expr, a needle unique to the probe
+  # The "can this gate still see a construct that is simply not there" control.
+  # It cannot be a name nobody implements (the builtin half's move) because node
+  # types come from Ruby's grammar and cannot be invented. So it is anchored on
+  # the affordance's OWN rejection claim: `while` is unbounded iteration, which
+  # RUBY_SUBSET[:rejected] declares impossible under the verifier. If that claim
+  # ever leaves, the anchor aborts -- which is right, because then this control
+  # would be betting on an accidental gap instead of a stated one.
+  SELFCHECK_SYNTAX_REJECT_FLAG = :uses_unbounded_loop
+  SELFCHECK_SYNTAX_ABSENT = { form: :stmt, shape: :kprobe,
+                              syntax: "while a < 3\n    a = a + 1\n  end",
+                              without: "a = a + 1", lowers_to: "while" }.freeze
+
+  def selfcheck_syntax_absent(dir)
+    v, = check_syntax(dir, "ysc_absent", SELFCHECK_SYNTAX_ABSENT)
+    v
+  end
+
+  # Stage 2, half one: a corrupted promise must come back :wrong_lowering.
+  def selfcheck_syntax_wrong(dir, live)
+    v, = check_syntax(dir, "ysc_wrong", live, want: "#{live[:lowers_to]}_zz_never_emitted")
+    v
+  end
+
+  # Stage 2, half two: the TWIN. A needle that also appears without the construct
+  # must be rejected as proving nothing. Delete the twin and this half goes green
+  # -- which is exactly what it is here to notice (the builtin half's `no_effect`
+  # witness, transposed to syntax).
+  def selfcheck_syntax_not_load_bearing(dir, live)
+    v, = check_syntax(dir, "ysc_bear", live, want: "__s64")
+    v
+  end
+
+  # The rejected half's controls. Half one: a probe that is perfectly legal must
+  # come back :accepted -- otherwise "all ten refused" could be produced by a
+  # pipeline that refuses everything (a missing binary, a bad -o path, anything).
+  SELFCHECK_REJECT_LEGAL = "def kprobe__do_sys_openat2(a)\n  n = a + 1\n  n\nend\n"
+
+  def selfcheck_rejected_accepts_legal(dir)
+    v, = check_rejected(dir, "rsc_legal", { flag: :zz_selfcheck_legal, probe: SELFCHECK_REJECT_LEGAL,
+                                            refusal: "" })
+    v
+  end
+
+  # Half two: the REASON. A refusal for the wrong reason is how `uses_bignum`
+  # half-hid for so long -- a bignum in signature position did fail, but as
+  # uses_unsupported_type, so the flag was dead and the claim still looked kept.
+  # Corrupt a live entry's expected text and demand :wrong_reason.
+  def selfcheck_rejected_wrong_reason(dir, live)
+    v, = check_rejected(dir, "rsc_reason", live.merge(refusal: "#{live[:refusal]}_zz_never_printed"))
+    v
   end
 
   # ---- maps ---------------------------------------------------------------
@@ -967,14 +1247,25 @@ while (a = args.shift)
   when "--only" then only = args.shift
   when "--list" then list = true
   when "--section" then section = args.shift
-  else abort "usage: affordance_gate.rb [--only NAME] [--list] [--section builtins|attach|sugar|maps]"
+  else abort "usage: affordance_gate.rb [--only NAME] [--list] [--section builtins|attach|sugar|syntax|maps]"
   end
 end
-abort "usage: --section builtins|attach|sugar|maps|all" unless %w[all builtins attach sugar maps].include?(section)
+abort "usage: --section builtins|attach|sugar|syntax|maps|all" unless
+  %w[all builtins attach sugar syntax maps].include?(section)
 do_builtins = %w[all builtins].include?(section)
 do_attach   = %w[all attach].include?(section)
 do_sugar    = %w[all sugar].include?(section)
+do_syntax   = %w[all syntax].include?(section)
 do_maps     = %w[all maps].include?(section)
+
+# The codegen is what this gate is ABOUT, so its absence is reported before any
+# section's own preconditions -- otherwise the message a caller sees depends on
+# which other tool happens to be missing too (CI builds spinel in a later job,
+# so the syntax section's spinel check fired first and masked this one).
+abort "affordance gate: production codegen missing: #{CC}\n" \
+      "  It is the in-process codegen binary and needs a built deps/spinel on Linux.\n" \
+      "  Run this in the build container:\n" \
+      "    container exec spnlbuild sh -c 'cd /work && ruby tools/affordance_gate.rb'" unless File.executable?(CC)
 
 advertised = do_builtins ? CAP.all_builtins.sort : []
 withdrawn  = do_builtins ? CAP::WITHDRAWN.keys.sort : []
@@ -982,6 +1273,9 @@ akinds     = do_attach ? CAP::ATTACH_KINDS.map { |a| a[:kind] } : []
 awithdrawn = do_attach ? CAP::WITHDRAWN_ATTACH.keys : []
 sugars     = do_sugar ? CAP.surface_sugar : []
 swithdrawn = do_sugar ? CAP::WITHDRAWN_SUGAR.keys : []
+syntaxes   = do_syntax ? CAP::SYNTAX : []
+ywithdrawn = do_syntax ? CAP::WITHDRAWN_SYNTAX.keys : []
+rejects    = do_syntax ? CAP::RUBY_SUBSET[:rejected].select { |r| r[:probe] } : []
 maps       = do_maps ? CAP::MAPS : []
 if only
   advertised.select! { |b| b == only }
@@ -990,6 +1284,9 @@ if only
   awithdrawn.select! { |k| k.to_s == only }
   sugars = sugars.select { |s| s[:id].to_s == only }
   swithdrawn.select! { |s| s == only }
+  syntaxes = syntaxes.select { |s| s[:id].to_s == only }
+  ywithdrawn.select! { |s| s == only }
+  rejects = rejects.select { |r| r[:flag].to_s == only }
   maps = maps.select { |m| m[:id].to_s == only }
 end
 
@@ -1004,6 +1301,11 @@ if list
                 s[:sugar].to_s.lines.first.to_s.strip, s[:flat].to_s.lines.first.to_s.strip)
   end
   swithdrawn.each { |s| puts format("  %-10s %-26s must be REFUSED", "sugar-wd", s) }
+  syntaxes.each do |s|
+    puts format("  %-10s %-26s %-8s lowers_to %s", "syntax", s[:id], s[:form],
+                s[:lowers_to].inspect)
+  end
+  ywithdrawn.each { |s| puts format("  %-10s %-26s must be REFUSED", "syntax-wd", s) }
   maps.each do |m|
     puts format("  %-10s %-26s %-14s %-12s <- %s %s", "map", m[:id], m[:type],
                 m[:declared_as], m[:probe_kind], m[:probe])
@@ -1061,6 +1363,42 @@ if do_sugar
   dups = CAP.surface_sugar.map { |s| s[:id] }.tally.select { |_, v| v > 1 }.keys
   abort "affordance gate: duplicate sugar claim id(s) #{dups.join(', ')}" unless dups.empty?
 end
+# Same rule again for syntax, plus the two coverage authorities: a claim the gate
+# cannot write, or an authority it cannot read, is silence -- which is the failure
+# this vocabulary was in for a year.
+cc_nodes = nil
+cc_ops = nil
+if do_syntax
+  dups = CAP::SYNTAX.map { |s| s[:id] }.tally.select { |_, v| v > 1 }.keys
+  abort "affordance gate: duplicate syntax claim id(s) #{dups.join(', ')}" unless dups.empty?
+  bad = CAP::SYNTAX.reject { |s| s[:form] == :attach || AffordanceGate::SUGAR_SHAPES.key?(s[:shape]) }
+  unless bad.empty?
+    abort "affordance gate: no probe shape for syntax claim(s) " \
+          "#{bad.map { |s| "#{s[:id]} (shape=#{s[:shape].inspect})" }.join(', ')}.\n" \
+          "  Add one to SUGAR_SHAPES (syntax and sugar share the harness)."
+  end
+  bad = CAP::SYNTAX.reject { |s| s[:lowers_to].is_a?(String) && !s[:lowers_to].empty? }
+  unless bad.empty?
+    abort "affordance gate: syntax claim(s) #{bad.map { |s| s[:id] }.join(', ')} declare no\n" \
+          "  `lowers_to`. Without it the claim is only \"it compiles\", which is stage 1 --\n" \
+          "  and stage 1 cannot tell a literal `n.times` from a silent fall back to bpf_loop."
+  end
+  cc_nodes = AffordanceGate.cc_lowering_node_types
+  cc_ops   = AffordanceGate.cc_binary_ops
+  if cc_nodes.nil? || cc_ops.nil?
+    abort "affordance gate: could not read the syntax coverage authorities out of\n" \
+          "  #{AffordanceGate::CC_SOURCE}\n" \
+          "  (#{CAP::SYNTAX_COVERAGE_AUTHORITIES.values.map { |a| a[:functions].join('/') }.join(' and ')}).\n" \
+          "  Those are what the reverse direction compares against; unreadable and empty must\n" \
+          "  not look alike, or `uncovered=0` is a vacuous pass."
+  end
+  unless File.executable?(AffordanceGate::SPINEL)
+    abort "affordance gate: spinel (--dump-ast) not found: #{AffordanceGate::SPINEL.inspect}\n" \
+          "  The coverage direction asks which AST node types each probe contains, and it uses\n" \
+          "  the SAME front end the codegen lowers with. Build deps/spinel (scripts/setup.sh),\n" \
+          "  or point $SPNL_SPINEL_BIN at it."
+  end
+end
 if do_maps
   dups = CAP::MAPS.map { |m| m[:id] }.tally.select { |_, v| v > 1 }.keys
   abort "affordance gate: duplicate map id(s) #{dups.join(', ')}" unless dups.empty?
@@ -1071,10 +1409,6 @@ if do_maps
   end
 end
 
-abort "affordance gate: production codegen missing: #{CC}\n" \
-      "  It is the in-process codegen binary and needs a built deps/spinel on Linux.\n" \
-      "  Run this in the build container:\n" \
-      "    container exec spnlbuild sh -c 'cd /work && ruby tools/affordance_gate.rb'" unless File.executable?(CC)
 _o, _e, _st = Open3.capture3(CC)
 unless "#{_o}#{_e}".include?("usage:")
   abort "affordance gate: #{CC} exists but does not run here (no usage line, exit #{_st.exitstatus.inspect}).\n" \
@@ -1098,6 +1432,12 @@ sself = nil   # sugar absence half
 # non-empty, i.e. exactly when the check has something to report. Caught by
 # actually running the gate against a simulated depleted tree, which is the whole
 # argument for running that world instead of reasoning about it.
+ybroken = []   # advertised syntax: died, lowered elsewhere, or a needle that proves nothing
+yrevived = []  # withdrawn syntax still accepted
+yuncov_nodes = []  # a node type the lowering accepts that no claim exercises -- the SILENT one
+yuncov_ops = []    # ditto for the binary-operator table
+yreject = []   # a construct RUBY_SUBSET[:rejected] calls impossible that the product accepts
+yself = {}
 mbroken = []   # advertised map: not emitted, or emitted with other properties
 muncovered = [] # a map came out that the affordance never mentions -- the SILENT one
 mrevived = []  # a withdrawn map type is back without being re-advertised
@@ -1168,6 +1508,78 @@ Dir.mktmpdir("affordance-gate") do |dir|
   swithdrawn.each_with_index do |s, i|
     verdict, = AffordanceGate.check_withdrawn_sugar(dir, "swd#{i}", s, CAP::WITHDRAWN_SUGAR[s])
     srevived << s if verdict == :accepted
+  end
+
+  # The fifth vocabulary, both directions.
+  #
+  #   advertised  each SYNTAX claim compiles AND reaches its declared lowering,
+  #               with the needle proven load-bearing by the construct-free twin.
+  #   coverage    every node type the codegen's lowering dispatch accepts, and
+  #               every operator in its binary-op table, must be exercised by some
+  #               claim. This is the direction that sees SILENCE -- the way this
+  #               vocabulary failed, and the lesson the map section taught.
+  if do_syntax
+    unless only
+      CAP::SYNTAX.any? { |s| s[:id] == AffordanceGate::SELFCHECK_SYNTAX } or
+        abort "affordance gate: the syntax self-check's reference claim " \
+              "(#{AffordanceGate::SELFCHECK_SYNTAX}) is gone.\n" \
+              "  Point SELFCHECK_SYNTAX at another live :expr claim."
+      CAP::RUBY_SUBSET[:rejected].any? { |r| r[:flag] == AffordanceGate::SELFCHECK_SYNTAX_REJECT_FLAG } or
+        abort "affordance gate: the syntax absence self-check is anchored on the affordance's\n" \
+              "  own rejection of #{AffordanceGate::SELFCHECK_SYNTAX_REJECT_FLAG} (unbounded iteration), and that claim\n" \
+              "  is gone. Without it, `while` being refused is an accidental gap rather than a\n" \
+              "  stated one, and the control would be betting on the gap staying."
+      live = CAP::SYNTAX.find { |s| s[:id] == AffordanceGate::SELFCHECK_SYNTAX }
+      yself[:absent_construct]  = AffordanceGate.selfcheck_syntax_absent(dir)
+      yself[:wrong_lowering]    = AffordanceGate.selfcheck_syntax_wrong(dir, live)
+      yself[:needle_not_bearing] = AffordanceGate.selfcheck_syntax_not_load_bearing(dir, live)
+      rlive = CAP::RUBY_SUBSET[:rejected].find { |r| r[:probe] && !r[:refusal].to_s.empty? } or
+        abort "affordance gate: no RUBY_SUBSET[:rejected] entry carries both a `probe` and a\n" \
+              "  `refusal`, so the rejected half has nothing to drive its reason self-check with."
+      yself[:legal_accepted]  = AffordanceGate.selfcheck_rejected_accepts_legal(dir)
+      yself[:reject_reason]   = AffordanceGate.selfcheck_rejected_wrong_reason(dir, rlive)
+    end
+    rejects.each_with_index do |r, i|
+      verdict, msg = AffordanceGate.check_rejected(dir, "rj#{i}", r)
+      yreject << [r, verdict, msg] unless verdict == :refused
+    end
+    syntaxes.each_with_index do |s, i|
+      verdict, msg = AffordanceGate.check_syntax(dir, "sy#{i}", s)
+      ybroken << [s, verdict, msg] unless verdict == :ok
+    end
+    ywithdrawn.each_with_index do |s, i|
+      verdict, = AffordanceGate.check_withdrawn_syntax(dir, "ywd#{i}", s, CAP::WITHDRAWN_SYNTAX[s])
+      yrevived << s if verdict == :accepted
+    end
+
+    # Coverage. Ask the codegen's own front end which node types (and which
+    # operator names) each advertised claim's probe actually contains.
+    vocab = {}
+    CAP::SYNTAX.each_with_index do |s, i|
+      v = AffordanceGate.probe_vocab(dir, "syv#{i}", AffordanceGate.syntax_source(s, :syntax))
+      vocab[s[:id]] = v || [[], []]
+    end
+    seen_nodes = vocab.values.flat_map(&:first).uniq
+    seen_ops   = vocab.values.flat_map(&:last).uniq
+    yuncov_nodes = cc_nodes - seen_nodes
+    yuncov_ops   = cc_ops - seen_ops
+
+    # Self-check for the coverage half, the same shape the map section uses: hide
+    # one claim and require the thing only it covers to be reported uncovered. The
+    # claim to hide is COMPUTED (a node type exercised by exactly one claim), so
+    # the control does not quietly stop referring to anything as the table grows.
+    unless only
+      solo = cc_nodes.map { |t| [t, vocab.select { |_, v| v[0].include?(t) }.keys] }
+                     .find { |_, ids| ids.size == 1 }
+      if solo.nil?
+        abort "affordance gate: the syntax coverage self-check needs one node type that exactly\n" \
+              "  one claim exercises, and there is none. Without it the run cannot re-prove that\n" \
+              "  hiding a claim makes its node type uncovered, so `uncovered=0` means nothing."
+      end
+      t, ids = solo
+      hidden = vocab.reject { |id, _| id == ids.first }
+      yself[:hidden_claim] = hidden.values.flat_map(&:first).include?(t) ? :covered : :uncovered
+    end
   end
 
   # One sweep, two directions.
@@ -1244,7 +1656,7 @@ Dir.mktmpdir("affordance-gate") do |dir|
 end
 
 puts "-" * 72
-puts "affordance gate (builtins / attach kinds / surface sugar / maps)"
+puts "affordance gate (builtins / attach kinds / surface sugar / syntax / maps)"
 # An empty withdrawn set is a true statement about the tree (nothing is
 # withdrawn), not a hole in the gate -- the detection power lives in the
 # self-checks now. Say which it is on the line itself, so the number cannot be
@@ -1279,6 +1691,16 @@ if do_sugar
               swithdrawn.empty? && !only ? EMPTY_NOTE : "")
   puts format("  sugar    self-check       %s",
               selfcheck ? "diverged_pair=#{selfcheck[0]} absent_member=#{sself}" : "(skipped: --only)")
+end
+if do_syntax
+  puts format("  syntax   advertised  %3d  broken=%d", syntaxes.size, ybroken.size)
+  puts format("  syntax   coverage        %d node types / %d binary ops accepted by the codegen, " \
+              "uncovered=%d/%d", cc_nodes.size, cc_ops.size, yuncov_nodes.size, yuncov_ops.size)
+  puts format("  syntax   rejected    %3d  not-refused=%d", rejects.size, yreject.size)
+  puts format("  syntax   withdrawn   %3d  revived=%d%s", ywithdrawn.size, yrevived.size,
+              ywithdrawn.empty? && !only ? EMPTY_NOTE : "")
+  puts format("  syntax   self-check       %s",
+              yself.empty? ? "(skipped: --only)" : yself.map { |k, v| "#{k}=#{v}" }.join(" "))
 end
 if do_maps
   puts format("  map      advertised  %3d  broken=%d", maps.size, mbroken.size)
@@ -1370,6 +1792,53 @@ unless srevived.empty?
   srevived.each { |s| puts "  #{s}   (#{CAP::WITHDRAWN_SUGAR[s][:why].to_s[0, 100]})" }
 end
 
+unless ybroken.empty?
+  puts "\nADVERTISED SYNTAX, CLAIM NOT KEPT -- a construct the affordance says can be"
+  puts "written either does not compile (two of those were found sitting in prose) or"
+  puts "compiles into something other than what it claims to become."
+  ybroken.each do |s, verdict, msg|
+    puts "  #{s[:id]}  [#{verdict}]  (#{s[:family]})"
+    puts "      syntax   : #{s[:syntax].to_s.lines.first.to_s.strip}"
+    puts "      lowers_to: #{s[:lowers_to].inspect}"
+    puts "      #{msg}"
+  end
+  puts "\n  Either implement it in src/codegen_c/spinel_ebpf_cc.c, or take the claim out of"
+  puts "  Capabilities::SYNTAX and record it in WITHDRAWN_SYNTAX -- and make the codegen"
+  puts "  REFUSE it, so an author working from an older doc does not get whatever it"
+  puts "  silently becomes."
+end
+
+unless yrevived.empty?
+  puts "\nWITHDRAWN SYNTAX STILL ACCEPTED -- either it was implemented, or the codegen's"
+  puts "refusal was lost (read that second possibility first):"
+  yrevived.each { |s| puts "  #{s}   (#{CAP::WITHDRAWN_SYNTAX[s][:why].to_s[0, 100]})" }
+end
+
+unless yreject.empty?
+  puts "\nA CONSTRUCT THE AFFORDANCE CALLS IMPOSSIBLE WAS NOT REFUSED. The rejected list"
+  puts "has been machine-readable all along, and \"it corresponds to a partition flag\" is"
+  puts "a claim, not a measurement. `uses_bignum` held that shape: the flag matched a type"
+  puts "name spinel does not use, so nothing ever set it, and a 30-digit literal reached"
+  puts "the kernel program as 9223372036854775807 -- exit 0."
+  yreject.each do |r, verdict, msg|
+    puts "  #{r[:flag]}  [#{verdict}]  (#{r[:construct]} -- #{r[:reason]})"
+    puts "      #{msg}"
+  end
+  puts "\n  Either make partition set the flag (src/spinel_ebpf/partition.rb), or take the"
+  puts "  row out of RUBY_SUBSET[:rejected]. Advertising a refusal that does not happen is"
+  puts "  worse than advertising nothing: it is what an AI reads as \"this is guarded\"."
+end
+
+unless yuncov_nodes.empty? && yuncov_ops.empty?
+  puts "\nTHE CODEGEN ACCEPTS SYNTAX THE AFFORDANCE NEVER MENTIONS -- this is the SILENT"
+  puts "direction. Nothing is broken; an AI reading the affordance simply cannot learn"
+  puts "that this can be written, and nothing measures it, which is how a literal"
+  puts "`n.times` and `x = if ... end` stayed advertised-but-dead."
+  yuncov_nodes.each { |t| puts "  node type  #{t}   accepted by the lowering dispatch, exercised by no claim" }
+  yuncov_ops.each { |o| puts "  binary op  #{o.inspect}   in cc_is_binary_op(), exercised by no claim" }
+  puts "\n  Add a Capabilities::SYNTAX claim with its `lowers_to` and a construct-free twin."
+end
+
 unless mbroken.empty?
   puts "\nADVERTISED MAP, CLAIM NOT KEPT -- the affordance says this surface makes this"
   puts "map with these properties, and the emitted C says otherwise. Capacity is"
@@ -1415,7 +1884,8 @@ unless revived.empty?
 end
 
 # Refuse to be a green light that measured nothing.
-if advertised.empty? && withdrawn.empty? && akinds.empty? && awithdrawn.empty? && sugars.empty? && maps.empty?
+if advertised.empty? && withdrawn.empty? && akinds.empty? && awithdrawn.empty? &&
+   sugars.empty? && syntaxes.empty? && rejects.empty? && maps.empty?
   abort "\naffordance gate: nothing was checked."
 end
 unless only
@@ -1496,6 +1966,50 @@ unless only
           "  (This is the half WITHDRAWN_SUGAR used to provide, before re-porting the demoted\n" \
           "  surfaces began emptying it.)"
   end
+  if do_syntax
+    # Three verdicts, three abilities, and they are genuinely different: seeing a
+    # construct that is NOT THERE (both dead constructs), seeing one that is there
+    # and lowers ELSEWHERE (the silent form -- a literal `n.times` falling back to
+    # bpf_loop), and refusing a needle that BOILERPLATE would satisfy (without
+    # which stage 2 is decoration).
+    if yself[:absent_construct] != :die
+      abort "\naffordance gate: the syntax self-check did not catch an absent construct (got\n" \
+            "  #{yself[:absent_construct].inspect}). `while` -- which RUBY_SUBSET[:rejected] itself calls\n" \
+            "  impossible under the verifier -- was accepted, so every syntax `broken=0` above\n" \
+            "  means nothing: this gate can no longer tell a live construct from a dead one."
+    end
+    if yself[:wrong_lowering] != :wrong_lowering
+      abort "\naffordance gate: the syntax self-check did not catch a wrong lowering (got\n" \
+            "  #{yself[:wrong_lowering].inspect}). A deliberately corrupted `lowers_to` was reported as\n" \
+            "  kept, so stage 2 is gone -- and stage 2 is the only thing that separates a literal\n" \
+            "  `n.times` (open-coded, kernel floor 6.4) from a silent fall back to bpf_loop."
+    end
+    if yself[:needle_not_bearing] != :not_load_bearing
+      abort "\naffordance gate: the syntax self-check did not catch a needle that boilerplate\n" \
+            "  satisfies (got #{yself[:needle_not_bearing].inspect}). `\"__s64\"` is in every probe including the\n" \
+            "  construct-free twin, and the gate still called the claim kept -- so the twin\n" \
+            "  witness is gone and any needle at all would now read as a lowering."
+    end
+    if yself[:legal_accepted] != :accepted
+      abort "\naffordance gate: the rejected-half self-check did not accept a legal probe (got\n" \
+            "  #{yself[:legal_accepted].inspect}). `n = a + 1` in a kprobe handler was not compiled, so\n" \
+            "  \"all N refused\" above could be produced by a pipeline that refuses everything --\n" \
+            "  a missing binary, a bad output path, anything. Fix that before reading the count."
+    end
+    if yself[:reject_reason] != :wrong_reason
+      abort "\naffordance gate: the rejected-half self-check did not catch a wrong reason (got\n" \
+            "  #{yself[:reject_reason].inspect}). A deliberately corrupted `refusal:` was reported as kept, so\n" \
+            "  the gate is only checking THAT the product refused, not that the flag the affordance\n" \
+            "  names is the one that did it -- which is exactly how `uses_bignum` stayed dead while\n" \
+            "  a bignum in signature position failed for a different reason."
+    end
+    if yself[:hidden_claim] != :uncovered
+      abort "\naffordance gate: the syntax coverage self-check did not catch a hidden claim (got\n" \
+            "  #{yself[:hidden_claim].inspect}). With the only claim that exercises one node type removed, that\n" \
+            "  node type was still reported as covered -- so `uncovered=0` means nothing, and\n" \
+            "  silence (the way this vocabulary failed) would go unnoticed."
+    end
+  end
   if selfcheck && selfcheck[0] != :diverged
     abort "\naffordance gate: the sugar self-check did not report a divergence (got\n" \
           "  #{selfcheck[0].inspect}). A deliberately mismatched pair (XDP::PASS vs XDP_DROP)\n" \
@@ -1507,5 +2021,6 @@ end
 
 exit((broken.size + revived.size + abroken.size + arevived.size + aorphan.size +
       sbroken.size + srevived.size +
+      ybroken.size + yrevived.size + yuncov_nodes.size + yuncov_ops.size + yreject.size +
       mbroken.size + muncovered.size + mrevived.size).zero? ? 0 : 1)
 end

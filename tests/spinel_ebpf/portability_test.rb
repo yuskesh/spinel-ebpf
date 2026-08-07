@@ -211,4 +211,26 @@ class PortabilityTest < Minitest::Test
     # contract must name the arch the compiler was actually told about.
     assert_includes %w[arm64 x86_64], P.build_arch
   end
+  # Literal `n.times` lowers to the open-coded iterator, which raises
+  # the floor from bpf_loop's 5.17 to 6.4. The declaration for that has been in
+  # FEATURES all along -- but a declared marker is not a detected one (we once found
+  # `SEC("kprobe.multi` declared nowhere and the multi lowering under-reporting
+  # 5.8 as a result). So this reads the marker off the REAL codegen output rather
+  # than a hand-written string: if the emitted spelling ever drifts from
+  # "bpf_iter_num_new", the floor silently drops back to 5.17 and a probe gets
+  # shipped claiming it runs on kernels that have no such kfunc.
+  def test_open_coded_iterator_floor_is_read_off_the_real_codegen_output
+    src = File.read(File.expand_path("../golden/183_open_coded_loop.bpf.c", __dir__))
+    c = P.contract(src)
+    assert_equal "6.4", c.ebpf["min_kernel"]
+    keys = c.ebpf["reasons"].map { |r| r["feature"] }
+    assert_includes keys, "open_coded_iter"
+    # That fixture carries a dynamic-N loop too: both lowerings are named, and
+    # the newer one wins the floor rather than either one being dropped.
+    assert_includes keys, "bpf_loop"
+    # The prose must say WHICH n.times this is about -- "open-coded iterator"
+    # alone does not tell a reader why their dynamic-N loop did not raise the floor.
+    assert_match(/literal/i, c.ebpf["reasons"].find { |r| r["feature"] == "open_coded_iter" }["why"])
+  end
+
 end
