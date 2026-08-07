@@ -1,44 +1,58 @@
 # frozen_string_literal: true
 #
-# Automatic kernel cache: partitioning at the granularity of a response.
+# Detector for the REFUSED `kernel_cache "/path", body` directive.
 #
-# Parses top-level `kernel_cache "/path", "body"` declarations from the spinel
-# AST. Each declaration asks the compiler to serve that path's response from the
-# kernel (XDP_TX), so requests that hit it never reach userspace — no accept /
-# read_line / sp_str_dup_external on the data plane (the FFI-marshalling cost
-# as measured). This module only extracts the (path, body) contract; the code
-# generator then reuses the XDP match/reply machinery to serve it.
+# STATUS: this module has exactly one live consumer --
+# `Validate#check_kernel_cache_unported!` (check (6)), which refuses the
+# directive at compile time. It is not a step in any compile that succeeds.
+#
+# History, and why the file survives at all:
+#   An earlier design gave the compiler an automatic kernel cache -- partitioning
+#   at the granularity of a response. Declare a path, and the pure-XDP TCP slice
+#   serves it from the kernel. It was built in the retired Ruby generator; the
+#   port to C never carried it, and the later re-port of the TCP-slice bundle did
+#   not include the kernel_cache branch either. What the surface did in that
+#   state was then measured: it parsed, partitioning announced an eBPF method,
+#   the generated .bpf.c had zero programs, the build succeeded, the binary
+#   printed "BPF loaded and attached", nothing was ever served, exit 0. It is a
+#   hard error now.
+#
+#   A refusal has to fire where the author's own spelling is still visible, so
+#   the refusal needs to SEE the directive. That is this file. Everything else
+#   the surface used to need has been deleted.
+#
+# Therefore the only property that matters here is the BLAST RADIUS: which
+# programs get refused and which do not. That shape is deliberately narrow and
+# unchanged -- a bare (receiver-less) two-argument call named `kernel_cache`
+# whose first argument is a string literal:
+#
+#   kernel_cache "/health", "OK\n"     -> refused (literal body)
+#   kernel_cache "/health", body       -> refused (runtime body; the glue that
+#                                         used to populate it has been deleted,
+#                                         so this form reaches nothing either
+#                                         and must not slip past)
+#   kernel_cache "/health"             -> NOT a declaration (wrong arity)
+#   obj.kernel_cache "/a", "b"         -> NOT a declaration (has a receiver)
+#
+# The second argument's TYPE is not inspected: a runtime body is still a
+# declaration, and the body itself is never read. (It was read once, for
+# compile-time HTTP framing; moving bodies to runtime left that half of the
+# parser with no consumer at all -- not even inside the retired generator. It is
+# deleted rather than kept warm by its test.)
 #
 # AST shape (from `spinel --dump-ast`):
 #   ProgramNode -> StatementsNode body[] -> CallNode(name="kernel_cache", receiver=-1)
-#     -> ArgumentsNode arguments[] -> [StringNode(path), StringNode(body)]
-#
-# MVP scope: literal path + literal body, 2 args. Hash form (`"/p" => "body"`),
-# block bodies, and computed bodies are later phases.
+#     -> ArgumentsNode arguments[] -> [StringNode(path), <anything>]
 
 module SpinelEbpf
   module KernelCache
-    # `body` is the literal response body when the 2nd arg is a string literal,
-    # or nil when it's a runtime expression (Phase 1: the body is computed at
-    # startup and pushed into the kernel via sp_kc_set; only `path` is needed at
-    # compile time, to emit the XDP match). `path` is always a literal.
-    Entry = Struct.new(:path, :body, keyword_init: true) do
-      def literal? ; !body.nil? ; end
-
-      # Full HTTP/1.0 response for a literal body (framing built here so the Ruby
-      # surface only carries the body). Only meaningful when literal?.
-      def http_response
-        "HTTP/1.0 200 OK\r\n" \
-        "Content-Length: #{body.bytesize}\r\n" \
-        "\r\n" \
-        "#{body}"
-      end
-    end
-
     module_function
 
-    # Returns an Array<Entry> for every top-level `kernel_cache "/path","body"`.
-    def declarations(ast)
+    # Returns the declared paths, in source order, for every top-level
+    # `kernel_cache "<path>", <anything>` call. Empty means "this program does
+    # not use the refused surface" -- the common case, and the only case in which
+    # a compile proceeds.
+    def declared_paths(ast)
       out = []
       stmts = ast.statements_of(ast.root_id)
       return out if stmts.nil? || stmts < 0
@@ -52,10 +66,8 @@ module SpinelEbpf
         items = ast.array(args, "arguments")
         next unless items.length == 2
         pn = ast.node(items[0])
-        next unless pn && pn.type == "StringNode"          # path must be a literal
-        bn = ast.node(items[1])
-        body = (bn && bn.type == "StringNode") ? ast.str_attr(items[1], "content") : nil  # nil = runtime body
-        out << Entry.new(path: ast.str_attr(items[0], "content"), body: body)
+        next unless pn && pn.type == "StringNode"           # path must be a literal
+        out << ast.str_attr(items[0], "content")
       end
       out
     end

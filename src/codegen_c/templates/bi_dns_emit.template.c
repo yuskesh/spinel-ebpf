@@ -21,6 +21,7 @@
                         _dee@E@->cgid = bpf_get_current_cgroup_id();
                         __builtin_memcpy(_dee@E@->raw, _draw@E@, sizeof(_dee@E@->raw));
                         _dee@E@->duration_ns = bpf_ktime_get_ns() - *_dstart@E@;
+                        _dee@E@->raw_status = 0;   /* this path only reserves after a read that returned 0 */
                         bpf_ringbuf_submit(_dee@E@, 0);
                     } else spnl_lost_inc();   /* ring full -> account the dropped record */
                     bpf_map_delete_elem(&@UNIT@_dns_pending, &_dkey@E@);

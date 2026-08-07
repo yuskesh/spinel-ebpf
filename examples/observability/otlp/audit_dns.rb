@@ -16,6 +16,13 @@
 # Notes, all measured:
 #   - Resolver independence is the whole point. In a controlled comparison the
 #     same Go resolution was absent from the libc uprobe and present on socket :53.
+#   - The RANGE of that independence was measured separately and is wider than it
+#     used to be: not just the resolver's implementation language, but also how it
+#     sends -- connected or not, one iovec or several. (Before that measurement,
+#     only connected single-buffer sends were read; a dnsmasq forwarding upstream
+#     with a bare sendto produced no spans at all.) What still cannot be read is a
+#     send whose bytes are not in user memory (splice/vmsplice); such a record is
+#     reported as `unreadable_payload` rather than turned into an empty span.
 #   - This example captures the query -- who resolved what. It does not measure
 #     resolution latency, so the query span has duration=0; getting the latency
 #     needs access to the payload on the receive side. A libc uprobe (getaddrinfo
@@ -38,7 +45,13 @@ module Otlp
 end
 
 def kprobe__udp_sendmsg(sk, msg, len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568   # 0x3500 = be16 of port 53
+  # udp_dport is the destination of THIS datagram, not of the socket. An
+  # unconnected sender -- one that passes the address on every send, which is how
+  # dnsmasq forwards upstream -- leaves the socket's peer port at 0, so
+  # `sock_dport(sk) == 53` is simply false and the probe reports nothing at all.
+  # Both spellings return host order, so the port is written as the port; the raw
+  # __be16 read would have to be compared against 13568 (0x3500).
+  if udp_dport(sk, msg) == 53
     emit_dns(msg)
   end
   0

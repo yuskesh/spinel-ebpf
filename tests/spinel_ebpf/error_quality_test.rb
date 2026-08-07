@@ -20,6 +20,46 @@ require "spinel_ebpf/codegen_bpf"
 require "spinel_ebpf/capabilities"
 
 class ErrorQualityTest < Minitest::Test
+  # Measured (a model authoring from errors alone, no affordance): the author
+  # reached for `parent_is` and the error named no candidate, so it GUESSED
+  # `parent_path_eq` and happened to be right. Edit distance cannot bridge that
+  # pair -- the names differ by 6 edits -- but they share the token `parent`,
+  # and in a snake_case vocabulary a shared token is the signal. An error that
+  # says only "no such builtin" sends the author back to guessing, which is the
+  # one thing the loud-error contract exists to prevent.
+  def test_unknown_builtin_names_candidates_that_share_a_name_part
+    err = assert_raises(SpinelEbpf::Validate::Error) do
+      SpinelEbpf::Validate.check_unknown_builtins!(
+        [{ name: "parent_is", method: "fmod_ret__security_file_open" }]
+      )
+    end
+    assert_includes err.message, "parent_path_eq",
+                    "must name the builtin sharing the `parent` token, not just say 'unknown'"
+    assert_includes err.message, "capabilities",
+                    "must still point at the full list"
+  end
+
+  # The suggestion must not fire on a name with nothing in common -- a list of
+  # unrelated builtins is noise, and noise trains the reader to skip the line.
+  # The suggestion must not fire on a name with nothing in common -- a list of
+  # unrelated builtins is noise, and noise trains the reader to skip the line.
+  def test_unknown_builtin_with_no_shared_token_stays_generic
+    err = assert_raises(SpinelEbpf::Validate::Error) do
+      SpinelEbpf::Validate.check_unknown_builtins!(
+        [{ name: "zzqqxx", method: "kprobe__vfs_read" }]
+      )
+    end
+    refute_match(/did you mean|share/i, err.message,
+                 "nothing is close or related, so claim neither")
+  end
+
+  P   = SpinelEbpf::Partition
+  V   = SpinelEbpf::Validate
+  GEN = SpinelEbpf::CodegenBpf
+  CAP = SpinelEbpf::Capabilities
+  FIX = File.expand_path("../fixtures/error_quality", __dir__)
+
+
   P   = SpinelEbpf::Partition
   V   = SpinelEbpf::Validate
   GEN = SpinelEbpf::CodegenBpf

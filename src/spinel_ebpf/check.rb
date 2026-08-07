@@ -109,14 +109,41 @@ module SpinelEbpf
     end
 
     # ---- result assembly + formatting -----------------------------------------
+    # `ok` is tri-state, exactly like a stage's:
+    #   true  -> at least one stage ran and none failed
+    #   false -> a stage failed (failed_stage says which)
+    #   nil   -> NOTHING ran; this environment cannot check here (unverifiable
+    #            says why). Not a pass and not a probe failure.
+    #
+    # The nil case is the one worth naming. "No stage failed" and "no stage ran"
+    # are the same absence of failures, and folding them together reports *not
+    # having checked* as *nothing being wrong* -- on a macOS host every stage
+    # skips (the frontend is a Linux ELF, there is no kernel/BTF), so `check`
+    # answered `ok: true` for a probe it had never compiled. An AI reading the
+    # field takes that as a green light. The two have opposite remedies (run it
+    # in the build container / fix the probe), so they get separate verdicts and
+    # separate exit codes.
+    #
+    # A PARTIAL run stays `true`: something executed and passed. Only the empty
+    # run is inconclusive.
     def assemble(file, stages)
       failed = stages.find { |s| s[:ok] == false }
+      ran    = stages.any? { |s| s[:ok] == true }
+      ok     = failed ? false : (ran ? true : nil)
       {
         file: file,
-        ok: failed.nil?,
+        ok: ok,
         failed_stage: failed && failed[:stage],
+        unverifiable: ok.nil? ? unverifiable_reason(stages) : nil,
         stages: stages,
       }
+    end
+
+    # Why nothing ran, in the words of the stage that skipped first -- the
+    # earliest skip is the root cause (the later ones are consequences of it).
+    def unverifiable_reason(stages)
+      first = stages.find { |s| s[:skipped] }
+      "no stage ran: #{first ? first[:skipped] : 'no stages were executed'}"
     end
 
     def to_json(result)
@@ -136,12 +163,27 @@ module SpinelEbpf
                end
         out << format("  [%-4s] %-10s %s\n", mark, s[:stage], note)
       end
-      if result[:ok]
+      case result[:ok]
+      when true
         conclusive = result[:stages].any? { |s| s[:stage] == "verifier" && s[:ok] == true }
         out << (conclusive ? "  => OK (verifier accepted)\n" : "  => OK (no failure; some stages skipped)\n")
-      else
+      when false
         f = result[:stages].find { |s| s[:ok] == false }
         out << "  => FAILED at #{f[:stage]}: #{f[:error]}\n"
+        # The loud message (why, where it IS legal, how to fix) rides in `detail`.
+        # It is the half the author acts on, so it must not stay JSON-only: a
+        # summary line like "codegen failed" tells nobody what to do next.
+        if f[:detail] && !f[:detail].to_s.strip.empty?
+          f[:detail].to_s.each_line { |l| out << "     #{l.chomp}\n" }
+        end
+      else
+        # Deliberately not "OK": nothing was compiled, loaded or verified.
+        out << "  => CANNOT CHECK HERE (#{result[:unverifiable]})\n"
+        out << "     Why: this is not a verdict about the probe -- no stage ran, so nothing\n"
+        out << "          about it was tested. Reporting a pass here would be reporting\n"
+        out << "          \"not checked\" as \"nothing wrong\".\n"
+        out << "     Fix: run check inside the Linux build container (clang/libbpf/BTF), e.g.\n"
+        out << "          container exec spnlbuild sh -c 'cd /work && bin/spinel-ebpf check <file>'\n"
       end
       out
     end

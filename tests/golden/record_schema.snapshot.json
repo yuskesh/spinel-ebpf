@@ -5,7 +5,7 @@
     "dns": {
       "record_struct": "<unit>_dns_event",
       "ringbuf_map": "<unit>_dns_events",
-      "record_bytes": 120,
+      "record_bytes": 128,
       "record_min_bytes": 120,
       "producers": [
         "emit_dns",
@@ -59,6 +59,14 @@
           "offset": 112,
           "bytes": 8,
           "expose": "int"
+        },
+        {
+          "name": "raw_status",
+          "ctype": "__s32",
+          "count": 0,
+          "offset": 120,
+          "bytes": 4,
+          "expose": ""
         }
       ],
       "egress": {
@@ -121,7 +129,9 @@
           }
         ]
       },
-      "metrics": []
+      "metrics": [
+
+      ]
     },
     "conn": {
       "record_struct": "<unit>_conn_event",
@@ -477,7 +487,9 @@
           }
         ]
       },
-      "metrics": []
+      "metrics": [
+
+      ]
     },
     "http": {
       "record_struct": "<unit>_http_event",
@@ -814,7 +826,9 @@
         ]
       },
       "consumer": null,
-      "metrics": []
+      "metrics": [
+
+      ]
     },
     "offcpu": {
       "record_struct": "<unit>_offcpu_event",
@@ -1027,7 +1041,9 @@
           }
         ]
       },
-      "metrics": []
+      "metrics": [
+
+      ]
     },
     "l7stream": {
       "record_struct": "<unit>_l7stream_event",
@@ -1074,7 +1090,9 @@
       ],
       "egress": null,
       "consumer": null,
-      "metrics": []
+      "metrics": [
+
+      ]
     }
   }
 }

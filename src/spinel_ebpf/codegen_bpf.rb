@@ -2311,11 +2311,22 @@ module SpinelEbpf
       # kernel_cache turns this slice into a multi-route cache --
       # each declared path is a slot (declaration order) served from bpf_kc_resp.
       # With no declaration the slice keeps the /health default.
-      kc_decls       = ctx && ctx.ast ? KernelCache.declarations(ctx.ast) : []
+      #
+      # STATUS: every `kc_*` branch below is UNREACHABLE from the product.
+      # `kernel_cache` is refused at compile time (Validate (6)) because the C
+      # codegen never carried this branch, so no CLI invocation can put a
+      # declaration in front of it -- only the historical oracle harness, which
+      # is not a gate. It is kept as the record of what the surface built: the
+      # text still compiles and loads on a current kernel, so it is a usable
+      # reference for a future port, and deleting it would only move the same
+      # bytes into version-control history. Nothing asserts on it any more; the
+      # branch that is NOT taken (the /health default) is the one covered by
+      # codegen_bpf_test.rb.
+      kc_decls       = ctx && ctx.ast ? KernelCache.declared_paths(ctx.ast) : []
       kc_entry       = kc_decls.first
       port           = TCP_SLICE_PORT
       default_path   = TCP_SLICE_REQUEST_MATCH[/\AGET (.*) \z/, 1]
-      route_paths    = kc_decls.empty? ? [default_path] : kc_decls.map(&:path)
+      route_paths    = kc_decls.empty? ? [default_path] : kc_decls
       n_routes       = route_paths.length
       match_str      = "GET #{route_paths.first} "   # for the bundle header comment
       esc_c          = ->(c) { c == "\\" ? '\\\\' : c == "'" ? "\\'" : c }

@@ -138,13 +138,45 @@ class CheckTest < Minitest::Test
     assert_equal "codegen", r[:failed_stage]
   end
 
-  def test_assemble_ok_when_only_skips
-    # macOS host: every stage skips (frontend Linux-only, no kernel). No failure
-    # => ok true, failed_stage nil (inconclusive but nothing proven broken).
+  # A gate that could not run must not report a pass. On a macOS host every stage
+  # skips (frontend is a Linux ELF, no kernel/BTF) -- "nothing ran" and "nothing
+  # is wrong" are different answers with opposite remedies (run it in the build
+  # container / fix the probe), so they get different verdicts and different exit
+  # codes. `ok` is tri-state exactly like a stage's: true / false / nil.
+  def test_assemble_is_inconclusive_when_nothing_ran
     stages = C::STAGES.map { |s| C.skip_stage(s, "no toolchain here") }
     r = C.assemble("x.rb", stages)
+    assert_nil r[:ok], "no stage ran, so check cannot say the probe is ok"
+    assert_nil r[:failed_stage], "nothing failed either -- this is not a probe failure"
+    assert_includes r[:unverifiable].to_s, "no toolchain here",
+                    "must carry why it could not check, not just that it could not"
+  end
+
+  # A partial run is still a real verdict: something executed and passed. Only
+  # the empty case is inconclusive, so adding a filter/skip does not silently
+  # turn a passing check into an unverifiable one.
+  def test_assemble_ok_when_at_least_one_stage_ran
+    stages = [C.ok_stage("partition"),
+              C.skip_stage("codegen", "no toolchain here"),
+              C.skip_stage("clang", "no toolchain here"),
+              C.skip_stage("verifier", "no kernel/BTF")]
+    r = C.assemble("x.rb", stages)
     assert_equal true, r[:ok]
-    assert_nil r[:failed_stage]
+    assert_nil r[:unverifiable]
+  end
+
+  def test_human_output_does_not_claim_ok_when_nothing_ran
+    r = C.assemble("x.rb", C::STAGES.map { |s| C.skip_stage(s, "run this in the build container") })
+    text = C.human(r)   # must not raise: there is no failed stage to report either
+    refute_match(/=> OK/, text, "'no stage ran' must never render as OK")
+    assert_includes text, "run this in the build container"
+  end
+
+  def test_json_reports_inconclusive_as_null_not_true
+    r = C.assemble("p.rb", C::STAGES.map { |s| C.skip_stage(s, "no kernel here") })
+    parsed = JSON.parse(C.to_json(r))
+    assert_nil parsed["ok"], "an AI reading only `ok` must not see a green light"
+    refute_nil parsed["unverifiable"]
   end
 
   def test_json_shape_is_machine_readable
@@ -155,6 +187,19 @@ class CheckTest < Minitest::Test
     assert_equal "codegen", parsed["failed_stage"]
     assert_equal 2, parsed["stages"].length
     assert_equal %w[stage ok error detail skipped].sort, parsed["stages"][0].keys.sort
+  end
+
+  # The loud compile-time message (reason + where it IS legal + how to fix) arrives
+  # as the failed stage's `detail`. Printing only `error` throws away the half that
+  # says what to do next -- which is the half the author, human or model, acts on.
+  def test_human_output_keeps_the_actionable_detail_of_a_failure
+    r = C.assemble("p.rb", [C.ok_stage("partition"),
+                            C.fail_stage("codegen", "in-process eBPF codegen failed",
+                                         detail: "path_eq: bpf_d_path is kernel-gated ...\n" \
+                                                 "    file arg : def lsm__file_open / ...")])
+    text = C.human(r)
+    assert_includes text, "kernel-gated", "the reason must survive into the human output"
+    assert_includes text, "def lsm__file_open", "so must the fix"
   end
 
   def test_human_output_marks_failed_stage

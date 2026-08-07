@@ -7,6 +7,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include "spnl/types.h"
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 char LICENSE[] SEC("license") = "Dual MIT/GPL";
@@ -39,6 +40,114 @@ static __always_inline void spnl_lost_inc(void)
     if (_l) *_l += 1;
 }
 
+/* === msghdr -> user buffer, and the datagram's real destination === */
+
+/* Every builtin that reads the bytes of a send or a receive starts from a
+ * `struct msghdr *` and has to answer one question: where in user memory are
+ * the bytes? All eleven of them used to answer it the same wrong way --
+ *
+ *     BPF_CORE_READ(msg, msg_iter.__ubuf_iovec.iov_base)
+ *
+ * -- which is only the answer for ITER_UBUF. `msg_iter` is a tagged union and
+ * that member is one of the tags; for ITER_IOVEC the same 8 bytes hold `__iov`,
+ * a pointer to the KERNEL's copy of the caller's iovec array (import_iovec
+ * copies it in), so the read above hands a kernel address to
+ * bpf_probe_read_user, which fails. Measured on a 2-iovec sendmsg: iov_base
+ * reported 0xffff80008714bc88 while the payload the process actually sent was
+ * at 0xffffe6f60fb8.
+ *
+ * A single-entry iovec array is NOT affected: the kernel normalises nr_segs==1
+ * to ITER_UBUF, which is why writev-style sends of one segment worked and why
+ * the bug survived every fixture -- all of them send one buffer.
+ *
+ * The resolution lives in ONE function on purpose. Eleven call sites each
+ * carrying their own union discipline is exactly how a second, disagreeing
+ * table gets written.
+ */
+
+/* raw_status when the helper below could not name a user buffer at all. Distinct
+ * from any errno bpf_probe_read_user can return, so a reader never has to guess
+ * which of the two happened. */
+#define SPNL_RAW_NO_USER_BUFFER (-1)
+
+static __noinline void *spnl_msg_ubuf(struct msghdr *msg)
+{
+    if (!msg) return (void *)0;
+    /* The enumerator values are read out of the running kernel's BTF rather
+     * than baked in, so a renumbered enum cannot silently reclassify a send. */
+    __u8 it = BPF_CORE_READ(msg, msg_iter.iter_type);
+    void *base = (void *)0;
+    if (it == bpf_core_enum_value(enum iter_type, ITER_UBUF)) {
+        base = BPF_CORE_READ(msg, msg_iter.__ubuf_iovec.iov_base);
+    } else if (it == bpf_core_enum_value(enum iter_type, ITER_IOVEC)) {
+        /* __iov always points at the iterator's CURRENT segment (iov_iter_advance
+         * walks the pointer forward), so the first entry is the right one at any
+         * position, not just at entry. */
+        const struct iovec *iov = BPF_CORE_READ(msg, msg_iter.__iov);
+        if (iov) base = BPF_CORE_READ(iov, iov_base);
+    }
+    /* ITER_BVEC / ITER_KVEC / ITER_XARRAY / ITER_DISCARD describe pages or kernel
+     * memory: there is no user buffer to read, and saying so is the point --
+     * returning a plausible pointer is what produced the zero-filled records. */
+    if (!base) return (void *)0;
+    /* iov_offset is how far into the current segment the iterator already is.
+     * Zero at every capture point this codegen attaches to (all of them are
+     * function entries), but reading it makes the contract "the bytes the
+     * iterator is about to consume" true wherever the helper is called. */
+    return (void *)((__u8 *)base + (unsigned long)BPF_CORE_READ(msg, msg_iter.iov_offset));
+}
+
+/* === where this datagram is actually going === */
+
+/* `sock_dport(sk)` answers "what peer is this socket connected to". For a UDP
+ * send that is only the same question when the socket IS connected. udp_sendmsg
+ * itself makes the distinction first thing it does: an address in msg_name wins,
+ * and only when there is none does it fall back to the connected peer (and
+ * returns -EDESTADDRREQ if there is no peer either).
+ *
+ * A probe written against sock_dport therefore reports nothing at all for an
+ * unconnected sender -- skc_dport is 0, so a `== 53` filter is simply false.
+ * That is not a rare shape: dnsmasq forwards upstream with a bare sendto(),
+ * because one socket serves many destinations. glibc, python, busybox and Go
+ * all connect, which is why every resolver measured up to now came through.
+ *
+ * These two fold the kernel's own rule in, so the author does not have to know
+ * it -- and cannot get it half right, which is what makes the failure silent.
+ *
+ * SEND hooks only. On udp_recvmsg, msg_name is an OUTPUT: the kernel is about
+ * to write the sender's address there, so reading it at entry interprets
+ * uninitialised bytes as a port. The receive side has no equivalent question --
+ * who sent the datagram is not known until the call returns -- so a receive-side
+ * filter really is limited to the socket's connected peer, and that limit is
+ * named rather than papered over.
+ */
+static __noinline __s64 spnl_udp_dport(struct sock *sk, struct msghdr *msg)
+{
+    void *nm = msg ? BPF_CORE_READ(msg, msg_name) : (void *)0;
+    if (nm) {
+        /* AF_INET/AF_INET6 are UAPI #defines, not an enum, so there is nothing
+         * in BTF to relocate against -- unlike the iter_type tags next door. */
+        __u16 fam = BPF_CORE_READ((struct sockaddr *)nm, sa_family);
+        if (fam == 2)  return (__s64)(__u16)bpf_ntohs(BPF_CORE_READ((struct sockaddr_in *)nm, sin_port));
+        if (fam == 10) return (__s64)(__u16)bpf_ntohs(BPF_CORE_READ((struct sockaddr_in6 *)nm, sin6_port));
+        return 0;
+    }
+    if (!sk) return 0;
+    return (__s64)(__u16)bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+}
+
+static __noinline __s64 spnl_udp_daddr(struct sock *sk, struct msghdr *msg)
+{
+    void *nm = msg ? BPF_CORE_READ(msg, msg_name) : (void *)0;
+    if (nm) {
+        __u16 fam = BPF_CORE_READ((struct sockaddr *)nm, sa_family);
+        if (fam == 2) return (__s64)(__u32)bpf_ntohl(BPF_CORE_READ((struct sockaddr_in *)nm, sin_addr.s_addr));
+        return 0;   /* AF_INET6 has no IPv4 address to give back; ask sock_daddr6_* */
+    }
+    if (!sk) return 0;
+    return (__s64)(__u32)bpf_ntohl(BPF_CORE_READ(sk, __sk_common.skc_daddr));
+}
+
 /* === per-unit DNS-event channel === */
 struct u_105_emit_dns_dns_event {
     struct spnl_event_hdr hdr;
@@ -47,6 +156,7 @@ struct u_105_emit_dns_dns_event {
     unsigned char raw[64];
     __u64 cgid;
     __u64 duration_ns;
+    __s32 raw_status;
 };
 
 struct {
@@ -65,7 +175,7 @@ struct kprobe__udp_sendmsg_ctx {
 static __noinline __s64 kprobe__udp_sendmsg_inner(__s64 sk, __s64 msg, __s64 len)
 {
     __s64 _if1 = 0;
-    if (((__s64)BPF_CORE_READ((struct sock *)(unsigned long)(sk), __sk_common.skc_dport)) == 13568) {
+    if (spnl_udp_dport((struct sock *)(unsigned long)(sk), (struct msghdr *)(unsigned long)(msg)) == 53) {
         {
             struct u_105_emit_dns_dns_event *_de2 = bpf_ringbuf_reserve(&u_105_emit_dns_dns_events, sizeof(*_de2), 0);
             if (_de2) {
@@ -78,8 +188,14 @@ static __noinline __s64 kprobe__udp_sendmsg_inner(__s64 sk, __s64 msg, __s64 len
                 _de2->cgid = bpf_get_current_cgroup_id();
                 _de2->duration_ns = 0;
                 __builtin_memset(_de2->raw, 0, sizeof(_de2->raw));
-                void *_db2 = BPF_CORE_READ((struct msghdr *)(unsigned long)(msg), msg_iter.__ubuf_iovec.iov_base);
-                if (_db2) (void)bpf_probe_read_user(_de2->raw, sizeof(_de2->raw), _db2);
+                void *_db2 = spnl_msg_ubuf((struct msghdr *)(unsigned long)(msg));
+                /* Keep the outcome of the read. It used to be discarded, so a record
+                 * that carried no bytes reached userspace looking exactly like a record
+                 * whose bytes did not parse, and the drain reported the second reason
+                 * for the first cause. */
+                _de2->raw_status = _db2
+                    ? (__s32)bpf_probe_read_user(_de2->raw, sizeof(_de2->raw), _db2)
+                    : (__s32)SPNL_RAW_NO_USER_BUFFER;
                 bpf_ringbuf_submit(_de2, 0);
             } else spnl_lost_inc();   /* ring full -> account the dropped record */
         }

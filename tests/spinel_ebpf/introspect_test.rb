@@ -133,7 +133,7 @@ class IntrospectTest < Minitest::Test
   def test_report_shows_record_layout_and_egress_attributes
     r = I.report(FULL_DNS_PROBE, "t.rb")
     assert_match(/record channels/, r)
-    assert_match(/dns\s+<unit>_dns_event \(120 B, map <unit>_dns_events\) <- emit_dns@L5/, r)
+    assert_match(/dns\s+<unit>_dns_event \(128 B, map <unit>_dns_events\) <- emit_dns@L5/, r)
     assert_match(/@36\s+raw\s+unsigned char\[64\]/, r)   # the byte layout (offsets come from the generator)
     assert_match(/egress: spnl_otlp_dns_span_push -> span "resolve \{dns\.question\.name\}" \(SpanKind INTERNAL\)/, r)
     assert_match(/dns\.question\.name\s+semconv/, r)

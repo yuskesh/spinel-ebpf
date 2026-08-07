@@ -1,0 +1,232 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/183_open_coded_loop.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name spnl_emit
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name x
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+R 2 body -1
+R 2 receiver -1
+N 5 InstanceVariableWriteNode
+S 5 name @total
+N 6 IntegerNode
+I 6 value 0
+R 5 value 6
+N 7 DefNode
+S 7 name sum_first_four
+R 7 parameters -1
+N 8 StatementsNode
+N 9 LocalVariableWriteNode
+S 9 name total
+N 10 IntegerNode
+I 10 value 0
+R 9 value 10
+N 11 CallNode
+S 11 name times
+N 12 IntegerNode
+I 12 value 4
+R 11 receiver 12
+R 11 arguments -1
+N 13 BlockNode
+S 13 locals i
+N 14 BlockParametersNode
+N 15 ParametersNode
+N 16 RequiredParameterNode
+S 16 name i
+A 15 requireds 16
+A 15 optionals 
+A 15 keywords 
+A 15 posts 
+R 14 parameters 15
+R 13 parameters 14
+N 17 StatementsNode
+N 18 LocalVariableWriteNode
+S 18 name total
+N 19 CallNode
+S 19 name +
+N 20 LocalVariableReadNode
+S 20 name total
+R 19 receiver 20
+N 21 ArgumentsNode
+N 22 CallNode
+S 22 name *
+N 23 LocalVariableReadNode
+S 23 name i
+R 22 receiver 23
+N 24 ArgumentsNode
+N 25 LocalVariableReadNode
+S 25 name i
+A 24 arguments 25
+R 22 arguments 24
+R 22 block -1
+S 22 call_operator .
+A 21 arguments 22
+R 19 arguments 21
+R 19 block -1
+S 19 call_operator .
+R 18 value 19
+A 17 body 18
+R 13 body 17
+R 11 block 13
+S 11 call_operator .
+N 26 LocalVariableReadNode
+S 26 name total
+A 8 body 9,11,26
+R 7 body 8
+R 7 receiver -1
+N 27 DefNode
+S 27 name kprobe__do_sys_openat2
+R 27 parameters -1
+N 28 StatementsNode
+N 29 CallNode
+S 29 name times
+N 30 IntegerNode
+I 30 value 3
+R 29 receiver 30
+R 29 arguments -1
+N 31 BlockNode
+S 31 locals i
+N 32 BlockParametersNode
+N 33 ParametersNode
+N 34 RequiredParameterNode
+S 34 name i
+A 33 requireds 34
+A 33 optionals 
+A 33 keywords 
+A 33 posts 
+R 32 parameters 33
+R 31 parameters 32
+N 35 StatementsNode
+N 36 InstanceVariableWriteNode
+S 36 name @total
+N 37 CallNode
+S 37 name +
+N 38 InstanceVariableReadNode
+S 38 name @total
+R 37 receiver 38
+N 39 ArgumentsNode
+N 40 LocalVariableReadNode
+S 40 name i
+A 39 arguments 40
+R 37 arguments 39
+R 37 block -1
+S 37 call_operator .
+R 36 value 37
+N 41 CallNode
+S 41 name spnl_emit
+R 41 receiver -1
+N 42 ArgumentsNode
+N 43 InstanceVariableReadNode
+S 43 name @total
+A 42 arguments 43
+R 41 arguments 42
+R 41 block -1
+S 41 call_operator .
+A 35 body 36,41
+R 31 body 35
+R 29 block 31
+S 29 call_operator .
+A 28 body 29
+R 27 body 28
+R 27 receiver -1
+N 44 DefNode
+S 44 name sum_dynamic
+N 45 ParametersNode
+N 46 RequiredParameterNode
+S 46 name n
+A 45 requireds 46
+A 45 optionals 
+A 45 keywords 
+A 45 posts 
+R 44 parameters 45
+N 47 StatementsNode
+N 48 LocalVariableWriteNode
+S 48 name acc
+N 49 IntegerNode
+I 49 value 0
+R 48 value 49
+N 50 CallNode
+S 50 name times
+N 51 LocalVariableReadNode
+S 51 name n
+R 50 receiver 51
+R 50 arguments -1
+N 52 BlockNode
+S 52 locals i
+N 53 BlockParametersNode
+N 54 ParametersNode
+N 55 RequiredParameterNode
+S 55 name i
+A 54 requireds 55
+A 54 optionals 
+A 54 keywords 
+A 54 posts 
+R 53 parameters 54
+R 52 parameters 53
+N 56 StatementsNode
+N 57 LocalVariableWriteNode
+S 57 name acc
+N 58 CallNode
+S 58 name +
+N 59 LocalVariableReadNode
+S 59 name acc
+R 58 receiver 59
+N 60 ArgumentsNode
+N 61 LocalVariableReadNode
+S 61 name i
+A 60 arguments 61
+R 58 arguments 60
+R 58 block -1
+S 58 call_operator .
+R 57 value 58
+A 56 body 57
+R 52 body 56
+R 50 block 52
+S 50 call_operator .
+N 62 LocalVariableReadNode
+S 62 name acc
+A 47 body 48,50,62
+R 44 body 47
+R 44 receiver -1
+N 63 CallNode
+S 63 name puts
+R 63 receiver -1
+N 64 ArgumentsNode
+N 65 CallNode
+S 65 name sum_first_four
+R 65 receiver -1
+R 65 arguments -1
+R 65 block -1
+S 65 call_operator .
+I 65 vcall 1
+A 64 arguments 65
+R 63 arguments 64
+R 63 block -1
+S 63 call_operator .
+N 66 CallNode
+S 66 name puts
+R 66 receiver -1
+N 67 ArgumentsNode
+N 68 CallNode
+S 68 name sum_dynamic
+R 68 receiver -1
+N 69 ArgumentsNode
+N 70 IntegerNode
+I 70 value 5
+A 69 arguments 70
+R 68 arguments 69
+R 68 block -1
+S 68 call_operator .
+A 67 arguments 68
+R 66 arguments 67
+R 66 block -1
+S 66 call_operator .
+A 1 body 2,5,7,27,44,63,66
+R 0 statements 1

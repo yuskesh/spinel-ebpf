@@ -2,7 +2,7 @@
     __u32 _ot@E@ = (__u32)bpf_get_current_pid_tgid();
     struct @UNIT@_offcpu_win *_ow@E@ = bpf_map_lookup_elem(&@UNIT@_offcpu_win, &_ot@E@);
     if (_ow@E@) {
-        void *_obuf@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
+        void *_obuf@E@ = spnl_msg_ubuf((struct msghdr *)(unsigned long)(@MSG@));
         unsigned char _oresp@E@[16] = {};
         if (_obuf@E@ && bpf_probe_read_user(_oresp@E@, sizeof(_oresp@E@), _obuf@E@) == 0 &&
             _oresp@E@[0]=='H' && _oresp@E@[1]=='T' && _oresp@E@[2]=='T' && _oresp@E@[3]=='P') {

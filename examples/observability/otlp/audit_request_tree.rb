@@ -65,14 +65,17 @@ end
 
 # --- child: DNS resolution + RTT (send and recv correlated by txid) ---
 def kprobe__udp_sendmsg(sk, msg, len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568   # 0x3500 = be16 of port 53
+  if udp_dport(sk, msg) == 53   # the destination of THIS datagram
     dns_req_start(sk, msg)     # record the start time under the txid of the query bound for :53
   end
   0
 end
 
 def kprobe__udp_recvmsg(sk, msg, len, flags, addr_len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568
+  # The receive side has no equivalent question -- msg_name there is an output
+  # the kernel is about to write -- so filtering on the socket's connected peer,
+  # i.e. only connected resolvers, is the honest ceiling.
+  if sock_dport(sk) == 53
     dns_resp_stash(sk, msg)    # the response payload only exists after the copy, so stash it
   end
   0

@@ -2,16 +2,16 @@
 #
 # Each committed tests/golden/*.bpf.c compiled with the production clang
 # flags and loaded with tools/spnl_load_check.c. Only the STATUS column is
-# compared; `note` is prose for the reviewer, because the compiler or verifier
-# message itself is version-dependent and deliberately not pinned -- see the
-# header of tools/golden_compile.sh.
+# compared; `note` is prose for the reviewer (the compiler/verifier message
+# itself is version-dependent and deliberately not pinned -- see the header
+# of tools/golden_compile.sh).
 #
 # A non-ok status is not permission to leave it broken: it is a claim that
 # somebody looked. Refresh with `sh tools/golden_compile.sh --update` and
-# review the diff -- a new failure means the generator started emitting C that
+# review the diff -- a new failure means the codegen started emitting C that
 # does not build or does not load.
 #
-# measured on aarch64 with clang 19 at -mcpu=v1
+# measured: kernel=7.1.5-ebpf arch=aarch64 clang=19.1.7 mcpu=v1
 #
 # golden	status	note
 02_integer_arith	ok	
@@ -80,6 +80,9 @@
 174_tcp_slice_builtins	ok	
 17_kprobe	ok	
 182_emit_path_overlay_hook	ok	
+183_open_coded_loop	ok	
+184_if_expression_value	ok	
+185_emit_dns_kfield_filter	ok	
 18_tp_args	ok	
 19_emit_str	ok	
 20_top_ivar	ok	

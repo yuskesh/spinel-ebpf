@@ -47,7 +47,8 @@
     }
   ],
   "bounds_sets": [
-    { "id": "otel_duration_s", "unit": "s", "authority": "OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read", "values": [0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10], "note": "seconds. A record carries nanoseconds, so a metric over a *_ns property declares value_unit \"ns\" and the generator emits the ns -> s conversion; the pair of units is checked against a closed list, so an unconverted nanosecond value cannot be silently bucketed against second boundaries" }
+    { "id": "otel_duration_s", "unit": "s", "authority": "OpenTelemetry eBPF Instrumentation (OBI, ex-Beyla) pkg/export/bucket.go -- the default duration buckets its HTTP/RPC duration metrics use. They were adopted for http.server.request.duration so that the two agents' histograms are comparable, and the array itself is now the declaration both sides read", "values": [0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1, 2.5, 5, 7.5, 10], "note": "seconds. A record carries nanoseconds, so a metric over a *_ns property declares value_unit \"ns\" and the generator emits the ns -> s conversion; the pair of units is checked against a closed list, so an unconverted nanosecond value cannot be silently bucketed against second boundaries" },
+    { "id": "log2_ns_31", "unit": "ns", "authority": "derived from the kernel's own histogram: every boundary is 2^k - 1, the exclusive upper edge of a spnl_hist_log2 slot, so each bucket is a whole number of slots and no count is ever split. The count 31 is Splunk Observability Cloud's documented ceiling (\"Use no more than 31 bucket boundaries when sending histograms\"; more are dropped -- measured, and dropped silently behind HTTP 200). The split point between one-to-one and paired buckets is measured, not chosen", "values": [1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767, 65535, 131071, 262143, 524287, 1048575, 2097151, 4194303, 8388607, 16777215, 33554431, 67108863, 134217727, 536870911, 2147483647, 8589934591, 34359738367], "note": "nanoseconds. Buckets 0..26 are log2 slots 0..26 exactly (1 ns .. 134 ms); buckets 27..30 hold two slots each (.. 34.4 s); bucket 31 is everything above 2^35 ns and is unbounded, like the top bucket of any explicit histogram. A latency slower than 34.4 s is therefore reported as 34.4 s -- the same failure OBI's own seconds ruler has above 10 s, one order of magnitude further out" }
   ],
   "channels": [
     {
@@ -55,9 +56,9 @@
       "record_struct": "<unit>_dns_event",
       "ringbuf_map": "<unit>_dns_events",
       "ringbuf_size": "256 * 1024",
-      "record_bytes": 120,
+      "record_bytes": 128,
       "record_min_bytes": 120,
-      "required_through": "",
+      "required_through": "duration_ns",
       "producers": ["emit_dns", "dns_emit"],
       "fields": [
         { "name": "hdr", "ctype": "struct spnl_event_hdr", "count": 0, "offset": 0, "bytes": 16, "expose": "", "note": "the 16-byte common event header (type/version/reserved/timestamp)" },
@@ -65,7 +66,8 @@
         { "name": "comm", "ctype": "char", "count": 16, "offset": 20, "bytes": 16, "expose": "str", "note": "bpf_get_current_comm -> process.executable.name" },
         { "name": "raw", "ctype": "unsigned char", "count": 64, "offset": 36, "bytes": 64, "expose": "", "note": "first 64B of the DNS payload; QNAME parsed in userspace" },
         { "name": "cgid", "ctype": "__u64", "count": 0, "offset": 104, "bytes": 8, "expose": "int", "note": "cgroup id -> k8s.* pod attribution" },
-        { "name": "duration_ns", "ctype": "__u64", "count": 0, "offset": 112, "bytes": 8, "expose": "int", "note": "resolution RTT; 0 = query-only" }
+        { "name": "duration_ns", "ctype": "__u64", "count": 0, "offset": 112, "bytes": 8, "expose": "int", "note": "resolution RTT; 0 = query-only" },
+        { "name": "raw_status", "ctype": "__s32", "count": 0, "offset": 120, "bytes": 4, "expose": "", "note": "what happened when the kernel tried to fill `raw`. 0 = the bytes are the sender's; -1 = there was no user buffer to read (msg_iter described pages or kernel memory); anything else = the errno bpf_probe_read_user returned. The return value used to be discarded, so a record carrying no bytes was indistinguishable from one whose bytes did not parse, and the drain reported the second reason for the first cause. NOT exposed to Ruby: a bare errno is exactly the kind of number the value-map rule is about, and what a consumer wants -- `ev.qname` -- is already empty in both cases. The drain reads it to pick the drop reason it prints" }
       ],
       "egress": {
         "push_fn": "spnl_otlp_dns_span_push",

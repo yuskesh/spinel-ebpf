@@ -1,6 +1,6 @@
 {
     __u64 _hk@E@ = (__u64)(unsigned long)(@SK@);
-    void *_hb@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
+    void *_hb@E@ = spnl_msg_ubuf((struct msghdr *)(unsigned long)(@MSG@));
     if (_hb@E@ && !bpf_map_lookup_elem(&@UNIT@_http_pending, &_hk@E@)) {
         struct @UNIT@_http_pending_st _hp@E@ = {};
         if (bpf_probe_read_user(_hp@E@.req, sizeof(_hp@E@.req), _hb@E@) == 0 && spnl_is_http_req(_hp@E@.req)) {

@@ -828,6 +828,26 @@ static int metric_total(void) {
  * until somebody edits one -- the same reason a value map is generated rather
  * than written twice. A TU that wants only this block defines
  * SPNL_RECORD_MIRROR_MACROS_ONLY before including. */
+/* Shortest decimal that reads back as exactly this double.
+ *
+ * The default %g is 6 significant digits, which is not enough to round-trip a
+ * value -- and a bucket boundary *is* a value. The log2 ruler exposed it:
+ * 1048575 (the exclusive upper edge of slot 20) printed as 1.04858e+06 =
+ * 1048580, which moves five integers into the neighbouring bucket and quietly
+ * falsifies the "a bucket is a whole number of slots" property that set is
+ * built on. %.17g always round-trips but spells 0.005 as 0.0050000000000000001,
+ * so try increasing precision and stop at the first spelling that reads back
+ * identical -- exact, and still readable in the affordance JSON. */
+static const char *dbl_exact(double v) {
+    static char buf[64];
+    for (int prec = 6; prec <= 17; prec++) {
+        snprintf(buf, sizeof buf, "%.*g", prec, v);
+        if (strtod(buf, NULL) == v) return buf;
+    }
+    snprintf(buf, sizeof buf, "%.17g", v);
+    return buf;
+}
+
 static void emit_bounds_macros(void) {
     printf("#ifndef SPNL_RECORD_MIRROR_BOUNDS_H\n#define SPNL_RECORD_MIRROR_BOUNDS_H\n");
     for (int i = 0; i < g_nbounds; i++) {
@@ -837,7 +857,7 @@ static void emit_bounds_macros(void) {
         printf("\n/* bounds set \"%s\", in %s -- %s */\n", b->id, b->unit, b->authority);
         printf("#define SPNL_BOUNDS_%s_N %d\n", BID, b->nvalues);
         printf("#define SPNL_BOUNDS_%s_INIT {", BID);
-        for (int k = 0; k < b->nvalues; k++) printf("%s%g", k ? ", " : " ", b->values[k]);
+        for (int k = 0; k < b->nvalues; k++) printf("%s%s", k ? ", " : " ", dbl_exact(b->values[k]));
         printf(" }\n");
     }
     printf("#endif /* SPNL_RECORD_MIRROR_BOUNDS_H */\n");
@@ -1278,7 +1298,7 @@ static void json_metrics(const CcRecSchema *s) {
         if (hist) {
             const CcBoundsSet *b = find_bounds(m->bounds, m->id);
             fputs("\"boundaries\": [", stdout);
-            for (int k = 0; k < b->nvalues; k++) printf("%s%g", k ? ", " : "", b->values[k]);
+            for (int k = 0; k < b->nvalues; k++) printf("%s%s", k ? ", " : "", dbl_exact(b->values[k]));
             fputs("], ", stdout);
             json_kv("bounds_authority", b->authority, ", ");
         }
@@ -1516,7 +1536,7 @@ static void emit_json(void) {
         json_kv("unit", b->unit, ", ");
         json_kv("authority", b->authority, ", ");
         fputs("\"values\": [", stdout);
-        for (int k = 0; k < b->nvalues; k++) printf("%s%g", k ? ", " : "", b->values[k]);
+        for (int k = 0; k < b->nvalues; k++) printf("%s%s", k ? ", " : "", dbl_exact(b->values[k]));
         fputs("], ", stdout);
         json_kv("note", b->note ? b->note : "", " }");
     }

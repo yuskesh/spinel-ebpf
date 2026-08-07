@@ -391,6 +391,26 @@ def cmd_compile(argv)
 
   ast_path, ir_path, base = run_spinel_to_ir(input, opts[:output_dir])
 
+  # This return is BEFORE `Validate.validate!`, and that is load-bearing, not an
+  # oversight. Measured across every entry point, the eBPF validator refuses a
+  # program using a retired surface at `compile`, `check`, `--ebpf-dispatch`,
+  # `--emit-sources`, `--build` and `--instrument --instrument-self`, and does not
+  # fire on exactly two: `--native-only` (here) and `--instrument` (whose TARGET is
+  # a plain native workload -- its agent comes back through this function and IS
+  # validated).
+  #
+  # Those two are the same fact: the native side does not run the eBPF validator.
+  # That is required, not tolerated. `--native-only` must accept exactly what
+  # upstream spinel accepts -- tools/form_verify.sh compares the output byte for
+  # byte -- so refusing a program upstream compiles would make this tool a fork in
+  # acceptance, which is the drift that check exists to detect. Controls:
+  # `--native-only` is equally silent about an unknown builtin and about an attach
+  # handler falling back to native, so this is the mode's definition, not a hole in
+  # one check.
+  #
+  # It is also not the failure the refusals close. Those are about a binary that
+  # prints "BPF loaded and attached" and serves nothing; the native-only path emits
+  # no glue, so there is no such claim for it to make.
   if mode == :native_only
     c_path = run_spinel_to_c(input, opts[:output_dir], ast_path, ir_path)
     puts "[spinel-ebpf] native-only: wrote #{c_path}"
@@ -3640,8 +3660,11 @@ end
 def cmd_check(argv)
   opts = { json: false, output_dir: nil, verbose: false }
   parser = OptionParser.new do |op|
-    op.banner = "Usage: spinel-ebpf check <file.rb> [--json]"
-    op.on("--json", "Emit the structured result { file, ok, failed_stage, stages:[...] }") { opts[:json] = true }
+    op.banner = "Usage: spinel-ebpf check <file.rb> [--json]\n" \
+                "Exit: 0 = checked and passed, 1 = the probe failed a stage,\n" \
+                "      2 = could not check here (no stage ran -- run it in the build container)"
+    op.on("--json", "Emit the structured result { file, ok, failed_stage, unverifiable, stages:[...] }\n" \
+                    "                                     (ok is tri-state: true / false / null=unverifiable)") { opts[:json] = true }
     op.on("-o DIR", "--output DIR", "Work directory (default: a temp dir; artifacts are throwaway)") { |d| opts[:output_dir] = d }
     op.on("-v", "--verbose", "Verbose output") { opts[:verbose] = true }
     op.on("-h", "--help", "Show this message") { puts op; exit 0 }
@@ -3670,7 +3693,16 @@ def cmd_check(argv)
 
   result = SpinelEbpf::Check.assemble(input, stages)
   puts(opts[:json] ? SpinelEbpf::Check.to_json(result) : SpinelEbpf::Check.human(result))
-  result[:ok] ? 0 : 1
+  # 0 = checked and passed, 1 = the probe failed a stage, 2 = could not check
+  # here (no stage ran). 2 is separate on purpose: the remedy is to run this in
+  # the build container, not to edit the probe, and a caller that treats "could
+  # not check" as success is exactly the silent pass this exit code exists to
+  # prevent.
+  case result[:ok]
+  when true  then 0
+  when false then 1
+  else 2
+  end
 end
 
 # Stage 1: frontend (spinel -> .ast/.ir) + parse + partition + the validate gate.
@@ -3923,6 +3955,8 @@ when "--help", "-h", nil
       check        Fast verify loop: run partition -> codegen -> clang ->
                    load+verifier and report {stage, ok, error} for each, stopping
                    at the first failure. --json for machine-readable output.
+                   Exit 0 = passed, 1 = the probe failed a stage, 2 = could not
+                   check here (no stage ran; run it in the build container).
       describe     Show emit sites <-> on_emit consumers binding, plus the
                    packed-record channels a probe writes and the OTLP attributes
                    they turn into

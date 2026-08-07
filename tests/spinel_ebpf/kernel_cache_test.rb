@@ -3,15 +3,35 @@
 require "minitest/autorun"
 require "spinel_ebpf/parse_spinel_ast"
 require "spinel_ebpf/kernel_cache"
-require "spinel_ebpf/partition"
-require "spinel_ebpf/codegen_bpf"
 
-# Parsing `kernel_cache "/path","body"` declarations.
-# The AST text below is the verbatim `spinel --dump-ast --no-line-map` output
-# for:
-#   kernel_cache "/health", "OK\n"
-#   kernel_cache "/version", "spinel 1.0\n"
+# What this file is, and what it is NOT.
+#
+# `kernel_cache` is a REFUSED surface: it was built in the retired Ruby
+# generator, the C port never carried it, and it is a compile-time error now
+# (Validate check (6)). So there is no live behaviour to fix here.
+#
+# This file used to have ten tests, and six of them pinned the behaviour of the
+# refused path -- partitioning synthesizing an eBPF method the tool then refuses,
+# and the retired generator's map-backed multi-route bundle. Green, and green
+# about nothing anyone can reach. Worse, nothing said whether they were a RECORD
+# of a retired implementation or a CONTRACT the tool still owes. Those six are
+# gone; the generator's text itself is kept, in the generator, labelled (it still
+# compiles and loads on a current kernel, so it is a usable reference for a port).
+#
+# What survives is the one thing that is still live and still consequential:
+# the refusal's BLAST RADIUS. `KernelCache.declared_paths` decides which programs
+# get refused. Too narrow and a `kernel_cache` form slips through to the silent
+# no-op the refusal closed; too wide and a program that merely has a method named
+# `kernel_cache` is refused for no reason. Both directions are tested below.
+#
+# The refusal's message quality is error_quality_test.rb's business
+# (test_kernel_cache_directive_is_loud); that it fires at every entry point which
+# runs the eBPF validator is recorded at the `mode == :native_only` return in
+# bin/spinel-ebpf, the one place it deliberately does not.
 class KernelCacheTest < Minitest::Test
+  # Verbatim `spinel --dump-ast --no-line-map` output for:
+  #   kernel_cache "/health", "OK\n"
+  #   kernel_cache "/version", "spinel 1.0\n"
   TWO_DECLS = <<~AST
     ROOT 0
     SOURCE_FILE kc.rb
@@ -45,84 +65,9 @@ class KernelCacheTest < Minitest::Test
     R 0 statements 1
   AST
 
-  def parse(text)
-    SpinelEbpf::ParseSpinelAst.parse(text)
-  end
-
-  def test_parses_two_declarations_in_order
-    decls = SpinelEbpf::KernelCache.declarations(parse(TWO_DECLS))
-    assert_equal 2, decls.length
-    assert_equal "/health", decls[0].path
-    assert_equal "OK\n", decls[0].body                 # %0A decoded
-    assert_equal "/version", decls[1].path
-    assert_equal "spinel 1.0\n", decls[1].body         # %20 / %0A decoded
-  end
-
-  def test_http_response_builds_framing_from_body
-    decls = SpinelEbpf::KernelCache.declarations(parse(TWO_DECLS))
-    assert_equal "HTTP/1.0 200 OK\r\nContent-Length: 3\r\n\r\nOK\n", decls[0].http_response
-  end
-
-  def test_no_declarations_when_none_present
-    plain = <<~AST
-      ROOT 0
-      N 0 ProgramNode
-      N 1 StatementsNode
-      N 2 CallNode
-      S 2 name puts
-      R 2 receiver -1
-      N 3 ArgumentsNode
-      N 4 StringNode
-      S 4 content hi
-      A 3 arguments 4
-      R 2 arguments 3
-      R 2 block -1
-      A 1 body 2
-      R 0 statements 1
-    AST
-    assert_empty SpinelEbpf::KernelCache.declarations(parse(plain))
-  end
-
-  # AST for: kernel_cache "/api", "PONG\n"  (distinct from the default /health route)
-  API_DECL = <<~AST
-    ROOT 0
-    N 0 ProgramNode
-    N 1 StatementsNode
-    N 2 CallNode
-    S 2 name kernel_cache
-    R 2 receiver -1
-    N 3 ArgumentsNode
-    N 4 StringNode
-    S 4 content /api
-    N 5 StringNode
-    S 5 content PONG%0A
-    A 3 arguments 4,5
-    R 2 arguments 3
-    R 2 block -1
-    A 1 body 2
-    R 0 statements 1
-  AST
-
-  NO_DECL = <<~AST
-    ROOT 0
-    N 0 ProgramNode
-    N 1 StatementsNode
-    A 1 body
-    R 0 statements 1
-  AST
-
-  # partition synthesizes a pure-XDP TCP slice from declarations.
-  def test_partition_synthesizes_slice_method_when_declared
-    methods = []
-    SpinelEbpf::Partition.synthesize_kernel_cache_slice!(methods, parse(API_DECL))
-    m = methods.find { |x| x.method_name == "xdp__tcp_slice__kernel_cache" }
-    refute_nil m, "expected a synthesized xdp__tcp_slice__kernel_cache method"
-    assert_equal :ebpf, m.tag
-    assert_equal :top_level, m.scope
-  end
-
-  # runtime body: `kernel_cache "/ping", body` (body is a variable).
-  # Only the path must be a literal; the body is populated at runtime via sp_kc_set.
+  # `kernel_cache "/ping", body` -- the runtime-body form. The body is not a
+  # literal, and the glue that used to populate it (sp_kc_set) has been deleted,
+  # so this form reaches nothing either and must still be refused.
   RUNTIME_BODY = <<~AST
     ROOT 0
     N 0 ProgramNode
@@ -142,73 +87,52 @@ class KernelCacheTest < Minitest::Test
     R 0 statements 1
   AST
 
-  def test_parses_runtime_body_declaration_path_only
-    decls = SpinelEbpf::KernelCache.declarations(parse(RUNTIME_BODY))
-    assert_equal 1, decls.length
-    assert_equal "/ping", decls[0].path
-    assert_nil decls[0].body          # runtime body -> not known at compile time
-    refute decls[0].literal?
-    # still synthesizes the slice (the path drives the XDP match)
-    methods = []
-    SpinelEbpf::Partition.synthesize_kernel_cache_slice!(methods, parse(RUNTIME_BODY))
-    assert(methods.any? { |m| m.method_name == "xdp__tcp_slice__kernel_cache" })
+  def parse(text)
+    SpinelEbpf::ParseSpinelAst.parse(text)
   end
 
-  def test_partition_no_synthesis_without_declarations
-    methods = []
-    SpinelEbpf::Partition.synthesize_kernel_cache_slice!(methods, parse(NO_DECL))
-    assert_empty methods
+  # ---------- caught: the forms that must not slip past the refusal ----------
+
+  # Every declaration is reported, in source order, so the message can name all
+  # of them ("1 declaration(s): \"/ping\"" is the part that tells the author WHERE).
+  def test_reports_every_declared_path_in_source_order
+    assert_equal ["/health", "/version"],
+                 SpinelEbpf::KernelCache.declared_paths(parse(TWO_DECLS))
   end
 
-  # the tcp_slice bundle matches the declared route, and serves the response from
-  # the runtime-populated bpf_kc_resp map (not a const array).
-  def test_bundle_uses_declared_path_and_map_backed_response
-    ast = parse(API_DECL)
-    ctx = SpinelEbpf::CodegenBpf::EmitContext.new(ast: ast)
-    bundle = SpinelEbpf::CodegenBpf.emit_tcp_slice_bundle(ctx)
-    assert_includes bundle, 'prefix "GET /api "'
-    refute_includes bundle, "GET /health "
-    # Phase 1: response comes from the map, not a baked-in const array.
-    assert_includes bundle, "bpf_kc_resp SEC(\".maps\")"
-    assert_includes bundle, "struct spnl_kc_resp { __u8 bytes[#{SpinelEbpf::CodegenBpf::KERNEL_CACHE_RESP_CAP}]; }"
-    assert_includes bundle, "bpf_map_lookup_elem(&bpf_kc_resp"
-    # wire frame sized to the ACTUAL response length (runtime _rlen), copied
-    # with a bounded loop, payload checksummed via the precomputed seed (fixed-size
-    # bpf_csum_diff) — so real-client frames SHRINK (no adjust_tail-grow), which
-    # native XDP_TX needs on NICs like nxp_enetc4.
-    assert_includes bundle, "bpf_kc_resp_len SEC(\".maps\")"
-    assert_includes bundle, "bpf_kc_resp_csum SEC(\".maps\")"
-    assert_includes bundle, "out[_i] = _kc->bytes[_i];"             # bounded variable-length copy
-    assert_includes bundle, "spnl_tcp_slice_recompute_csums_pc"      # precompute-seed csum path
-    assert_includes bundle, "20 + 20 + (int)_rlen"                   # frame sized to actual length
-    refute_includes bundle, "__builtin_memcpy(out, _kc->bytes,"      # no fixed CAP memcpy for kernel_cache
-    refute_includes bundle, "spnl_tcp_slice_resp_body"          # no compile-time const array for kernel_cache
+  # The second argument's type is deliberately not inspected: a runtime body is
+  # still a declaration. This is the form that shipped, so it is the one most
+  # likely to be written, and it reaches exactly as little as the literal one.
+  def test_runtime_body_is_still_a_declaration
+    assert_equal ["/ping"], SpinelEbpf::KernelCache.declared_paths(parse(RUNTIME_BODY))
   end
 
-  # multiple declarations => multi-route match_route + N-slot map.
-  def test_bundle_multi_route_dispatch
-    ctx = SpinelEbpf::CodegenBpf::EmitContext.new(ast: parse(TWO_DECLS))   # /health + /version
-    bundle = SpinelEbpf::CodegenBpf.emit_tcp_slice_bundle(ctx)
-    assert_includes bundle, "spnl_tcp_slice_match_route"
-    # both declared paths checked, returning their declaration-order slot
-    assert_match(/p\[4\] == '\/'.*return 0;/m, bundle)   # /health -> slot 0
-    assert_includes bundle, "return 1;"                  # /version -> slot 1
-    assert_includes bundle, "__uint(max_entries, 2);"    # one map slot per route
-    # response looked up by the matched slot, not a fixed entry 0
-    assert_includes bundle, "(kc_slot >= 0) ? (__u32)kc_slot : 0"
+  # ---------- not caught: the refusal must not spread ----------
+
+  def test_no_declarations_when_none_present
+    plain = <<~AST
+      ROOT 0
+      N 0 ProgramNode
+      N 1 StatementsNode
+      N 2 CallNode
+      S 2 name puts
+      R 2 receiver -1
+      N 3 ArgumentsNode
+      N 4 StringNode
+      S 4 content hi
+      A 3 arguments 4
+      R 2 arguments 3
+      R 2 block -1
+      A 1 body 2
+      R 0 statements 1
+    AST
+    assert_empty SpinelEbpf::KernelCache.declared_paths(parse(plain))
   end
 
-  def test_bundle_falls_back_to_const_array_without_declarations
-    ctx = SpinelEbpf::CodegenBpf::EmitContext.new(ast: parse(NO_DECL))
-    bundle = SpinelEbpf::CodegenBpf.emit_tcp_slice_bundle(ctx)
-    assert_includes bundle, 'prefix "GET /health "'
-    assert_includes bundle, "spnl_tcp_slice_resp_body"          # hand-written slice keeps the const path
-    refute_includes bundle, "bpf_kc_resp"
-  end
-
+  # `kernel_cache "/x"` (wrong arity) and `obj.kernel_cache "/y","z"` (has a
+  # receiver) are somebody else's method that happens to share the name. Refusing
+  # them would fail a program for a word, not for a surface.
   def test_ignores_wrong_arity_and_method_receiver
-    # `kernel_cache "/x"` (1 arg) and `obj.kernel_cache "/y","z"` (has receiver)
-    # must both be ignored — only bare 2-arg calls are declarations.
     ast = <<~AST
       ROOT 0
       N 0 ProgramNode
@@ -241,6 +165,22 @@ class KernelCacheTest < Minitest::Test
       A 1 body 2,5
       R 0 statements 1
     AST
-    assert_empty SpinelEbpf::KernelCache.declarations(parse(ast))
+    assert_empty SpinelEbpf::KernelCache.declared_paths(parse(ast))
+  end
+
+  # ---------- the surface has no other live consumer ----------
+  #
+  # The finding in one assertion: if a third caller appears in src/, either
+  # someone is porting the surface back (then this file is the wrong shape) or a
+  # refused surface has grown an implementation again.
+  def test_the_detector_has_exactly_one_live_consumer
+    src = File.expand_path("../../src/spinel_ebpf", __dir__)
+    callers = Dir[File.join(src, "*.rb")].select do |f|
+      File.read(f).scan(/^[^#]*KernelCache\.declared_paths/).any?
+    end.map { |f| File.basename(f) }.sort
+    assert_equal ["codegen_bpf.rb", "validate.rb"], callers,
+                 "kernel_cache is a refused surface: validate.rb refuses it and the " \
+                 "retired generator (codegen_bpf.rb, unreachable from any CLI " \
+                 "invocation) keeps the record. A third caller means it is live again."
   end
 end

@@ -39,7 +39,7 @@
 #   DNS_SUFFIX=.invalid OTLP_ENDPOINT=http://127.0.0.1:4318 ./build/audit_dns_typed/audit_dns_typed
 
 def kprobe__udp_sendmsg(sk, msg, len)
-  if kfield(sk, "sock", "__sk_common.skc_dport") == 13568   # 0x3500 = be16 of port 53
+  if udp_dport(sk, msg) == 53   # the destination of THIS datagram, not of the socket
     emit_dns(msg)
   end
   0

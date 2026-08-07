@@ -546,6 +546,18 @@ static uint64_t            g_ev_seed;
 static int                 g_ev_batch_open;   /* has a batch been opened this drain cycle */
 static int                 g_ev_sent;         /* spans buffered before the flush, for reporting */
 
+/* Which channel's record each span slot was built from.
+ *
+ * The concise push has the drain and the send inside one function, so it can
+ * call spnl_channel_out(map_name, ...) on the spot. The explicit form (a typed
+ * consumer) splits that across three: the drain is the only place that knows
+ * the map name, the send is the only place that knows a span went out. So the
+ * explicit form counted no `out` at all and its balance report printed `in N`
+ * and nothing else -- leaving "the consumer filtered half of these" unreadable
+ * in the one form that can filter. The drain parks the name, to_span pins it to
+ * the slot, the send reads it. */
+static const char *g_ev_map[OTLP_EV_SPAN_SLOTS];
+
 /* ---- network audit spans: a packed connect event becomes a network span ---- */
 /* The connection record was the worst of the hand-written mirrors: a comment block
  * spelling out `pid(0..4) comm(4..20) ... daddr6_lo(64..72)` next to eleven
@@ -731,9 +743,14 @@ const spnl_rec_conn_t *spnl_rec_conn_at(int i) {
     return (i >= 0 && i < g_rec_conn_n) ? &g_rec_conn[i] : NULL;
 }
 
+/* The map name this channel was last drained from (a string literal owned by
+ * the glue), so a span built from one of its records can be credited. */
+static const char *g_rec_conn_map;
+
 int spnl_rec_conn_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct conn_collector coll = { g_rec_conn, 0, OTLP_MAX_LOGS };
+    g_rec_conn_map = map_name;
     g_rec_conn_n = 0;
     if (otlp_drain_ms(obj, map_name, conn_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
     g_rec_conn_n = (int)coll.n;
@@ -756,6 +773,7 @@ int spnl_rec_conn_to_span(int i) {
     if (!conn_fill_span(r, otlp_ktime_to_unix_off(), &g_ev_seed, &g_ev_span[slot],
                         g_ev_attrs[slot], g_ev_name[slot], sizeof g_ev_name[slot]))
         return 0;
+    g_ev_map[slot] = g_rec_conn_map;
     return slot + 1;
 }
 
@@ -861,14 +879,26 @@ int spnl_otlp_dns_span_push_obj(struct bpf_object *obj, const char *map_name, co
         otlp_generic_span_t s;
         otlp_kv_t attrs[8];
         static char namebuf[160];
+        /* Two different things end in "no span", and the advice for them is
+         * opposite. Ask the record which one happened instead of inferring it
+         * from bytes that are zero either way. */
+        if (coll.recs[i].raw_status != 0) {
+            spnl_channel_dropped(map_name, "unreadable_payload",
+                "a send was seen but its bytes could not be read, so `raw` is empty rather "
+                "than wrong. raw_status == -1 means msg_iter described pages or kernel memory "
+                "(a splice/vmsplice-style send), not a user buffer; any other value is the "
+                "errno bpf_probe_read_user returned. This is not a filter problem -- the "
+                "attach point and the port test both worked.");
+            continue;
+        }
         if (!dns_fill_span(&coll.recs[i], off, &seed, &s, attrs, namebuf, sizeof namebuf)) {
             /* The channel's egress contract says a record whose QNAME does not
              * parse produces no span. Counting it here turns that silent
              * discard into something a reader can see. */
             spnl_channel_dropped(map_name, "unparseable_qname",
-                "the record's raw bytes are not a DNS query. emit_dns expects the "
-                "payload of a UDP send to port 53 -- check the attach point "
-                "(udp_sendmsg) and the port filter (dport == 13568).");
+                "the record's raw bytes were read but are not a DNS query. emit_dns expects "
+                "the payload of a UDP send to port 53 -- check the attach point "
+                "(udp_sendmsg) and the port filter (udp_dport(sk, msg) == 53).");
             continue;
         }
         otlp_batch_add(&g_span_batch, &s);   /* buffer it; the batch flushes at the end of the cycle */
@@ -904,9 +934,14 @@ const spnl_rec_dns_t *spnl_rec_dns_at(int i) {
  * Ruby's handles are the indices 0..n-1. timeout_ms is how long a single poll
  * waits, with 0 meaning non-blocking and a negative value meaning the 100ms the
  * one-call form uses. */
+/* The map name this channel was last drained from (a string literal owned by
+ * the glue), so a span built from one of its records can be credited. */
+static const char *g_rec_dns_map;
+
 int spnl_rec_dns_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct dns_collector coll = { g_rec_dns, 0, OTLP_MAX_LOGS };
+    g_rec_dns_map = map_name;
     g_rec_dns_n = 0;
     if (otlp_drain_ms(obj, map_name, dns_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
     g_rec_dns_n = (int)coll.n;
@@ -933,6 +968,7 @@ int spnl_rec_dns_to_span(int i) {
     if (!dns_fill_span(r, otlp_ktime_to_unix_off(), &g_ev_seed, &g_ev_span[slot],
                        g_ev_attrs[slot], g_ev_name[slot], sizeof g_ev_name[slot]))
         return 0;
+    g_ev_map[slot] = g_rec_dns_map;
     return slot + 1;
 }
 
@@ -952,6 +988,13 @@ int spnl_otlp_span_send(int handle, const char *endpoint) {
     }
     otlp_batch_add(&g_span_batch, &g_ev_span[handle - 1]);
     g_ev_sent++;
+    /* The balance report's `out`: one span accepted is one output. The generated
+     * driver calls the handler once per record, so for an ordinary consumer
+     * `in - out` is the number of records it chose not to send -- and that holds
+     * for both spellings of the choice, since `next` and a declared `keep_if`
+     * both lower to the same `return 0`. A probe that sends the same record
+     * twice raises `out` twice, which is not a lie: it produced two spans. */
+    if (g_ev_map[handle - 1]) spnl_channel_out(g_ev_map[handle - 1], 1);
     return 1;
 }
 
@@ -1060,9 +1103,14 @@ const spnl_rec_l7_t *spnl_rec_l7_at(int i) {
     return (i >= 0 && i < g_rec_l7_n) ? &g_rec_l7[i] : NULL;
 }
 
+/* The map name this channel was last drained from (a string literal owned by
+ * the glue), so a span built from one of its records can be credited. */
+static const char *g_rec_l7_map;
+
 int spnl_rec_l7_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct l7_collector coll = { g_rec_l7, 0, OTLP_MAX_LOGS };
+    g_rec_l7_map = map_name;
     g_rec_l7_n = 0;
     if (otlp_drain_ms(obj, map_name, l7_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
     g_rec_l7_n = (int)coll.n;
@@ -1085,6 +1133,7 @@ int spnl_rec_l7_to_span(int i) {
     if (!l7_fill_span(r, otlp_ktime_to_unix_off(), &g_ev_seed, &g_ev_span[slot],
                       g_ev_attrs[slot], g_ev_name[slot], sizeof g_ev_name[slot]))
         return 0;
+    g_ev_map[slot] = g_rec_l7_map;
     return slot + 1;
 }
 
@@ -1253,9 +1302,14 @@ const spnl_rec_http_t *spnl_rec_http_at(int i) {
     return (i >= 0 && i < g_rec_http_n) ? &g_rec_http[i] : NULL;
 }
 
+/* The map name this channel was last drained from (a string literal owned by
+ * the glue), so a span built from one of its records can be credited. */
+static const char *g_rec_http_map;
+
 int spnl_rec_http_drain_obj(struct bpf_object *obj, const char *map_name, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct http_collector coll = { g_rec_http, 0, OTLP_MAX_LOGS };
+    g_rec_http_map = map_name;
     g_rec_http_n = 0;
     if (otlp_drain_ms(obj, map_name, http_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
     g_rec_http_n = (int)coll.n;
@@ -1278,6 +1332,7 @@ int spnl_rec_http_to_span(int i) {
     if (!http_fill_span(r, otlp_ktime_to_unix_off(), &g_ev_seed, &g_ev_span[slot],
                         g_ev_attrs[slot], g_ev_name[slot], sizeof g_ev_name[slot]))
         return 0;
+    g_ev_map[slot] = g_rec_http_map;
     return slot + 1;
 }
 
@@ -1850,6 +1905,9 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
 }
 
 /* ---- typed record consumer: `on_emit :offcpu do |ev|` ---- */
+/* The map name this channel was last drained from (see the conn section). */
+static const char *g_rec_offcpu_map;
+
 const spnl_rec_offcpu_t *spnl_rec_offcpu_at(int i) {
     return (i >= 0 && i < g_rec_offcpu_n) ? &g_rec_offcpu[i] : NULL;
 }
@@ -1860,6 +1918,7 @@ int spnl_rec_offcpu_drain_obj(struct bpf_object *obj, const char *map_name,
                               const char *stacks_map, int timeout_ms) {
     if (!obj || !map_name) return -1;
     struct offcpu_collector coll = { g_rec_offcpu, 0, OTLP_MAX_LOGS };
+    g_rec_offcpu_map = map_name;
     g_rec_offcpu_n = 0;
     offcpu_set_stack_ctx(obj, stacks_map);
     if (otlp_drain_ms(obj, map_name, offcpu_rb_cb, &coll, timeout_ms < 0 ? 100 : timeout_ms) != 0) return -1;
@@ -1889,6 +1948,7 @@ int spnl_rec_offcpu_to_span(int i) {
     if (!offcpu_fill_span(r, now_unix, &g_ev_seed, &g_ev_span[slot],
                           g_ev_attrs[slot], g_ev_name[slot], sizeof g_ev_name[slot]))
         return 0;
+    g_ev_map[slot] = g_rec_offcpu_map;
     return slot + 1;
 }
 

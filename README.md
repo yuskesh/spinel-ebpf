@@ -352,16 +352,21 @@ channel's contract. Each drop reason carries what to check. `** suspicious **`
 appears only when the drops dominate the traffic — discarding some records is
 normal, discarding nearly all of them usually means the attach point is wrong.
 
-Records that the probe's *own* consumer skipped are counted separately as
-`filtered` and are never flagged. Emitting broadly and narrowing in userspace is a
-design this project recommends, and a warning there would contradict it.
+Records that the probe's *own* consumer skipped have no counter of their own: they
+are the difference between `in` and `out`, and they are never flagged. Emitting
+broadly and narrowing in userspace is a design this project recommends, and a
+warning there would contradict it. There is no separate number because there could
+not be an honest one — a hand-written `next` and a declared `keep_if` both lower to
+the same `return 0` in the generated handler, so only one of the two spellings
+could ever be counted, and a probe written in the other spelling would then look
+like it filtered nothing. The subtraction covers both.
 
 Two other values:
 
 ```sh
 SPNL_CHANNEL_REPORT=0    # silent
 SPNL_CHANNEL_REPORT=kv   # one machine-readable line per channel:
-                         #   spnl.channel <name> drained=1 in=412 out=412 dropped=0 filtered=0
+                         #   spnl.channel <name> drained=1 in=412 out=412 dropped=0
 ```
 
 `kv` exists so that tools parse a stable projection rather than the prose; the prose

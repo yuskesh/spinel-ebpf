@@ -8,7 +8,6 @@
 
 require_relative "parse_spinel_ir"
 require_relative "parse_spinel_ast"
-require_relative "kernel_cache"
 require_relative "capabilities"   # the attach-word vocabulary (no cycle: capabilities requires nothing)
 
 module SpinelEbpf
@@ -227,6 +226,13 @@ module SpinelEbpf
       :class_name,      # String or nil
       :method_name,     # String (or "<main>" for main)
       :body_id,         # Integer (AST node id)
+      # The IR's OWN body node id for the same method. Not the same number as
+      # :body_id -- the two numbering spaces have been measured drifting by 1216
+      # -- and the difference matters here, because the IR's per-body scope
+      # records (SN/ST) are keyed by the IR id. nil when the method has no IR row
+      # (a synthesised DSL / reactor handler), in which case there is nothing to
+      # look up.
+      :ir_body_id,      # Integer (IR node id) or nil
       :flags,           # MethodFlags
       :tag,             # :ebpf | :native | :error  (filled in Phase 3)
       # when a method came from a `class Foo < BPF::Bar` block we
@@ -601,7 +607,7 @@ module SpinelEbpf
         next if body.nil?
         results << MethodInfo.new(
           scope: :top_level, class_name: nil, method_name: name,
-          body_id: body, flags: MethodFlags.default, tag: nil,
+          body_id: body, ir_body_id: bid, flags: MethodFlags.default, tag: nil,
         )
       end
 
@@ -647,18 +653,19 @@ module SpinelEbpf
           # carries (spinel surfaces module methods here too).
           body = resolve_ast_body_id(ast_defs, cname, name)
           next if body.nil?
+          ir_bid = bid   # keep the IR's id before the AST id shadows it
           bid = body
           if dsl_prefix
             results << MethodInfo.new(
               scope: :top_level, class_name: nil,
               method_name: "#{dsl_prefix}#{name}",
-              body_id: bid, flags: MethodFlags.default, tag: nil,
+              body_id: bid, ir_body_id: ir_bid, flags: MethodFlags.default, tag: nil,
               dsl_class_idx: ci, dsl_orig_name: name,
             )
           else
             results << MethodInfo.new(
               scope: :class, class_name: cname, method_name: name,
-              body_id: bid, flags: MethodFlags.default, tag: nil,
+              body_id: bid, ir_body_id: ir_bid, flags: MethodFlags.default, tag: nil,
             )
           end
         end
@@ -1333,28 +1340,26 @@ module SpinelEbpf
         # inference can tell us a param or return is float. Mark uses_float
         # accordingly so partition sees indirect float usage.
         refine_flags_from_signature(mi, ir)
+        # ...and the locals, which no pass looked at. A bignum local is the one
+        # type whose value is already destroyed by the time we see it.
+        refine_flags_from_locals(mi, ir)
       end
       fixpoint_propagate(methods)
       methods.each { |mi| decide_tag!(mi, force_native) }
-      synthesize_kernel_cache_slice!(methods, ast)
+      # A synthesized `xdp__tcp_slice__kernel_cache` :ebpf method used to be
+      # appended here whenever a `kernel_cache "/path", body` declaration was
+      # present, so the retired Ruby generator would emit the kernel-cache
+      # slice. It is deleted: the C codegen never carried that branch, the
+      # re-port of the TCP slice did not either, and the directive is a compile
+      # error now -- so the only thing the synthesis still did was print
+      #
+      #   ebpf   xdp__tcp_slice__kernel_cache
+      #
+      # in the tag table of a program that Validate (6) refuses two lines later.
+      # Announcing a handler that cannot exist is the same failure as dropping
+      # one that can, pointing the other way; a refused program must not be told
+      # it got a handler.
       Result.new(methods: methods, program_warnings: program_warnings(ir))
-    end
-
-    # `kernel_cache "/path","body"` declarations serve those responses
-    # from the kernel (pure-XDP TCP slice) — no hand-written eBPF. Append a
-    # body-less :ebpf MethodInfo so codegen emits the slice wrapper + bundle
-    # (which read the declarations for the match string / response). Appended
-    # after tag decisions so it isn't re-analyzed; absent any declaration this
-    # is a no-op (existing programs unaffected).
-    def synthesize_kernel_cache_slice!(methods, ast)
-      return if ast.nil?
-      return if KernelCache.declarations(ast).empty?
-      return if methods.any? { |m| m.method_name == "xdp__tcp_slice__kernel_cache" }
-      methods << MethodInfo.new(
-        scope: :top_level, class_name: nil,
-        method_name: "xdp__tcp_slice__kernel_cache",
-        body_id: -1, flags: MethodFlags.default, tag: :ebpf,
-      )
     end
 
     # pull per-method signature (param types + return type) from IR and
@@ -1389,13 +1394,50 @@ module SpinelEbpf
         next if i == last && base == "poly"
         case base
         when "float"  then mi.flags.uses_float = true
-        when "bignum" then mi.flags.uses_bignum = true
+        # This arm used to read `when "bignum"`, and **spinel has no such type
+        # name** -- its own table spells it `bigint`. So the arm was unreachable
+        # and `uses_bignum` was a flag nothing ever set, while the affordance
+        # advertised it in RUBY_SUBSET[:rejected] as a loud refusal. A bignum in
+        # SIGNATURE position still failed loudly (it fell through to the `else`
+        # and became uses_unsupported_type), so the mistake was only visible as a
+        # wrong REASON -- until you put the bignum in a local, where nothing
+        # looked at all: measured exit 0 with `9223372036854775807` baked into the
+        # kernel program, because spinel's front end clamps a >64-bit literal to
+        # INT64_MAX before either the AST dump or the IR is written. The clamped
+        # VALUE is all that survives; the only trace of what the author wrote is
+        # the inferred type, which is why the locals pass below exists.
+        when "bigint" then mi.flags.uses_bignum = true
         when "", *SUPPORTED_EBPF_SIGNATURE_TYPES
           # empty (no info) and known-safe types are fine
         else
           # string, str_array, int_array, hash, poly, lambda, fiber, proc, ...
           mi.flags.uses_unsupported_type = true
         end
+      end
+    end
+
+    # The same judgement for LOCALS. `refine_flags_from_signature` only ever sees
+    # params and the return type, so a value that never crosses a method boundary
+    # was judged by nothing at all -- and for a bignum that is not a missing
+    # diagnostic but a WRONG VALUE: spinel clamps the literal to INT64_MAX in its
+    # own front end, so the kernel program gets 9223372036854775807 where the
+    # author wrote a 30-digit number, with exit 0 (measured).
+    #
+    # Only `bigint` is judged here, deliberately. The other rejected types
+    # (string / array / hash / lambda / ...) appear in locals of perfectly good
+    # NATIVE methods all over the corpus; a local's type is not a statement about
+    # eBPF eligibility in general. A bignum is different: it cannot be represented
+    # at all on the eBPF side, in any position, and the value is already gone.
+    #
+    # The lookup is keyed by the IR's body id, not the AST one: the SN/ST scope
+    # records come from the IR, and the two numbering spaces are not the same. A
+    # method with no IR row has nothing to look up and is skipped.
+    def refine_flags_from_locals(mi, ir)
+      return unless mi.ir_body_id
+      return unless ir.respond_to?(:scope_locals)
+      (ir.scope_locals[mi.ir_body_id] || []).each do |_name, t|
+        base = t.to_s.end_with?("?") ? t[0..-2] : t.to_s
+        mi.flags.uses_bignum = true if base == "bigint"
       end
     end
 

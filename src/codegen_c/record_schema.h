@@ -456,8 +456,59 @@ static const CcBoundsSet cc_bounds_otel_duration_s = {
                "silently bucketed against second boundaries",
 };
 
+/* The ruler for a kernel log2 histogram, in nanoseconds.
+ *
+ * spnl_hist_log2 puts an observation in slot floor(log2(ns)), so the source
+ * data's own ruler is powers of two and any other ruler re-buckets it. The
+ * seconds ruler above cannot be that ruler: its smallest non-zero boundary is
+ * 5 ms, and a kernel latency histogram's median lives in the microseconds, so
+ * re-bucketing a log2 histogram onto it puts everything in one bucket
+ * (measured: p50 off by 1249x for a microsecond-scale distribution).
+ *
+ * Why 31 boundaries and not 63: Splunk Observability Cloud documents "Use no
+ * more than 31 bucket boundaries when sending histograms" and drops histograms
+ * with more -- measured, and the drop is silent behind HTTP 200. So 64 log2
+ * slots have to be folded into 32 buckets, and the only question is how to
+ * spend them. Grouping *contiguous whole slots* never splits a count, so every
+ * folding is exact in counts; what is being traded is resolution against range.
+ *
+ * The split below (27 one-to-one buckets, then four buckets of two slots each,
+ * then an overflow bucket at 2^35 ns = 34.4 s) is the measured minimum of the
+ * worst-case quantile error over the latency bands this tree actually measures
+ * -- 50 ns (fentry overhead), 1 us (kprobe openat p50), 130 us (openat p999),
+ * 60 ms (DNS RTT), 500 ms (off-CPU wait), plus a control whose median is above
+ * the range. Spending all 31 on one-to-one buckets is better in the middle and
+ * catastrophic past its ceiling: at a median of 8 s it reports 2.147 s, 24x
+ * too *small*, with 95% of samples in the overflow bucket. */
+static const double cc_bounds_log2_ns_31_values[] = {
+  /* slots 0..26, one bucket each: upper edge 2^(s+1)-1 */
+  1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767,
+  65535, 131071, 262143, 524287, 1048575, 2097151, 4194303, 8388607, 16777215,
+  33554431, 67108863, 134217727,
+  /* slots 27..34, two slots per bucket */
+  536870911, 2147483647, 8589934591, 34359738367,
+};
+
+static const CcBoundsSet cc_bounds_log2_ns_31 = {
+  .id        = "log2_ns_31",
+  .unit      = "ns",
+  .authority = "derived from the kernel's own histogram: every boundary is 2^k - 1, the exclusive "
+               "upper edge of a spnl_hist_log2 slot, so each bucket is a whole number of slots and "
+               "no count is ever split. The count 31 is Splunk Observability Cloud's documented "
+               "ceiling (\"Use no more than 31 bucket boundaries when sending histograms\"; more "
+               "are dropped -- measured, and dropped silently behind HTTP 200). The split point "
+               "between one-to-one and paired buckets is measured, not chosen",
+  .values    = cc_bounds_log2_ns_31_values,
+  .nvalues   = (int)(sizeof cc_bounds_log2_ns_31_values / sizeof cc_bounds_log2_ns_31_values[0]),
+  .note      = "nanoseconds. Buckets 0..26 are log2 slots 0..26 exactly (1 ns .. 134 ms); buckets "
+               "27..30 hold two slots each (.. 34.4 s); bucket 31 is everything above 2^35 ns and "
+               "is unbounded, like the top bucket of any explicit histogram. A latency slower than "
+               "34.4 s is therefore reported as 34.4 s -- the same failure OBI's own seconds ruler "
+               "has above 10 s, one order of magnitude further out",
+};
+
 static inline const CcBoundsSet *const *cc_bounds_all(int *n) {
-  static const CcBoundsSet *const v[] = { &cc_bounds_otel_duration_s };
+  static const CcBoundsSet *const v[] = { &cc_bounds_otel_duration_s, &cc_bounds_log2_ns_31 };
   *n = (int)(sizeof v / sizeof v[0]);
   return v;
 }
@@ -583,6 +634,16 @@ static const CcRecField cc_rec_dns_fields[] = {
   { "raw",         "unsigned char",        64,  1, 1, "first 64B of the DNS payload; QNAME parsed in userspace", NULL, NULL },
   { "cgid",        "__u64",                 0,  8, 8, "cgroup id -> k8s.* pod attribution", "int", "cgroup_id" },
   { "duration_ns", "__u64",                 0,  8, 8, "resolution RTT; 0 = query-only", "int", NULL },
+  { "raw_status",  "__s32",                 0,  4, 4,
+    "what happened when the kernel tried to fill `raw`. 0 = the bytes are the sender's; "
+    "-1 = there was no user buffer to read (msg_iter described pages or kernel memory); "
+    "anything else = the errno bpf_probe_read_user returned. The return value used to be "
+    "discarded, so a record carrying no bytes was indistinguishable from one whose bytes did "
+    "not parse, and the drain reported the second reason for the first cause. NOT exposed to "
+    "Ruby: a bare errno is exactly the kind of number the value-map rule is about, and what a "
+    "consumer wants -- `ev.qname` -- is already empty in both cases. The drain reads it to pick "
+    "the drop reason it prints",
+    NULL, NULL },
 };
 
 /* The one derived property of a DNS record: the dotted hostname. `raw` holds
@@ -646,6 +707,13 @@ static const CcRecSchema cc_rec_dns = {
   .egress         = &cc_rec_dns_egress,
   .derived        = cc_rec_dns_derived,
   .nderived       = (int)(sizeof cc_rec_dns_derived / sizeof cc_rec_dns_derived[0]),
+  /* raw_status is the first DNS field a pre-existing producer does not write, so
+   * the strict form would have started dropping its records outright. It reads as
+   * zero when absent, and zero is exactly the right answer there: "the bytes in
+   * `raw` are the sender's" is what every earlier record meant. The compatible
+   * default falls out of the encoding rather than being arranged for -- which is
+   * the argument for keeping 0 = ok. */
+  .required_through = "duration_ns",
   .typed_consumer = 1,
 };
 

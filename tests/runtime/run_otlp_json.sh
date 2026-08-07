@@ -26,7 +26,7 @@ echo "[json] compiling otlp_json encoder test"
 "$CC" -O2 -Wall -Wextra -Werror -I "$OTLP" \
   tests/runtime/otlp_json_test.c "$OTLP/otlp_json.c" -o "$TMP/jt"
 
-for sig in metrics traces logs; do
+for sig in metrics metrics_lat metrics_lat_hist traces logs; do
   "$TMP/jt" "$sig" > "$TMP/$sig.json"
   if "$PY" -c "import json,sys; json.load(open('$TMP/$sig.json'))" 2>/dev/null; then
     echo "  ok: $sig is valid JSON"
@@ -40,8 +40,17 @@ otlp_assert "$TMP/metrics.json" '"spnl_method_calls_total"'
 otlp_assert "$TMP/metrics.json" '"asInt":"500"'
 otlp_assert "$TMP/metrics.json" '"aggregationTemporality":2'
 otlp_assert "$TMP/metrics.json" '"code.function"'
-otlp_assert "$TMP/metrics.json" '"exponentialHistogram"'
-otlp_assert "$TMP/metrics.json" '"bucketCounts":["300","200"]'
+# One metric per request: the calls payload carries no latency.
+if grep -q 'spnl_method_latency_ns' "$TMP/metrics.json"; then
+  echo "  UNEXPECTED: the calls JSON has the latency bundled in"; OTLP_FAIL=1
+else echo "  ok: no latency in the calls JSON"; fi
+otlp_assert "$TMP/metrics_lat.json" '"exponentialHistogram"'
+otlp_assert "$TMP/metrics_lat.json" '"bucketCounts":["300","200"]'
+# Explicit buckets (the log2_ns_31 bounds set): slots 10 and 11 land in buckets
+# 10 and 11 with the same counts.
+otlp_assert "$TMP/metrics_lat_hist.json" '"histogram"'
+otlp_assert "$TMP/metrics_lat_hist.json" '"explicitBounds"'
+otlp_assert "$TMP/metrics_lat_hist.json" '"0","0","0","0","0","0","0","0","0","0","300","200"'
 otlp_assert "$TMP/traces.json" '"traceId":"0102030405060708090a0b0c0d0e0f10"'
 otlp_assert "$TMP/traces.json" '"spanId":"a0a1a2a3a4a5a6a7"'
 otlp_assert "$TMP/traces.json" '"name":"add"'

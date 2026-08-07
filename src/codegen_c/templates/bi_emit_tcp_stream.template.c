@@ -10,7 +10,7 @@
         if (_ln@E@ > 128) _ln@E@ = 128;   /* cap: proven [0,128] bound for bpf_probe_read_user (dst = raw[128]) */
         _ls@E@->len = (__u32)_ln@E@;
         __builtin_memset(_ls@E@->raw, 0, sizeof(_ls@E@->raw));
-        void *_lb@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
+        void *_lb@E@ = spnl_msg_ubuf((struct msghdr *)(unsigned long)(@MSG@));
         if (_lb@E@ && _ln@E@) (void)bpf_probe_read_user(_ls@E@->raw, _ln@E@, _lb@E@);   /* len == bytes copied, byte-exact up to 128 */
         bpf_ringbuf_submit(_ls@E@, 0);
     } else spnl_lost_inc();   /* ring full -> account the dropped record */

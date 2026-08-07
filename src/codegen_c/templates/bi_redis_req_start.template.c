@@ -1,6 +1,6 @@
 {
     __u64 _dk@E@ = (__u64)(unsigned long)(@SK@);
-    void *_db@E@ = BPF_CORE_READ((struct msghdr *)(unsigned long)(@MSG@), msg_iter.__ubuf_iovec.iov_base);
+    void *_db@E@ = spnl_msg_ubuf((struct msghdr *)(unsigned long)(@MSG@));
     __u64 _dn@E@ = (__u64)(@SIZE@);
     if (_dn@E@ > sizeof(((struct @UNIT@_redis_pending_st *)0)->req)) _dn@E@ = sizeof(((struct @UNIT@_redis_pending_st *)0)->req);
     if (_db@E@ && _dn@E@ >= 2 && !bpf_map_lookup_elem(&@UNIT@_redis_pending, &_dk@E@)) {

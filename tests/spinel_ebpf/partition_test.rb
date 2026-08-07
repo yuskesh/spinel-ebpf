@@ -400,4 +400,94 @@ class PartitionTest < Minitest::Test
     res = P.classify(ir, parse_ast(toplevel_def_ast("probe")))
     assert_nil res.by_qualified_name["ghost"]
   end
+
+  # ---------- the bignum flag that nothing set ----------
+  #
+  # RUBY_SUBSET[:rejected] advertises `uses_bignum` as a loud partition failure.
+  # It was not one: the only assignment site matched the string "bignum", and
+  # spinel's type name is `bigint` (deps/spinel/src/types.c), so the arm was
+  # unreachable. In signature position the row still failed -- via the `else` arm,
+  # as uses_unsupported_type -- which is why the dead flag looked alive. In a
+  # LOCAL nothing looked at all, and the failure was not a missing diagnostic but
+  # a wrong VALUE: spinel clamps a >64-bit literal to INT64_MAX before it writes
+  # either the AST dump or the IR, so `123456789012345678901234567890` reached the
+  # kernel program as 9223372036854775807 with exit 0.
+
+  # A stub IR is enough here and is the point: this pins the KEY (the IR's body
+  # id, not the AST's -- those two numbering spaces have been measured drifting by
+  # 1216) and the TYPE NAME, which is the whole bug.
+  FakeIr = Struct.new(:scope_locals)
+
+  def mi_with(ir_body_id)
+    P::MethodInfo.new(scope: :top_level, class_name: nil, method_name: "kprobe__x",
+                      body_id: 999, ir_body_id: ir_body_id,
+                      flags: P::MethodFlags.default, tag: nil)
+  end
+
+  def test_bigint_local_sets_uses_bignum
+    mi = mi_with(5)
+    P.refine_flags_from_locals(mi, FakeIr.new({ 5 => [["a", "unknown"], ["n", "bigint"]] }))
+    assert mi.flags.uses_bignum, "a local inferred as `bigint` must set uses_bignum"
+    assert mi.flags.ebpf_impossible?
+  end
+
+  def test_bigint_lookup_is_keyed_by_the_ir_body_id_not_the_ast_one
+    mi = mi_with(5)                      # :body_id is 999
+    P.refine_flags_from_locals(mi, FakeIr.new({ 999 => [["n", "bigint"]] }))
+    refute mi.flags.uses_bignum,
+           "the scope records are the IR's; indexing them with the AST id reads another body"
+  end
+
+  def test_no_ir_row_means_nothing_to_look_up
+    mi = mi_with(nil)                    # synthesised DSL/reactor handler
+    P.refine_flags_from_locals(mi, FakeIr.new({ 5 => [["n", "bigint"]] }))
+    refute mi.flags.uses_bignum
+  end
+
+  # Only bigint. Locals of every other rejected type appear in perfectly good
+  # NATIVE methods all over the corpus, so a local's type is not a statement about
+  # eBPF eligibility in general -- widening this would fail programs that work.
+  def test_other_local_types_are_not_judged_here
+    mi = mi_with(5)
+    P.refine_flags_from_locals(mi, FakeIr.new({ 5 => [["s", "string"], ["f", "float"],
+                                                      ["h", "hash"], ["l", "lambda"]] }))
+    refute mi.flags.uses_bignum
+    refute mi.flags.ebpf_impossible?, "locals other than bigint must not disqualify a method here"
+  end
+
+  def test_nullable_bigint_is_still_bigint
+    mi = mi_with(5)
+    P.refine_flags_from_locals(mi, FakeIr.new({ 5 => [["n", "bigint?"]] }))
+    assert mi.flags.uses_bignum
+  end
+
+  # The join that broke. Partitioning matches a spinel type NAME; nothing else in
+  # the tree connects the two spellings, so a typo is invisible until someone
+  # writes a 30-digit literal. Read the name back out of spinel itself.
+  def test_the_type_name_partition_matches_is_one_spinel_actually_emits
+    src = File.expand_path("../../deps/spinel/src/types.c", __dir__)
+    skip "spinel sources not present" unless File.exist?(src)
+    names = File.read(src).scan(/case TY_\w+:\s*return "([a-z_0-9]+)"/).flatten
+    refute_empty names, "could not read spinel's type-name table"
+    assert_includes names, "bigint",
+                    "partitioning keys uses_bignum off this exact string"
+    refute_includes names, "bignum",
+                    "if spinel ever spells it `bignum`, partitioning must match THAT -- " \
+                    "the bug here was matching a name no producer emits"
+  end
+
+  # And the flag is reachable from a signature too (the half that used to fail
+  # for the wrong reason).
+  def test_bigint_signature_attributes_to_uses_bignum_not_unsupported_type
+    flags = P::MethodFlags.default
+    mi = P::MethodInfo.new(scope: :top_level, class_name: nil, method_name: "m",
+                           body_id: 1, ir_body_id: 1, flags: flags, tag: nil)
+    ir = Object.new
+    def ir.sa(_n) = nil
+    def ir.scope_locals = {}
+    P.stub(:signature_types, ["int", "bigint"]) { P.refine_flags_from_signature(mi, ir) }
+    assert flags.uses_bignum, "a bigint return must be attributed to uses_bignum"
+    refute flags.uses_unsupported_type,
+           "it used to land in the catch-all, which is why the dead flag looked alive"
+  end
 end
