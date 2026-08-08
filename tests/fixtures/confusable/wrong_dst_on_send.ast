@@ -1,0 +1,62 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/confusable/wrong_dst_on_send.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__udp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name len
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name ==
+N 10 CallNode
+S 10 name sock_dport
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name sk
+A 11 arguments 12
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+R 9 receiver 10
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 53
+A 13 arguments 14
+R 9 arguments 13
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 15 StatementsNode
+N 16 CallNode
+S 16 name emit_dns
+R 16 receiver -1
+N 17 ArgumentsNode
+N 18 LocalVariableReadNode
+S 18 name msg
+A 17 arguments 18
+R 16 arguments 17
+R 16 block -1
+S 16 call_operator .
+A 15 body 16
+R 8 statements 15
+R 8 subsequent -1
+N 19 IntegerNode
+I 19 value 0
+A 7 body 8,19
+R 2 body 7
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

@@ -1,0 +1,154 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/confusable/right_both_sides.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__udp_sendmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name len
+A 3 requireds 4,5,6
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 7 StatementsNode
+N 8 IfNode
+N 9 CallNode
+S 9 name ==
+N 10 CallNode
+S 10 name udp_dport
+R 10 receiver -1
+N 11 ArgumentsNode
+N 12 LocalVariableReadNode
+S 12 name sk
+N 13 LocalVariableReadNode
+S 13 name msg
+A 11 arguments 12,13
+R 10 arguments 11
+R 10 block -1
+S 10 call_operator .
+R 9 receiver 10
+N 14 ArgumentsNode
+N 15 IntegerNode
+I 15 value 53
+A 14 arguments 15
+R 9 arguments 14
+R 9 block -1
+S 9 call_operator .
+R 8 predicate 9
+N 16 StatementsNode
+N 17 CallNode
+S 17 name dns_req_start
+R 17 receiver -1
+N 18 ArgumentsNode
+N 19 LocalVariableReadNode
+S 19 name sk
+N 20 LocalVariableReadNode
+S 20 name msg
+A 18 arguments 19,20
+R 17 arguments 18
+R 17 block -1
+S 17 call_operator .
+A 16 body 17
+R 8 statements 16
+R 8 subsequent -1
+N 21 IntegerNode
+I 21 value 0
+A 7 body 8,21
+R 2 body 7
+R 2 receiver -1
+N 22 DefNode
+S 22 name kprobe__udp_recvmsg
+N 23 ParametersNode
+N 24 RequiredParameterNode
+S 24 name sk
+N 25 RequiredParameterNode
+S 25 name msg
+N 26 RequiredParameterNode
+S 26 name len
+N 27 RequiredParameterNode
+S 27 name flags
+N 28 RequiredParameterNode
+S 28 name addr_len
+A 23 requireds 24,25,26,27,28
+A 23 optionals 
+A 23 keywords 
+A 23 posts 
+R 22 parameters 23
+N 29 StatementsNode
+N 30 IfNode
+N 31 CallNode
+S 31 name ==
+N 32 CallNode
+S 32 name sock_dport
+R 32 receiver -1
+N 33 ArgumentsNode
+N 34 LocalVariableReadNode
+S 34 name sk
+A 33 arguments 34
+R 32 arguments 33
+R 32 block -1
+S 32 call_operator .
+R 31 receiver 32
+N 35 ArgumentsNode
+N 36 IntegerNode
+I 36 value 53
+A 35 arguments 36
+R 31 arguments 35
+R 31 block -1
+S 31 call_operator .
+R 30 predicate 31
+N 37 StatementsNode
+N 38 CallNode
+S 38 name dns_resp_stash
+R 38 receiver -1
+N 39 ArgumentsNode
+N 40 LocalVariableReadNode
+S 40 name sk
+N 41 LocalVariableReadNode
+S 41 name msg
+A 39 arguments 40,41
+R 38 arguments 39
+R 38 block -1
+S 38 call_operator .
+A 37 body 38
+R 30 statements 37
+R 30 subsequent -1
+N 42 IntegerNode
+I 42 value 0
+A 29 body 30,42
+R 22 body 29
+R 22 receiver -1
+N 43 DefNode
+S 43 name kretprobe__udp_recvmsg
+N 44 ParametersNode
+N 45 RequiredParameterNode
+S 45 name ret
+A 44 requireds 45
+A 44 optionals 
+A 44 keywords 
+A 44 posts 
+R 43 parameters 44
+N 46 StatementsNode
+N 47 CallNode
+S 47 name dns_emit
+R 47 receiver -1
+N 48 ArgumentsNode
+N 49 LocalVariableReadNode
+S 49 name ret
+A 48 arguments 49
+R 47 arguments 48
+R 47 block -1
+S 47 call_operator .
+N 50 IntegerNode
+I 50 value 0
+A 46 body 47,50
+R 43 body 46
+R 43 receiver -1
+A 1 body 2,22,43
+R 0 statements 1

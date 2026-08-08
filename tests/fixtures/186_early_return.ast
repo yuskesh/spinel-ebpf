@@ -1,0 +1,82 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/186_early_return.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__do_sys_openat2
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name a
+A 3 requireds 4
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 5 StatementsNode
+N 6 IfNode
+N 7 CallNode
+S 7 name >
+N 8 LocalVariableReadNode
+S 8 name a
+R 7 receiver 8
+N 9 ArgumentsNode
+N 10 IntegerNode
+I 10 value 100
+A 9 arguments 10
+R 7 arguments 9
+R 7 block -1
+S 7 call_operator .
+R 6 predicate 7
+N 11 StatementsNode
+N 12 ReturnNode
+N 13 ArgumentsNode
+N 14 IntegerNode
+I 14 value 1
+A 13 arguments 14
+R 12 arguments 13
+A 11 body 12
+R 6 statements 11
+R 6 subsequent -1
+N 15 IfNode
+N 16 CallNode
+S 16 name >
+N 17 LocalVariableReadNode
+S 17 name a
+R 16 receiver 17
+N 18 ArgumentsNode
+N 19 IntegerNode
+I 19 value 10
+A 18 arguments 19
+R 16 arguments 18
+R 16 block -1
+S 16 call_operator .
+R 15 predicate 16
+N 20 StatementsNode
+N 21 InstanceVariableOperatorWriteNode
+S 21 name @big
+S 21 binary_operator +
+N 22 IntegerNode
+I 22 value 1
+R 21 value 22
+N 23 ReturnNode
+N 24 ArgumentsNode
+N 25 IntegerNode
+I 25 value 2
+A 24 arguments 25
+R 23 arguments 24
+A 20 body 21,23
+R 15 statements 20
+R 15 subsequent -1
+N 26 InstanceVariableOperatorWriteNode
+S 26 name @small
+S 26 binary_operator +
+N 27 IntegerNode
+I 27 value 1
+R 26 value 27
+N 28 IntegerNode
+I 28 value 0
+A 5 body 6,15,26,28
+R 2 body 5
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

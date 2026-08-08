@@ -575,10 +575,28 @@ class CapabilitiesTest < Minitest::Test
     assert_operator opaque.length.to_f / ALL_BUILTINS.length, :<, 0.10
   end
 
-  # (context gate) valid_contexts for the d_path builtins is DPATH_OK_SECS.
+  # (context gate) valid_contexts for the d_path builtins.
+  #
+  # This test used to pin `valid_contexts == DPATH_OK_SECS` for all six, and it
+  # kept passing after four of those hooks started REFUSING the three path
+  # selectors -- so the affordance advertised 32 hooks for `path_eq` while the
+  # same document declared that four of them reject it, and the compiler agreed
+  # with the second half. A test that asserts "all six are the same set" goes
+  # false the moment an asymmetry is introduced. Pin the two groups apart; the
+  # difference must be exactly the no-select hooks.
   def test_context_gates_expose_valid_secs
-    %w[emit_path emit_parent_path path_eq parent_path_eq].each do |b|
+    %w[emit_path emit_parent_path parent_path_eq].each do |b|
       assert_equal CAP::DPATH_OK_SECS, CAP.context_strings(b), "valid_contexts for #{b} is not the d_path allowlist"
+      assert CAP.builtin_entry(b)[:gated], "#{b} should be gated"
+    end
+    refute_empty CAP::DPATH_NO_SELECT_SECS
+    CAP::DPATH_SELECT_BUILTINS.each do |b|
+      got = CAP.context_strings(b)
+      assert_equal CAP::DPATH_OK_SECS - CAP::DPATH_NO_SELECT_SECS, got,
+                   "#{b}: advertises hooks that refuse it"
+      CAP::DPATH_NO_SELECT_SECS.each do |sec|
+        refute_includes got, sec, "#{b}: #{sec} dies at compile time yet sits in valid_contexts"
+      end
       assert CAP.builtin_entry(b)[:gated], "#{b} should be gated"
     end
     # Attach-kind gates show up in valid_contexts too, so they are machine-readable.

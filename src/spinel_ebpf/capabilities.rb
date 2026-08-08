@@ -367,6 +367,138 @@ module SpinelEbpf
     # How the ready-made probes (--probe dns|file|l7|net) map onto these domains:
     # file auditing is enforcement, dns and l7 are both L7 (DNS being an L7
     # protocol), and net is networking.
+    # Pairs where picking the wrong spelling is SILENT.
+    #
+    # The shape is precise: two spellings exist, (1) both type-check in the same
+    # position, (2) the wrong one returns a plausible NUMBER rather than an error,
+    # (3) in the environment people usually test, the two return the SAME number so
+    # testing does not reveal the mistake, and (4) in some other environment they
+    # diverge quietly. One of these was measured and fixed by adding the second
+    # spelling -- and nothing was added to prevent choosing the first.
+    #
+    # HELD AS A CONTRACT, NOT AN INVENTORY. An entry that names a `gate` must name
+    # one the codegen really defines; an entry with `gate: nil` must say WHY it
+    # cannot be gated. "We cannot check this" must never be spelled the same way as
+    # "there is nothing to check", or the declaration starts lying about being
+    # machine-readable. `evidence` is :measured (an experiment ran it) or
+    # :documented (the mechanism is established but this pair was not run).
+    #
+    # This is NOT exhaustive. It is what survived sweeping the advertised builtins
+    # against the four conditions above; that no others exist has not been measured,
+    # because there is no reverse direction (implementation -> claim) for this axis
+    # the way there is for maps.
+    CONFUSABLE = [
+      { id: "udp_dst_direction",
+        a: "sock_dport", b: "udp_dport",
+        also: %w[sock_daddr udp_daddr],
+        question_a: "the peer this SOCKET is connected to",
+        question_b: "where THIS datagram is going (msg_name wins, else the connected peer)",
+        agree_when: "senders that connect -- which is all three resolvers the DNS work was " \
+                    "verified against (glibc res_send, python, busybox nslookup)",
+        disagree_when: "an unconnected sender (dnsmasq forwards upstream with a bare sendto): " \
+                       "skc_dport is 0, so `sock_dport(sk) == 53` is false and NOTHING is reported",
+        wrong_answer: "0 -- not fewer events, none",
+        gate: "cc_require_dgram_dst_direction",
+        why_ungated: nil,
+        evidence: :measured }.freeze,
+      { id: "udp_dst_on_recv",
+        a: "udp_dport", b: "sock_dport",
+        also: %w[udp_daddr sock_daddr],
+        question_a: "this datagram's destination -- meaningful only on a SEND hook",
+        question_b: "the socket's peer (on the receive side this is the only thing that knows it)",
+        agree_when: "`recv()` / `recvfrom(..., NULL, NULL)` leave msg_name NULL, so udp_dport " \
+                    "falls through to the connected peer and returns the right answer",
+        disagree_when: "`recvmsg()` with an address buffer -- the shape a server or forwarder " \
+                       "uses. At function entry the kernel has not written it yet, so this reads " \
+                       "uninitialised caller stack as a sockaddr",
+        wrong_answer: "0 when the garbage family byte is not AF_INET/AF_INET6, an arbitrary " \
+                      "16-bit value when it happens to be",
+        gate: "cc_require_dgram_dst_direction",
+        why_ungated: nil,
+        evidence: :documented }.freeze,
+      { id: "current_task_in_softirq",
+        a: "pid", b: "kfield(<task ptr>, \"task_struct\", \"tgid\")",
+        also: %w[tgid tid uid gid cgroup_id comm_hash emit_comm ppid stack_id],
+        question_a: "the tgid of whatever task is on this CPU right now",
+        question_b: "the tgid of the task you were handed",
+        agree_when: "hooks that fire in process context -- loopback and same-host traffic " \
+                    "change socket state in process context, so every local test agrees",
+        disagree_when: "hooks reached through softirq: measured, a state-change tracepoint on " \
+                       "traffic to an external host reports `pid=0 comm=swapper/0`",
+        wrong_answer: "a real pid belonging to the wrong task -- neither an error nor a zero",
+        gate: nil,
+        why_ungated: "A gate for exactly this read already exists (the one guarding the " \
+                     "capability and namespace builtins), but it is called from six sites only. " \
+                     "Widening it is not a compatible change: shipped probes use these builtins " \
+                     "in packet and socket context, and the measured example is a tracepoint, " \
+                     "which the existing gate PASSES because it classifies by program type " \
+                     "rather than by invocation context. Note the asymmetry that remains: the " \
+                     "declarative form (`filter_by :pid`) IS refused on these hooks while the " \
+                     "hand-written form it is documented as shorthand for is accepted.",
+        evidence: :measured }.freeze,
+      { id: "sock_addr_family",
+        a: "sock_daddr", b: "sock_daddr6_hi / sock_daddr6_lo",
+        also: %w[sock_saddr sock_saddr6_hi sock_saddr6_lo],
+        question_a: "the IPv4 address -- meaningful only when the family is AF_INET",
+        question_b: "the IPv6 address",
+        agree_when: "IPv4-only traffic, which is every fixture and every example here",
+        disagree_when: "an AF_INET6 socket. Dual-stack listeners (anything binding `::`) are the " \
+                       "default for Go, Java and nginx",
+        wrong_answer: "a routable-looking address: measured, one returned 0x7f000006 = 127.0.0.6",
+        gate: nil,
+        why_ungated: "Which one is correct is decided at RUNTIME by the socket family, so " \
+                     "compile time cannot know. The only gateable shape is `reads one of them " \
+                     "without testing the family`, and that would refuse legitimate probes on " \
+                     "paths known to be v4. The affordance already states the precondition.",
+        evidence: :measured }.freeze,
+      { id: "sock_ops_state_outside_state_cb",
+        a: "sock_ops_state", b: "sock_ops_state guarded by sock_ops_op",
+        also: [],
+        question_a: "ctx->args[1] -- the new TCP state, but only in a state callback",
+        question_b: "the same read, restricted to the callback where it means that",
+        agree_when: "a program whose cgroup flags enable only the state callback -- which is what " \
+                    "the shipped demo and the fixture both do",
+        disagree_when: "a program that also enables the connect/RTT/RTO callbacks: args[1] " \
+                       "carries a different per-callback value",
+        wrong_answer: "a small integer, and `args[1] == 1` reads as an established state",
+        gate: nil,
+        why_ungated: "A kind gate exists (non-sockops programs are refused) but it guards the " \
+                     "wrong axis. The correct gate is `does this handler test sock_ops_op first`, " \
+                     "which is dataflow WITHIN the program, and the codegen does not look there.",
+        evidence: :documented }.freeze,
+      { id: "implicit_tid_latency_key",
+        a: "latency_start / latency_end", b: "lat_start(key) / lat_end(key)",
+        also: [],
+        question_a: "one map per unit, keyed by the current tid",
+        question_b: "a key the author chooses",
+        agree_when: "one entry/exit pair, no recursion, same thread -- every fixture",
+        disagree_when: "two measured pairs in one unit (they share the tid-keyed map), recursion, " \
+                       "or an entry and exit on different threads -- a hazard this codebase " \
+                       "already documents elsewhere, where a goroutine register is used as the " \
+                       "key precisely because a tid moves across a blocking read",
+        wrong_answer: "the inner (much shorter) delta, or 0 -- both land in the first histogram bucket",
+        gate: nil,
+        why_ungated: "Both are legitimate and the choice is intent. The only gateable shape is " \
+                     "`two latency_start sites in one unit`, which is the reason the keyed form " \
+                     "exists. NOT MEASURED: this was read out of the template, not run.",
+        evidence: :documented }.freeze,
+      { id: "sock_addr_port_direction",
+        a: "sock_addr_port in a connect hook", b: "sock_addr_port in a bind hook",
+        also: %w[sock_addr_ip4],
+        question_a: "connect: the DESTINATION about to be connected to",
+        question_b: "bind: the LOCAL address about to be bound",
+        agree_when: "a probe tested only on the connect hook -- both return a plausible port",
+        disagree_when: "the same probe moved to the bind hook. The meaning swaps",
+        wrong_answer: "the port of the other end",
+        gate: nil,
+        why_ungated: "The context declaration ALLOWS both hooks, so there is no ground in the " \
+                     "affordance to refuse either, and the codegen has no refusal for that kind " \
+                     "mask at all -- the declaration is currently unenforced. The first thing to " \
+                     "fix is the affordance's own description, which says `destination` and is " \
+                     "therefore false for the bind hook.",
+        evidence: :documented }.freeze,
+    ].freeze
+
     KREW_PROBE_DOMAINS = {
       "dns"  => :l7,
       "file" => :enforcement,
@@ -3147,6 +3279,19 @@ WITHDRAWN_SUGAR = {}.freeze
         note: "an if in expression position: declare `__s64 _ifN`, assign it in both branches, " \
               "and yield _ifN as the value. `@x = if ... end` and an operand inside a larger " \
               "expression take the same path" },
+      # The shape an author reaches for first when the probe is a DECISION --
+      # `if ... return -1 ... end` -- used to die with
+      # `node type not yet ported (Stage 1): ReturnNode`. That is the archetype of
+      # an error that shows a compiler class name and names no way forward, and it
+      # is also the shortest way to write the project's own headline demo (refuse
+      # an open of /etc/shadow). The machinery was already there: a verdict hook's
+      # wrapper returns the `_inner` value unchanged.
+      { id: :early_return, family: "early return", form: :stmt, shape: :kprobe_arg,
+        syntax: "if a > 1\n    return 7\n  end", without: "if a > 1\n    @h = 7\n  end",
+        lowers_to: "return 7;",
+        note: "an early return in statement position. The `_inner` return type is already the " \
+              "method's, so this is a C `return` in the same function. `return <value>` in a " \
+              "method that returns nothing dies loudly (there is no slot for the value)" },
       # ---- local variables and methods -----------------------------------
       { id: :local_var, family: "local variables", form: :stmt, shape: :kprobe_arg,
         syntax: "x = a + 1\n  n = x * 2", without: "n = a", lowers_to: "x = a + 1;",
@@ -3456,11 +3601,21 @@ WITHDRAWN_SUGAR = {}.freeze
     end
 
     # A builtin to the list of contexts it is valid in, for the JSON output; nil when ungated.
+    # `valid_contexts` was a CLAIM, not a measurement. The three path SELECTORS
+    # listed all 32 d_path hooks while `dpath_no_select` in the same document
+    # declared that four of those refuse exactly those three -- and they do, at
+    # compile time. The disclosure channel contradicted itself, and the same 32
+    # were also printed as the REMEDY when the builtin was used on a wrong hook,
+    # so an author following the message could be sent to a hook that refuses it.
+    # Subtracting in one place makes the JSON and the refusal agree.
     def context_strings(name)
       req = CONTEXT_REQUIREMENTS[name]
       return nil unless req
-      return req[:secs] if req[:secs]
-      req[:kinds].map(&:to_s)
+      return req[:kinds].map(&:to_s) unless req[:secs]
+
+      secs = req[:secs]
+      secs -= DPATH_NO_SELECT_SECS if DPATH_SELECT_BUILTINS.include?(name)
+      secs
     end
 
     # A builtin to a human-readable note about its context: enforced when gated,
@@ -3569,6 +3724,18 @@ WITHDRAWN_SUGAR = {}.freeze
         withdrawn_attach: WITHDRAWN_ATTACH,
         context_gates: CONTEXT_GATES.map { |n, g|
           { builtin: n, domain: g[:domain], valid_secs: g[:valid_secs] }
+        },
+        # Pairs where picking the wrong one is silent. `gate` names the codegen
+        # function that refuses it, or is null -- and a null gate carries
+        # `why_ungated`, so "we cannot check this" is never spelled the same way
+        # as "there is nothing to check".
+        confusable: CONFUSABLE.map { |c|
+          { id: c[:id], a: c[:a], b: c[:b], also: c[:also],
+            question_a: c[:question_a], question_b: c[:question_b],
+            agree_when: c[:agree_when], disagree_when: c[:disagree_when],
+            wrong_answer: c[:wrong_answer],
+            gate: c[:gate], why_ungated: c[:why_ungated],
+            evidence: c[:evidence] }
         },
         # `valid_secs` only ever meant "this compiles". Compiling and firing are
         # different things -- of these 32 hooks, only 4 had ever had their firing
