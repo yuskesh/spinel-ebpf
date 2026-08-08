@@ -728,6 +728,22 @@ module SpinelEbpf
 
     # Every declared metric, flattened across channels. Each entry keeps its channel id,
     # so a reader can get back to the records the metric aggregates.
+    # The clock a record's timestamps are on, and the conversion to a wall clock.
+    # A consumer that skips it emits spans dated 1970 and nothing anywhere reports
+    # an error, so the conversion is published rather than described.
+    def record_clocks
+      @record_clocks ||= deep_freeze(record_schema_doc[:clocks] || [])
+    end
+
+    # The two rules a reader needs before it can build a span at all -- what the
+    # start and end ARE, and which records make no span.
+    def record_timing_line(egress)
+      tf = egress[:timing_form] || {}
+      clk = tf[:clock].to_s.empty? ? "" : format(" [%s]", tf[:clock])
+      format("      span time: start = %s%s, end = %s; no span when: %s\n",
+             tf[:start], clk, tf[:end], egress[:drop_when])
+    end
+
     def record_metrics
       record_channels.flat_map { |c| Array(c[:metrics]).map { |m| m.merge(channel: c[:id]) } }
     end
@@ -881,15 +897,20 @@ module SpinelEbpf
             # What is printed is the largest value in bytes, one less than the
             # declared capacity, which includes the terminator.
             width = p[:cap].to_i > 1 ? format(" (<=%dB)", p[:cap].to_i - 1) : ""
-            out << format("      ev.%-12s %-4s %-8s <- %s%s\n",
-                          p[:name], p[:expose], p[:kind], p[:source], width)
+            # For a derived property, WHO computes the body. "declared" = the
+            # contract does; anything else names work a consumer outside this
+            # process has to do (and "ambient" names work it cannot do at all).
+            res = p[:kind] == "derived" ? format("  {%s}", p[:residue]) : ""
+            out << format("      ev.%-12s %-4s %-8s <- %s%s%s\n",
+                          p[:name], p[:expose], p[:kind], p[:source], width, res)
           end
         end
         e = c[:egress]
         next unless e
         out << format("    egress: %s -> span \"%s\" (SpanKind %s)\n", e[:push_fn], e[:span_name], e[:span_kind])
+        out << record_timing_line(e)
         e[:attributes].each do |a|
-          out << format("      %-24s %-8s <- %s  [%s]\n", a[:key], a[:stability], a[:source], a[:condition])
+          out << format("      %-24s %-8s <- %s  [%s]\n", a[:key], a[:stability], a[:source], a[:present])
         end
         out << format("      + enrichers (environment-gated, no probe change): %s\n", Array(e[:enrichers]).join(", ")) unless Array(e[:enrichers]).empty?
       end

@@ -6,7 +6,9 @@
 #   make templates  # regenerate templates_gen.h from templates/*.template.c (commit it)
 #   make mirror     # regenerate the userspace record mirror from record_schema.h (commit it)
 #   make loader-contract # regenerate the codegen<->loader seam from loader_contract.h (commit it)
-#   make gate       # record-contract gate: artifacts fresh + evolution append-only
+#   make gate       # record-contract gate: artifacts fresh + evolution append-only,
+#                   # plus the reader gate (every rule a consumer must act on is
+#                   # machine-readable, or declared unexpressible)
 #   make clean
 
 CC      ?= cc
@@ -65,6 +67,7 @@ probe-ctx: probe_ctx_schema.h $(PCTX_GEN)
 gate:
 	@ruby $(ROOT)/tools/record_gate.rb
 	@ruby $(ROOT)/tools/loader_gate.rb
+	@ruby $(ROOT)/tools/reader_gate.rb
 
 golden: $(BIN)
 	@ruby $(ROOT)/tools/golden.rb

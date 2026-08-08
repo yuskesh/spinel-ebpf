@@ -160,17 +160,86 @@ typedef struct {
  * of a provenance. A str derivation must declare a positive cap; an int one must
  * declare 0 (a capacity is meaningless for a `long`), and the generator dies
  * either way round. Widening a cap is additive; narrowing one truncates values
- * that used to arrive whole, so the record gate treats it as a breaking change. */
+ * that used to arrive whole, so the record gate treats it as a breaking change.
+ *
+ * `residue` is the other half of the same judgement, and it exists because "the
+ * implementation stays in C" was published as ONE fact about thirteen
+ * derivations when it is really four different facts. Hand the same .bpf.o to a
+ * consumer in another language and it gets a generated accessor layer in which
+ * all thirteen are the same thing: a function variable that panics. A panic says
+ * the property is unavailable; it does not say whether the reader can go and
+ * write it, and that is the only question a reader has.
+ *
+ * Measured by reading the bodies rather than asserting a class, the thirteen
+ * are:
+ *
+ *   "declared" -- the generator emits the body. No reader writes anything.
+ *                 Two shapes qualify: a value map and an int_expr (below).
+ *   "parse"    -- a variable-length walk over wire bytes the record carries
+ *                 (a DNS label walk, an HTTP request line). A reader CAN write
+ *                 it: everything it reads is in the record.
+ *   "render"   -- a standard-library formatting of fields, with a branch chosen
+ *                 by another field (the v4/v6 peer). A reader CAN write it.
+ *   "ambient"  -- the input is NOT IN THE RECORD. The off-CPU channel's
+ *                 wait_kind and wait_stack_trace read the loaded object's BPF
+ *                 stack map and /proc/kallsyms; the record carries only a stack
+ *                 id, which is an index into a map a foreign reader may not even
+ *                 have open. A reader CANNOT write these from the bytes, in any
+ *                 language.
+ *
+ * The class is declared rather than inferred, and the generator refuses a
+ * disagreement between it and `impl_form` (a code_to_name or int_expr derivation
+ * that claims not to be "declared", or a C-implemented one that claims to be),
+ * so the two halves cannot drift. What it buys downstream is that a generated
+ * reader can say WHY a property is absent -- "write this parse, the bytes are in
+ * field `raw`" and "this one is not derivable from the record at all" are
+ * different instructions, and thirteen identical panics were neither. */
 typedef struct {
   const char *name;      /* Ruby-visible property name (ev.<name>) */
   const char *expose;    /* "int" | "str" (same meaning as CcRecField.expose) */
   const char *from;      /* record field the derivation reads */
   const char *impl;      /* C function that performs it (defined in the runtime), or,
-                          * for impl_form "code_to_name", the id of a CcValueMap below */
+                          * for impl_form "code_to_name", the id of a CcValueMap below,
+                          * or, for "int_expr", the expression itself */
   const char *impl_form; /* its calling convention; see tools/gen_record_mirror.c */
+  const char *residue;   /* "declared" | "parse" | "render" | "ambient" (see above) */
   int         cap;       /* output buffer size for a "str" derivation; 0 for "int" */
   const char *note;      /* provenance / caveats -- surfaced to Ruby */
 } CcRecDerived;
+
+/* --- int_expr: the arithmetic derivations, moved into the declaration --------
+ *
+ * A `code_to_name` derivation is declaration-implemented because a code's
+ * mapping is a table and not an algorithm. Auditing what the thirteen
+ * C-implemented derivations actually DO turned up the second shape with that
+ * property: three of them are one arithmetic expression over int fields of the
+ * same record --
+ *
+ *   conn.srtt_us     srtt_us >> 3                          (a scale)
+ *   offcpu.offcpu_ns min(offcpu_ns, duration_ns)           (a clamp)
+ *   offcpu.oncpu_ns  duration_ns - derived(offcpu_ns)
+ *
+ * -- and an expression is not domain logic either. It was in C for the same
+ * reason the TCP state switch was: nobody had asked whether it had to be.
+ *
+ * So `impl` carries the expression and the generator parses it (closed grammar:
+ * int fields of this channel, integer literals, + - * / << >>, min(), max(),
+ * derived(<an earlier derivation>), parentheses) and emits the body. Anything
+ * outside the grammar does not compile -- the point is a small closed language,
+ * not an expression evaluator, and the moment a derivation needs more than this
+ * it is a "parse" or a "render" and belongs in C where the domain logic is.
+ *
+ * WHY THIS IS WORTH A PARSER. The expression is emitted in the FIELD'S OWN C
+ * type, so the arithmetic is what the C compiler would have done on the
+ * hand-written line -- `min` over two __u64 stays unsigned, the >>3 of an __s64
+ * stays arithmetic. And because it is a declaration it reaches every reader of
+ * the contract, not just the C runtime: a consumer of the same .bpf.o in another
+ * language had to re-implement these by hand off the prose in `note`, where "the
+ * kernel's 1/8 us scale" is a sentence rather than `>> 3`. Getting a scale wrong
+ * is silent -- this tree shipped exactly that bug in the other direction once
+ * (the span divided and the typed consumer did not), which is why the two were
+ * put on one function. This puts them on one *declaration*, which is one further
+ * out. */
 
 /* --- Type-driven derivations: a value map ---------------------------------
  *
@@ -553,12 +622,94 @@ typedef struct {
  *) own their own attributes and attach to *every* signal from env, so they
  * are named by id only -- their key lists live in otlp_enrich.c / the ENRICHERS
  * registry of src/spinel_ebpf/capabilities.rb (layer 2). */
+/* --- The clock a record's timestamps are on -------------------------------
+ *
+ * A record's `hdr.timestamp` / `start_ktime` are bpf_ktime_get_ns(), which is
+ * CLOCK_MONOTONIC: nanoseconds since boot. A span's start is a unix time. The
+ * conversion is five lines and the runtime has had them right for a long time --
+ * but they were five lines of C in otlp_agent.c and nothing else, so a consumer
+ * of the same records written elsewhere wrote its own, and one that writes none
+ * gets spans dated 1970-01-01 plus the machine's uptime. Measured on real
+ * records: nothing rejects that span; the backend stores it, out of every
+ * retention window, at exit 0.
+ *
+ * The decision: the kernel keeps emitting a raw ktime -- the conversion is
+ * genuinely userspace's, and it must be sampled in the process that is READING,
+ * because the offset is only valid on the machine and boot the record came from.
+ * What was wrong was not the division of labour, it was that the division was
+ * undeclared. Declaring the clock lets a generated reader emit the conversion
+ * instead of documenting it. */
+typedef struct {
+  const char *id;          /* clock id, named by CcEgressSpan.start_clock */
+  const char *kernel_src;  /* what the kernel called to produce the value */
+  const char *posix_clock; /* the POSIX clock it is the same clock as */
+  const char *to_wall;     /* the conversion, as one machine-checkable sentence */
+  const char *note;
+} CcClock;
+
+static const CcClock cc_clock_monotonic = {
+  .id          = "monotonic",
+  .kernel_src  = "bpf_ktime_get_ns()",
+  .posix_clock = "CLOCK_MONOTONIC",
+  .to_wall     = "wall_unix_ns = ktime_ns + (clock_gettime(CLOCK_REALTIME) - clock_gettime(CLOCK_MONOTONIC))",
+  .note        = "the offset must be sampled by the process reading the records, on the machine and "
+                 "boot that produced them: it is not a property of the record and it does not travel "
+                 "with a .bpf.o. Sample it once per drain, not once per record -- the two clocks "
+                 "drift under NTP slew and a per-record sample makes span order depend on the reader",
+};
+
+static inline const CcClock *const *cc_clock_all(int *n) {
+  static const CcClock *const v[] = { &cc_clock_monotonic };
+  *n = (int)(sizeof v / sizeof v[0]);
+  return v;
+}
+
+/* --- When an attribute is on the span, as a machine form -------------------
+ *
+ * `condition` is prose, and prose was enough while the only consumer was the C
+ * runtime that also wrote it. It is not enough for a reader that has the record
+ * bytes and nothing else: such a consumer has to decide, per attribute, whether
+ * "the request head parses" is one predicate or two, and what "daddr/dport
+ * non-zero" quantifies over. (Both were wrong in the prose -- see `present` on
+ * the http channel below.)
+ *
+ * So `present` is the same statement in a closed grammar the generator parses:
+ *
+ *   always | never
+ *   nonempty(<p>) | empty(<p>)      -- a char[] field or a "str" derivation
+ *   nonzero(<p>)  | zero(<p>)       -- a scalar field or an "int" derivation
+ *   byte_eq(<field>, <index>, '<c>')
+ *   all(<pred>, ...) | any(<pred>, ...)
+ *   unexpressible(<reason>)
+ *
+ * `<p>` names a field or a derived property OF THE SAME CHANNEL, and the
+ * generator refuses one that does not exist -- which is what makes the form a
+ * check on the prose rather than a second copy of it.
+ *
+ * TWO THINGS THIS DELIBERATELY DOES NOT DO.
+ *
+ * (1) It does not restrict itself to PUBLISHED properties. `zero(daddr)` reads a
+ *     field whose `expose` is NULL, and that is correct: `expose` answers "what
+ *     may a Ruby consumer read" (layer 1), and this answers "what does the
+ *     egress rule read" (layer 2). A reader evaluating `daddr == 0` does not
+ *     have to know what daddr means, and giving it the predicate is not the same
+ *     as giving Ruby the field.
+ *
+ * (2) It does not stretch to cover everything. The Redis channel's
+ *     db.operation.name gates on a RESP command parse that the channel does not
+ *     publish as a property at all, so there is no `<p>` to name and the honest
+ *     form is `unexpressible(...)` with the reason -- the same rule a consumer
+ *     transform follows when it cannot express a narrowing: REFUSE it and name
+ *     what is missing. Leaving those two as prose while calling the rest
+ *     machine-readable would make the gate a liar about the channel it covers
+ *     least well. */
 typedef struct {
   const char *key;        /* attribute key, verbatim as emitted */
   const char *source;     /* which record field (or derivation) it comes from */
   const char *stability;  /* "semconv" = OTel registry key; "spinel" = project-specific */
-  const char *condition;  /* when the attribute is present on the span */
-  const char *note;       /* provenance (experiment) / caveats */
+  const char *condition;  /* when the attribute is present on the span, in prose */
+  const char *present;    /* the same, in the closed grammar above */
+  const char *note;       /* provenance / caveats */
 } CcEgressAttr;
 
 /* The span one record turns into (the userspace consumer's output contract). */
@@ -567,7 +718,32 @@ typedef struct {
   const char         *span_name_fmt; /* span name, printf format with exactly one %s */
   const char         *span_name_arg; /* attribute key that fills the %s */
   const char         *span_kind;     /* OTLP SpanKind as emitted (kind=0 -> INTERNAL) */
-  const char         *timing;        /* what start/end mean */
+  const char         *timing;        /* what start/end mean, in prose */
+  /* The same, as a machine form. The prose above says three things at once
+   * (which field starts the span, how the end is built, and when the span
+   * degenerates to a point), and a reader needs the first two separately.
+   *
+   *   start_form  "record_ktime:<field>"     the field is a ktime on `start_clock`
+   *               "wall_now_minus:<prop>"    start is (wall now) - the property
+   *   start_clock a CcClock id, or "" for the wall_now_minus form
+   *   end_form    "start_plus:<prop>" | "start"
+   *
+   * Three start forms and two end forms cover all six spans -- measured, not
+   * assumed: all six were read before the vocabulary was chosen, because
+   * deciding the shape from one channel is how a rule that is true of one
+   * example gets published as a rule about all of them. The DNS channel's "equal
+   * to start for the query-only producer" is not a third end form, it is
+   * duration_ns being 0. */
+  const char         *start_form;
+  const char         *start_clock;
+  const char         *end_form;
+  /* When a record produces NO SPAN AT ALL. This is a property of the channel,
+   * and it used to be stated inside the parenthesis of ONE attribute's condition
+   * on the DNS channel ("always (a record whose QNAME does not parse is dropped,
+   * no span)") -- so a reader looking for the drop rule had to read every
+   * attribute's prose to find out it was not an attribute rule. Same grammar as
+   * `present`; "" (or "never") = every record becomes a span. */
+  const char         *drop_when;
   const char         *note;          /* caveats: other consumers of the same record, etc. */
   const CcEgressAttr *attrs;
   int                 nattrs;
@@ -651,7 +827,7 @@ static const CcRecField cc_rec_dns_fields[] = {
  * spnl_dns_qname() in src/runtime/otlp/otlp_agent.c -- the same function the
  * concise form uses to fill dns.question.name, so both forms see one hostname. */
 static const CcRecDerived cc_rec_dns_derived[] = {
-  { "qname", "str", "raw", "spnl_dns_qname", "bytes_to_str", 256,
+  { "qname", "str", "raw", "spnl_dns_qname", "bytes_to_str", "parse", 256,
     "length-prefixed DNS labels walked in userspace (an in-kernel walk blows up verifier state); "
     "empty when the record is not a parseable query. "
     "cap 256 = the domain bound: a DNS name is at most 255 bytes (RFC 1035 2.3.4), +1 for the NUL. "
@@ -667,14 +843,19 @@ static const char *const cc_rec_dns_producers[] = { "emit_dns", "dns_emit" };
 /* What spnl_otlp_dns_span_push makes of one record. Mirrors -- and now *feeds* --
  * spnl_otlp_dns_span_push_obj() in src/runtime/otlp/otlp_agent.c. */
 static const CcEgressAttr cc_rec_dns_egress_attrs[] = {
+  /* The parenthesis this condition used to carry ("a record whose QNAME does not
+   * parse is dropped, no span") was the CHANNEL's drop rule, not this attribute's
+   * presence rule. It has moved to the span's `drop_when` below, and what is left
+   * here is what was always true of the attribute itself. */
   { "dns.question.name", "raw[64] -> QNAME (length-prefixed labels walked in userspace)",
-    "semconv", "always (a record whose QNAME does not parse is dropped, no span)",
+    "semconv", "always (see the channel's drop_when: a record whose QNAME does not parse "
+    "produces no span at all, so on a span that exists this attribute is present)", "always",
     "the in-kernel label walk blows up verifier state, so the raw payload is copied bounded" },
   { "process.executable.name", "comm[16] (bpf_get_current_comm)",
-    "semconv", "comm non-empty",
+    "semconv", "comm non-empty", "nonempty(comm)",
     "the resolving process, not the resolver library (socket-layer hook)" },
   { "spnl.dns.latency_ns", "duration_ns",
-    "spinel", "duration_ns != 0",
+    "spinel", "duration_ns != 0", "nonzero(duration_ns)",
     "dns_emit's txid-correlated RTT; emit_dns is query-only so the attribute is absent" },
 };
 
@@ -686,6 +867,12 @@ static const CcEgressSpan cc_rec_dns_egress = {
   "dns.question.name",
   "INTERNAL",
   "start = hdr.timestamp (ktime -> unix); end = start + duration_ns (equal to start for emit_dns)",
+  "record_ktime:hdr.timestamp", "monotonic", "start_plus:duration_ns",
+  /* Two different records end in "no span" -- one whose bytes could not be read
+   * (raw_status != 0, and the drain says so) and one whose bytes are not a DNS
+   * query. Both leave `qname` empty, which is why the rule is stated over the
+   * derived property rather than over `raw`. */
+  "empty(qname)",
   "The request-tree push (spnl_otlp_request_tree_push) consumes the same record and the "
   "same attribute keys, but nests it under a request span as a CLIENT child",
   cc_rec_dns_egress_attrs,
@@ -755,20 +942,20 @@ static const CcRecField cc_rec_conn_fields[] = {
  * derivation it is the same function the span builder calls, so the two cannot
  * drift, and the unit lives in exactly one place. */
 static const CcRecDerived cc_rec_conn_derived[] = {
-  { "peer", "str", "family + daddr / daddr6_hi,daddr6_lo + dport", "spnl_conn_peer", "record_to_str", 64,
+  { "peer", "str", "family + daddr / daddr6_hi,daddr6_lo + dport", "spnl_conn_peer", "record_to_str", "render", 64,
     "\"<address>:<port>\" with the v4/v6 choice already made. The address half is the same "
     "function's output as network.peer.address and the port half is network.peer.port, so ev.peer is "
     "exactly the span name's subject (\"connect <peer>\") -- including the fact that an IPv6 address is "
     "NOT bracketed (\"::1:19377\"), because that is how the span name has spelled it since. "
     "cap 64 >= the longest such string: inet_ntop writes at most INET6_ADDRSTRLEN-1 = 45 characters, "
     "plus \":\" and 5 port digits and the NUL = 52" },
-  { "direction", "str", "oldstate", "conn_direction", "code_to_name", 16,
+  { "direction", "str", "oldstate", "conn_direction", "code_to_name", "declared", 16,
     "\"active\" (we initiated: SYN_SENT -> ESTABLISHED), \"passive\" (we accepted: SYN_RECV -> "
     "ESTABLISHED), \"other\". Byte-identical to the span attribute spnl.conn.direction (same function). "
     "cap 16 >= the longest of that closed set of literals (\"passive\", 7 + NUL). "
     "The three-line switch this used to be is now the declared value map `conn_direction`, so "
     "the two state numbers it keys on are checked against the kernel's enum instead of trusted" },
-  { "tcp_state", "str", "oldstate", "tcp_state", "code_to_name", 24,
+  { "tcp_state", "str", "oldstate", "tcp_state", "code_to_name", "declared", 24,
     "the pre-transition TCP state under its own name (\"SYN_SENT\", \"CLOSE\", ...) = the span "
     "attribute spnl.conn.tcp_state, from the declared value map `tcp_state` checked against the "
     "kernel's BTF enum. `direction` answers who opened the connection and collapses ten of the "
@@ -778,11 +965,15 @@ static const CcRecDerived cc_rec_conn_derived[] = {
     "rather than taking the note's word for it: the longest name (\"BOUND_INACTIVE\" = 14 + NUL) and "
     "the widest unnamed rendering of the source field (`oldstate` is a __u32, so "
     "\"unnamed(4294967295)\" = 19 + NUL). A closed set is the one derivation whose bound is a fact" },
-  { "srtt_us", "int", "srtt_us (the kernel's 1/8 us scale)", "spnl_conn_srtt_us", "record_to_int", 0,
+  { "srtt_us", "int", "srtt_us (the kernel's 1/8 us scale)", "srtt_us >> 3", "int_expr", "declared", 0,
     "smoothed RTT in MICROSECONDS -- the same value the span attribute net.peer.srtt_us "
-    "carries, because both are this one function's output. The >>3 that turns the kernel's 1/8 us "
+    "carries, because both are this one declaration's output. The >>3 that turns the kernel's 1/8 us "
     "into us is layer 2's business, so a consumer never divides by 8. Note it is the L4 smoothed RTT "
-    "(a property of the connection), not an L7 round trip" },
+    "(a property of the connection), not an L7 round trip. "
+    "This was a three-line C function (spnl_conn_srtt_us) until the audit asked what those three "
+    "lines DO -- one shift. As a declaration the scale reaches every reader of the contract and not "
+    "just the C runtime, which is the half putting the span and the typed consumer on one FUNCTION "
+    "could not fix: a reader that has neither still had to learn \"1/8 us\" from a sentence" },
 };
 
 /* --- conn's metric: route (2), a bound taken from an existing value map -------
@@ -821,26 +1012,27 @@ static const char *const cc_rec_conn_producers[] = { "emit_connect" };
 
 static const CcEgressAttr cc_rec_conn_egress_attrs[] = {
   { "network.peer.address", "daddr (AF_INET) or daddr6_hi/lo (AF_INET6) -> inet_ntop",
-    "semconv", "always", " / (IPv6 halves rejoined in userspace)" },
-  { "network.peer.port", "dport", "semconv", "always", "" },
-  { "network.transport", "constant \"tcp\"", "semconv", "always",
+    "semconv", "always", "always", "IPv6 halves rejoined in userspace" },
+  { "network.peer.port", "dport", "semconv", "always", "always", "" },
+  { "network.transport", "constant \"tcp\"", "semconv", "always", "always",
     "the channel only observes TCP state transitions" },
-  { "network.type", "family (AF_INET -> \"ipv4\", AF_INET6 -> \"ipv6\")", "semconv", "always", " /" },
-  { "net.peer.srtt_us", "srtt_us >> 3 (spnl_conn_srtt_us -- the same function as the property ev.srtt_us)",
-    "spinel", "always",
+  { "network.type", "family (AF_INET -> \"ipv4\", AF_INET6 -> \"ipv6\")", "semconv", "always", "always", "" },
+  { "net.peer.srtt_us", "srtt_us >> 3 (the declared int_expr derivation -- the same value as the property ev.srtt_us)",
+    "spinel", "always", "always",
     "semconv has no smoothed-RTT key, so this is a project key; the value is L4 srtt, not an L7 "
-    "round trip. the >>3 has one author, shared with the typed consumer" },
+    "round trip. The >>3 has one author, shared with the typed consumer, and that author is now the "
+    "declaration itself (int_expr) rather than a C function" },
   { "spnl.conn.direction", "oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other)",
-    "spinel", "always",
+    "spinel", "always", "always",
     "semconv has no connection-direction key. The mapping is the declared value map "
     "`conn_direction`, shared with the typed consumer's ev.direction" },
   { "spnl.conn.tcp_state", "oldstate -> value map `tcp_state` (the kernel's enum, by name)",
-    "spinel", "always",
+    "spinel", "always", "always",
     "semconv has no TCP-state key. spnl.conn.direction answers who opened the connection and "
     "says \"other\" for every state that is neither SYN_SENT nor SYN_RECV -- which is most of them on "
     "a probe that emits transitions other than ESTABLISHED. This is the same byte read as the state "
     "it is, and it is the same function's output as the typed consumer's ev.tcp_state" },
-  { "process.executable.name", "comm[16]", "semconv", "comm non-empty",
+  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "nonempty(comm)",
     "recovered from the sock->owner map when the transition fires in softirq context" },
 };
 
@@ -854,6 +1046,8 @@ static const CcEgressSpan cc_rec_conn_egress = {
   "network.peer.address, network.peer.port",
   "INTERNAL",
   "start = end = hdr.timestamp (ktime -> unix); a connect is a point event, so duration is 0",
+  "record_ktime:hdr.timestamp", "monotonic", "start",
+  "never",
   "The request-tree push consumes the same record and the same attribute keys, but nests it "
   "under a request span as a CLIENT child (and drops network.transport / network.type there)",
   cc_rec_conn_egress_attrs,
@@ -908,14 +1102,14 @@ static const CcRecField cc_rec_l7_fields[] = {
 static const char *const cc_rec_l7_producers[] = { "emit_l7" };
 
 static const CcEgressAttr cc_rec_l7_egress_attrs[] = {
-  { "network.peer.address", "daddr -> inet_ntop", "semconv", "always",
+  { "network.peer.address", "daddr -> inet_ntop", "semconv", "always", "always",
     "AF_INET6 records render as \"(ipv6 not carried)\" -- this channel has no v6 field" },
-  { "network.peer.port", "dport", "semconv", "always", "" },
-  { "network.transport", "constant \"tcp\"", "semconv", "always", "" },
-  { "network.type", "family (AF_INET -> \"ipv4\", AF_INET6 -> \"ipv6\")", "semconv", "always", "" },
-  { "spnl.l7.latency_ns", "duration_ns", "spinel", "always",
+  { "network.peer.port", "dport", "semconv", "always", "always", "" },
+  { "network.transport", "constant \"tcp\"", "semconv", "always", "always", "" },
+  { "network.type", "family (AF_INET -> \"ipv4\", AF_INET6 -> \"ipv6\")", "semconv", "always", "always", "" },
+  { "spnl.l7.latency_ns", "duration_ns", "spinel", "always", "always",
     "the span duration is authoritative; this attribute is the same number, for querying" },
-  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "" },
+  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "nonempty(comm)", "" },
 };
 
 static const char *const cc_rec_l7_enrichers[] = { "k8s", "cri" };
@@ -926,6 +1120,8 @@ static const CcEgressSpan cc_rec_l7_egress = {
   "network.peer.address, network.peer.port",
   "CLIENT",
   "start = start_ktime (ktime -> unix); end = start + duration_ns",
+  "record_ktime:start_ktime", "monotonic", "start_plus:duration_ns",
+  "never",
   "the earlier multiplexing guard suppresses records for sockets carrying overlapping requests, so a "
   "record on this channel is always one clean request/response pair",
   cc_rec_l7_egress_attrs,
@@ -990,14 +1186,14 @@ static const CcRecField cc_rec_http_fields[] = {
  * slip in silently. Like bytes_to_str, the implementation knows how wide its
  * source field is (the table does not pass a length) -- see the earlier convention. */
 static const CcRecDerived cc_rec_http_derived[] = {
-  { "method", "str", "req",  "spnl_http_method", "bytes_to_str", 65,
+  { "method", "str", "req",  "spnl_http_method", "bytes_to_str", "parse", 65,
     "first token of the request head; empty when the head does not parse. "
     "cap 65 = req[64] + NUL, the bound had to reach for: the kernel-side filter only inspects the "
     "first 4 bytes, so a head with no space at all is reachable and the token is then the whole field" },
-  { "path",   "str", "req",  "spnl_http_path",   "bytes_to_str", 65,
+  { "path",   "str", "req",  "spnl_http_path",   "bytes_to_str", "parse", 65,
     "second token of the request head (path only -- no body, no headers). "
     "cap 65 = req[64] + NUL (same bound as `method`: the token cannot outgrow the field it is cut from)" },
-  { "status", "int", "resp", "spnl_http_status", "bytes_to_int", 0,
+  { "status", "int", "resp", "spnl_http_status", "bytes_to_int", "parse", 0,
     "status digits of the response head; 0 when the head does not parse. "
     ">= 500 is what sets Span.status = ERROR on the egress side" },
 };
@@ -1076,27 +1272,48 @@ static const CcRecMetric cc_rec_http_metrics[] = {
 static const char *const cc_rec_http_producers[] = { "http_emit", "ssl_emit" };
 
 static const CcEgressAttr cc_rec_http_egress_attrs[] = {
-  { "http.request.method", "req[64] -> first token", "semconv", "the request head parses",
+  /* Writing these as machine forms found two places where the prose was not what
+   * the runtime does, and both were the kind of error prose is good at hiding --
+   * a quantifier and a scope.
+   *
+   *   "the request head parses" covered BOTH method and url.path, and the runtime
+   *   tests them separately (`if (method[0])` / `if (path[0])`). A head with no
+   *   space in it -- reachable, because the kernel-side filter only inspects four
+   *   bytes -- yields a method and no path, and the prose said neither would
+   *   appear.
+   *
+   *   "daddr/dport non-zero" reads as a conjunction. The runtime's rule is the
+   *   NEGATION of the url.scheme rule, i.e. `!(daddr == 0 && dport == 0)`: a
+   *   record with daddr 0 and a non-zero dport does get peer attributes.
+   *
+   * Neither was ever wrong on the wire -- the C was right and the sentence was a
+   * summary of it. The point is that a reader with only the sentence would have
+   * written something else. */
+  { "http.request.method", "req[64] -> first token", "semconv", "the request head parses", "nonempty(method)",
     "the kernel-side method filter already rejected non-HTTP sends" },
-  { "url.path", "req[64] -> second token", "semconv", "the request head parses", "" },
+  { "url.path", "req[64] -> second token", "semconv", "the request head has a second token", "nonempty(path)", "" },
   { "http.response.status_code", "resp[16] -> status digits", "semconv", "the response head parses",
+    "nonzero(status)",
     "status >= 500 also sets Span.status = ERROR (the RED error axis)" },
   { "url.scheme", "constant \"https\"", "semconv", "daddr == 0 && dport == 0 (the TLS path)",
+    "all(zero(daddr),zero(dport))",
     "an SSL uprobe sees plaintext but no socket, so peer attributes are omitted instead" },
-  { "network.peer.address", "daddr -> inet_ntop", "semconv", "daddr/dport non-zero (the TCP path)", "" },
-  { "network.peer.port", "dport", "semconv", "daddr/dport non-zero (the TCP path)", "" },
-  { "network.transport", "constant \"tcp\"", "semconv", "always", "" },
+  { "network.peer.address", "daddr -> inet_ntop", "semconv", "not the TLS path (daddr and dport not both zero)",
+    "any(nonzero(daddr),nonzero(dport))", "" },
+  { "network.peer.port", "dport", "semconv", "not the TLS path (daddr and dport not both zero)",
+    "any(nonzero(daddr),nonzero(dport))", "" },
+  { "network.transport", "constant \"tcp\"", "semconv", "always", "always", "" },
   /* the l7 channel has carried spnl.l7.latency_ns since and this one did not,
    * although `ev.duration_ns` is an exposed property on BOTH -- so on http the number a
    * Ruby consumer filters on had no counterpart in the span except its length. Declared
    * with l7's condition ("always") and l7's source (duration_ns) so the two channels
    * answer the same query. The span duration remains authoritative; this is the same
    * number, for querying. */
-  { "spnl.http.latency_ns", "duration_ns", "spinel", "always",
+  { "spnl.http.latency_ns", "duration_ns", "spinel", "always", "always",
     "symmetric with spnl.l7.latency_ns -- the span duration is authoritative, "
     "this attribute is the same number, for querying. On the TLS path it is still the "
     "SSL_write -> SSL_read round trip" },
-  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "" },
+  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "nonempty(comm)", "" },
 };
 
 static const char *const cc_rec_http_enrichers[] = { "k8s", "cri" };
@@ -1107,6 +1324,8 @@ static const CcEgressSpan cc_rec_http_egress = {
   "http.request.method, url.path",
   "CLIENT",
   "start = start_ktime (ktime -> unix); end = start + duration_ns",
+  "record_ktime:start_ktime", "monotonic", "start_plus:duration_ns",
+  "never",
   "the span carries no request body or headers -- only method, path and status leave the process",
   cc_rec_http_egress_attrs,
   (int)(sizeof cc_rec_http_egress_attrs / sizeof cc_rec_http_egress_attrs[0]),
@@ -1160,17 +1379,34 @@ static const CcRecField cc_rec_redis_fields[] = {
 
 static const char *const cc_rec_redis_producers[] = { "redis_emit" };
 
+/* This channel is the one that does NOT come out fully machine-readable, and
+ * saying so is the point. `db.operation.name` and `db.query.text` are gated on a
+ * RESP command parse that redis_parse_cmd_key() performs in the runtime -- and
+ * unlike http's method/path, this channel publishes NO derived property for it
+ * (it has no `derived` table and no typed consumer), so there is no `<p>` for a
+ * predicate to name. Writing `nonempty(command)` here would name a property that
+ * does not exist; writing "always" would be false. The declaration therefore
+ * refuses: it states that the rule cannot be expressed, and says exactly what is
+ * missing. Publishing the parse as a derivation would make both expressible, and
+ * that is an additive change somebody can make on purpose rather than a hole
+ * nobody can see. */
 static const CcEgressAttr cc_rec_redis_egress_attrs[] = {
-  { "db.system", "constant \"redis\"", "semconv", "always", "" },
-  { "db.operation.name", "req[64] -> first RESP bulk string, upper-cased", "semconv", "the command parses", "" },
+  { "db.system", "constant \"redis\"", "semconv", "always", "always", "" },
+  { "db.operation.name", "req[64] -> first RESP bulk string, upper-cased", "semconv", "the command parses",
+    "unexpressible(the gate is a RESP command parse of req[64] that this channel does not publish as "
+    "a derived property -- redis has no typed consumer, so there is no property to name. Publishing "
+    "the parse as a derivation would make this nonempty(<that property>))", "" },
   { "db.query.text", "req[64] -> command + first key", "semconv", "the command parses",
+    "unexpressible(same gate as db.operation.name: the RESP command parse is not a published "
+    "property of this channel)",
     "deliberately command + key only -- RESP values are never copied into the span" },
   { "error.type", "constant \"redis_error\"", "semconv", "resp[0] == '-' (RESP error reply)",
+    "byte_eq(resp,0,'-')",
     "also sets Span.status = ERROR (the RED error axis)" },
-  { "network.peer.address", "daddr -> inet_ntop", "semconv", "always", "" },
-  { "network.peer.port", "dport", "semconv", "always", "" },
-  { "network.transport", "constant \"tcp\"", "semconv", "always", "" },
-  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "" },
+  { "network.peer.address", "daddr -> inet_ntop", "semconv", "always", "always", "" },
+  { "network.peer.port", "dport", "semconv", "always", "always", "" },
+  { "network.transport", "constant \"tcp\"", "semconv", "always", "always", "" },
+  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "nonempty(comm)", "" },
 };
 
 static const char *const cc_rec_redis_enrichers[] = { "k8s", "cri" };
@@ -1181,6 +1417,8 @@ static const CcEgressSpan cc_rec_redis_egress = {
   "db.operation.name",
   "CLIENT",
   "start = start_ktime (ktime -> unix); end = start + duration_ns",
+  "record_ktime:start_ktime", "monotonic", "start_plus:duration_ns",
+  "never",
   "the record layout is identical to the http channel, which is why one drain used to serve both; "
   "each now unpacks through its own generated mirror",
   cc_rec_redis_egress_attrs,
@@ -1246,27 +1484,32 @@ static const CcRecField cc_rec_offcpu_fields[] = {
  *                 the ambient map is the same one the concise push already uses.
  *                 See spnl_offcpu_wait_kind() for why that is not a new form. */
 static const CcRecDerived cc_rec_offcpu_derived[] = {
-  { "method", "str", "req", "spnl_http_method", "bytes_to_str", 65,
+  { "method", "str", "req", "spnl_http_method", "bytes_to_str", "parse", 65,
     "first token of the request head -- the http channel's derivation, verbatim "
     "(offcpu.req is the same bounded copy of the same wire, pinned by a _Static_assert). "
     "cap 65 = req[64] + NUL, the same bound as http.method for the same reason" },
-  { "path",   "str", "req", "spnl_http_path",   "bytes_to_str", 65,
+  { "path",   "str", "req", "spnl_http_path",   "bytes_to_str", "parse", 65,
     "second token of the request head (path only). Shares http's derivation and bound" },
-  { "status", "int", "resp", "spnl_http_status", "bytes_to_int", 0,
+  { "status", "int", "resp", "spnl_http_status", "bytes_to_int", "parse", 0,
     "status digits of the response head; 0 when it does not parse. "
     ">= 500 is what sets Span.status = ERROR on the egress side" },
-  { "offcpu_ns", "int", "offcpu_ns clamped to duration_ns", "spnl_offcpu_offcpu_ns", "record_to_int", 0,
+  { "offcpu_ns", "int", "offcpu_ns clamped to duration_ns", "min(offcpu_ns, duration_ns)", "int_expr", "declared", 0,
     "nanoseconds of the request window spent NOT running -- the same value the span "
-    "attribute spnl.offcpu_ns carries, because both are this one function's output. The clamp is "
+    "attribute spnl.offcpu_ns carries, because both are this one declaration's output. The clamp is "
     "not cosmetic: offcpu_ns is accumulated by sched_switch while duration_ns is measured by the "
     "recv/send pair, so a record whose sum exceeds its window is expressible, and the span has "
     "always reported the clamped number. A consumer filtering on `ev.offcpu_ns > x` therefore "
     "filters on exactly what it would see on the span" },
-  { "oncpu_ns", "int", "duration_ns - min(offcpu_ns, duration_ns)", "spnl_offcpu_oncpu_ns", "record_to_int", 0,
+  { "oncpu_ns", "int", "duration_ns - min(offcpu_ns, duration_ns)",
+    "duration_ns - derived(offcpu_ns)", "int_expr", "declared", 0,
     "nanoseconds of the window spent running = the span attribute spnl.oncpu_ns. Not a "
     "field: the record carries the window and the wait, and this is their difference (so "
-    "ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns by construction)" },
-  { "wait_kind", "str", "wait_stack -> kallsyms scan of the captured frames", "spnl_offcpu_wait_kind", "record_to_str", 16,
+    "ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns by construction). "
+    "It reads `derived(offcpu_ns)` -- the CLAMPED value, not the field of the same name. That "
+    "spelling exists so that the clamp keeps having exactly one author: re-spelling "
+    "min(offcpu_ns, duration_ns) here would put it in two places, which is the shape the srtt "
+    "derivation had to be rescued from" },
+  { "wait_kind", "str", "wait_stack -> kallsyms scan of the captured frames", "spnl_offcpu_wait_kind", "record_to_str", "ambient", 16,
     "what the request was waiting ON, byte-identical to the span attribute spnl.wait.kind "
     "(same function): \"io\" / \"lock\" / \"sleep\" / \"net\" / \"other\" (a wait whose frames match no "
     "signature) / \"none\" (wait_stack < 0, i.e. the window contained no voluntary off-CPU) / "
@@ -1274,7 +1517,7 @@ static const CcRecDerived cc_rec_offcpu_derived[] = {
     " classifies the LAST wait's top frames, not every wait in the window. "
     "cap 16 >= the longest of that closed set of literals (\"unknown\", 7 + NUL)" },
   { "wait_stack_trace", "str", "wait_stack -> the same frames wait_kind classifies, symbolised",
-    "spnl_offcpu_wait_stack", "record_to_str", 448,
+    "spnl_offcpu_wait_stack", "record_to_str", "ambient", 448,
     "WHERE the wait happened -- the frames themselves, \";\"-joined, INNERMOST FIRST, as "
     "kallsyms names without offsets. Named for the field it reads (`wait_stack` is a stack id and "
     "stays unexposed; this is the reading of it) but deliberately not the same word, because an "
@@ -1297,21 +1540,27 @@ static const CcRecDerived cc_rec_offcpu_derived[] = {
 static const char *const cc_rec_offcpu_producers[] = { "offcpu_emit" };
 
 static const CcEgressAttr cc_rec_offcpu_egress_attrs[] = {
-  { "http.request.method", "req[64] -> first token", "semconv", "the request head parses", "" },
-  { "url.path", "req[64] -> second token", "semconv", "the request head parses", "" },
+  { "http.request.method", "req[64] -> first token", "semconv", "the request head parses", "nonempty(method)", "" },
+  { "url.path", "req[64] -> second token", "semconv", "the request head has a second token", "nonempty(path)", "" },
   { "http.response.status_code", "resp[16] -> status digits", "semconv", "the response head parses",
+    "nonzero(status)",
     "status >= 500 also sets Span.status = ERROR" },
-  { "spnl.offcpu_ns", "min(offcpu_ns, duration_ns)", "spinel", "always",
+  { "spnl.offcpu_ns", "min(offcpu_ns, duration_ns)", "spinel", "always", "always",
     "eBPF-specific -- how much of the request was spent not running" },
-  { "spnl.oncpu_ns", "duration_ns - offcpu_ns", "spinel", "always", "" },
+  { "spnl.oncpu_ns", "duration_ns - offcpu_ns", "spinel", "always", "always", "" },
   { "spnl.wait.kind", "wait_stack -> kallsyms scan (io / lock / sleep / net / other / none / unknown)",
-    "spinel", "always",
+    "spinel", "always", "always",
     "best-effort classification of the last wait's top frames. \"none\" = no voluntary "
     "off-CPU in the window (wait_stack < 0); \"unknown\" = the stack map or /proc/kallsyms could "
     "not be read. Same function as the typed consumer's ev.wait_kind" },
   { "spnl.wait.stack", "wait_stack -> the same frames spnl.wait.kind classifies, symbolised "
     "(\";\"-joined, innermost first, at most SPNL_STACK_FRAMES of them)",
     "spinel", "SPNL_STACK_FRAMES > 0 and the frames could be read (default 0 = attribute absent)",
+    /* The env gate lives INSIDE the derivation (it returns an empty string when
+     * SPNL_STACK_FRAMES is 0 or the frames cannot be read), so the presence rule
+     * is the same one every other string attribute has. The prose named the
+     * mechanism; the machine form names the observable. */
+    "nonempty(wait_stack_trace)",
     "WHERE the request waited, beside WHAT it waited on. Same function's output as the typed "
     "consumer's ev.wait_stack_trace, and the same frame fetch spnl.wait.kind classifies -- so the "
     "kind is always explained by a frame in this value. "
@@ -1323,7 +1572,7 @@ static const CcEgressAttr cc_rec_offcpu_egress_attrs[] = {
     "Opt-in because it is the one attribute here whose size is unbounded by the record: up to 448 "
     "bytes per span, on both the request-window span and its off-CPU wait child, inside batches of "
     "up to SPNL_OTLP_BATCH_MAX spans" },
-  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "" },
+  { "process.executable.name", "comm[16]", "semconv", "comm non-empty", "nonempty(comm)", "" },
 };
 
 static const char *const cc_rec_offcpu_enrichers[] = { "k8s", "cri" };
@@ -1335,6 +1584,14 @@ static const CcEgressSpan cc_rec_offcpu_egress = {
   "SERVER",
   "start = now - duration_ns (the push path) or start_ktime (the request-tree path); "
   "end = start + duration_ns",
+  /* The machine form describes THIS span (the push path / to_span, which is what
+   * push_fn names). The request-tree path is a different consumer of the same
+   * record and anchors on start_ktime -- it stays in the prose and in the note
+   * below, because a second consumer's timing is not this span's timing. This is
+   * also the only channel whose start is not a record field, which is why the
+   * vocabulary needed a second start form rather than one. */
+  "wall_now_minus:duration_ns", "", "start_plus:duration_ns",
+  "never",
   "one record renders as TWO spans: the request window plus, when offcpu_ns > 0, a nested "
   "\"off-CPU wait (<kind>)\" child carrying spnl.wait.kind and spnl.offcpu_ns. The typed "
   "consumer's to_span(ev) builds the request-window span (the parent, which carries all the "
