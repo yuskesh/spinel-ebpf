@@ -1251,6 +1251,13 @@ class CapabilitiesTest < Minitest::Test
   # layer exists to remove.
   DERIV_GENERATED = { "code_to_name" => "static inline void spnl_valmap_%s(long v, char *out, int cap)" }.freeze
 
+  # int_expr is on the generated side too, but unlike code_to_name its `impl`
+  # column names neither a runtime function nor a table id -- it IS the
+  # expression. So it is looked for differently: a helper in the generated header
+  # carrying `/* declared: <expr> */`, and no function of that name in the
+  # runtime.
+  DERIV_EXPR_FORM = "int_expr"
+
   def test_runtime_provides_what_the_generated_consumer_requires
     agent = File.read(OTLP_AGENT_SRC)
     src   = File.read(SCHEMA_TABLE_SRC)
@@ -1272,6 +1279,18 @@ class CapabilitiesTest < Minitest::Test
                           "the lookup for value map #{impl} (#{form}) is not in the generated header"
           refute_match(/^\s*(static\s+)?\w[\w \*]*\bspnl_valmap_#{Regexp.escape(impl)}\s*\(/, agent,
                        "the runtime carries a hand-written copy of value map #{impl} (two tables)")
+          next
+        end
+        if form == DERIV_EXPR_FORM
+          hdr  = File.read(MIRROR_GEN_SRC)
+          prop = dbody[/\{\s*"([^"]+)",\s*"[^"]+",\s*"[^"]+",\s*"#{Regexp.escape(impl)}"/, 1]
+          refute_nil prop, "cannot read the property name of the int_expr derivation"
+          assert_includes hdr, "static inline long spnl_recd_#{id}_#{prop}_val(const spnl_rec_#{id}_t *r)",
+                          "the helper for int_expr derivation #{prop} is not in the generated header"
+          assert_includes hdr, "/* declared: #{impl} */",
+                          "the generated body does not carry the declared expression (the two could differ)"
+          refute_match(/^\s*(static\s+)?\w[\w \*]*\bspnl_#{id}_#{prop}\s*\(/, agent,
+                       "the runtime also hand-writes int_expr derivation #{prop} (two authors)")
           next
         end
         pat = DERIV_PROTO.fetch(form) { flunk "unknown impl_form #{form} (the generator should have died)" }
@@ -1477,9 +1496,10 @@ class CapabilitiesTest < Minitest::Test
   # offcpu's three own derivations -- the ones where EXPOSING THE RAW FIELD WOULD
   # DISAGREE WITH THE SPAN. What is pinned here is a structure in which they cannot
   # disagree:
-  #   - the clamp (min(offcpu_ns, duration_ns)) exists in exactly one place in the
-  #     agent, inside spnl_offcpu_offcpu_ns (two places and `ev.offcpu_ns` could
-  #     quietly drift from spnl.offcpu_ns -- the same shape as the srtt shift below)
+  #   - the clamp (min(offcpu_ns, duration_ns)) has exactly one author, the
+  #     declared int_expr (two and `ev.offcpu_ns` could quietly drift from
+  #     spnl.offcpu_ns -- the same shape as the srtt shift below). That one author
+  #     moved out of the hand-written C, so the count of clamps in the agent is 0
   #   - oncpu is the difference of the CLAMPED value (= the attribute
   #     spnl.oncpu_ns), not a difference of raw fields
   #   - the wait.kind classification lives in one function in the agent
@@ -1488,15 +1508,19 @@ class CapabilitiesTest < Minitest::Test
   def test_offcpu_derivations_have_one_author
     agent = File.read(OTLP_AGENT_SRC)
     bare  = agent.gsub(%r{/\*.*?\*/}m, "")
-    clamp = bare.scan(/offcpu_ns\s*>\s*[\w>-]*duration_ns/)
-    assert_equal 1, clamp.length,
-                 "the off-CPU clamp appears in #{clamp.length} places (ev.offcpu_ns and spnl.offcpu_ns could drift)"
-    impl = bare[/^long spnl_offcpu_offcpu_ns\(const spnl_rec_offcpu_t \*r\).*?\n\}\n/m]
-    refute_nil impl, "spnl_offcpu_offcpu_ns() does not have the declared C signature"
-    assert_match(/offcpu_ns\s*>\s*r->duration_ns/, impl, "the clamp is not inside the derivation")
-    on = bare[/^long spnl_offcpu_oncpu_ns\(const spnl_rec_offcpu_t \*r\).*?\n\}\n/m]
-    refute_nil on, "spnl_offcpu_oncpu_ns() does not have the declared C signature"
-    assert_includes on, "spnl_offcpu_offcpu_ns(", "oncpu subtracts the raw field instead of the clamped value"
+    gen   = File.read(MIRROR_GEN_SRC).gsub(%r{/\*.*?\*/}m, "")
+    hand_clamp = bare.scan(/offcpu_ns\s*[<>]\s*[\w>()-]*duration_ns/)
+    assert_equal 0, hand_clamp.length,
+                 "the off-CPU clamp appears #{hand_clamp.length} times in otlp_agent.c " \
+                 "(the declared int_expr should be its only author)"
+    impl = gen[/^static inline long spnl_recd_offcpu_offcpu_ns_val\(const spnl_rec_offcpu_t \*r\).*?\n\}\n/m]
+    refute_nil impl, "the generated helper for offcpu_ns is missing"
+    assert_match(/offcpu_ns\)\s*<\s*\(r->duration_ns/, impl, "the clamp is not inside the generated helper")
+    on = gen[/^static inline long spnl_recd_offcpu_oncpu_ns_val\(const spnl_rec_offcpu_t \*r\).*?\n\}\n/m]
+    refute_nil on, "the generated helper for oncpu_ns is missing"
+    assert_includes on, "spnl_recd_offcpu_offcpu_ns_val(",
+                    "oncpu subtracts the raw field instead of the clamped value " \
+                    "(the declaration should read `duration_ns - derived(offcpu_ns)`)"
     # One classifier, and one door to it (the derivation).
     assert_equal 1, bare.scan(/^static const char \*_oc_wait_kind\(/).length
     kind = bare[/^void spnl_offcpu_wait_kind\(const spnl_rec_offcpu_t \*r.*?\n\}\n/m]
@@ -1505,11 +1529,11 @@ class CapabilitiesTest < Minitest::Test
     # The span side (the builder shared by the short and explicit forms) and the
     # child span in the request tree go through the same derivations.
     builder = bare[/^static int offcpu_fill_span\(.*?\n\}\n/m]
-    %w[spnl_offcpu_offcpu_ns( spnl_offcpu_oncpu_ns( spnl_offcpu_wait_kind(].each do |i|
+    %w[spnl_recd_offcpu_offcpu_ns_val( spnl_recd_offcpu_oncpu_ns_val( spnl_offcpu_wait_kind(].each do |i|
       assert_includes builder, i, "the span builder does not go through derivation #{i}"
     end
     tree = bare[/^int spnl_otlp_request_tree_push_obj\(.*?\n\}\n/m]
-    %w[spnl_offcpu_offcpu_ns( spnl_offcpu_oncpu_ns( spnl_offcpu_wait_kind(].each do |i|
+    %w[spnl_recd_offcpu_offcpu_ns_val( spnl_recd_offcpu_oncpu_ns_val( spnl_offcpu_wait_kind(].each do |i|
       assert_includes tree, i, "the request tree computes it on its own (#{i} not used)"
     end
     # Declaration side: all three are derived, not raw exposed fields.
@@ -1585,21 +1609,27 @@ class CapabilitiesTest < Minitest::Test
   #     derivation's impl
   #   - the request tree -- the second consumer, which turns the same record into a
   #     child span -- goes through that same impl
-  #   - `>> 3` EXISTS IN EXACTLY ONE PLACE in the agent (two and it could drift)
+  #   - `>> 3` EXISTS IN EXACTLY ONE PLACE (two and it could drift)
   # The third is the real one: one place that divides means one unit, checked
-  # mechanically.
+  # mechanically. That one place is now the DECLARATION (impl_form int_expr), so
+  # the agent must not contain the shift at all.
   def test_conn_srtt_scaling_has_one_author
-    agent = File.read(OTLP_AGENT_SRC)
-    impl  = agent[/^long spnl_conn_srtt_us\(const spnl_rec_conn_t \*r\).*?\n\}\n/m]
-    refute_nil impl, "spnl_conn_srtt_us() does not have the declared C signature"
-    assert_match(/srtt_us\s*>>\s*3/, impl, "the derivation does not convert 1/8 us -> us")
-    assert_equal 1, agent.scan(/srtt_us\s*>>\s*3/).length,
-                 "the srtt unit conversion appears in more than one place (ev.srtt_us and the span attribute could drift)"
+    # A mention in prose is not a conversion: strip comments before counting.
+    agent = File.read(OTLP_AGENT_SRC).gsub(%r{/\*.*?\*/}m, "")
+    hdr   = File.read(MIRROR_GEN_SRC)
+    table = File.read(SCHEMA_TABLE_SRC)
+    assert_equal 0, agent.scan(/srtt_us\s*>>\s*3/).length,
+                 "the srtt unit conversion is still in otlp_agent.c (the declaration should be its only author)"
+    assert_equal 1, table.scan(/"srtt_us >> 3"/).length,
+                 "the conversion does not appear exactly once on the declaration side"
+    impl = hdr[/^static inline long spnl_recd_conn_srtt_us_val\(const spnl_rec_conn_t \*r\).*?\n\}\n/m]
+    refute_nil impl, "the generated helper for srtt_us is missing"
+    assert_match(/srtt_us\)\s*>>\s*\(3\)/, impl, "the generated body does not convert 1/8 us -> us")
     builder = agent[/static int conn_fill_span\(.*?\n\}\n/m]
-    assert_includes builder, "spnl_conn_srtt_us(", "the span does not go through the impl behind ev.srtt_us"
+    assert_includes builder, "spnl_recd_conn_srtt_us_val(", "the span does not go through what backs ev.srtt_us"
     tree = agent[/static int otlp_tree_fill_conn\(.*?\n\}\n/m]
     refute_nil tree, "cannot read otlp_tree_fill_conn()"
-    assert_includes tree, "spnl_conn_srtt_us(", "the child span converts on its own"
+    assert_includes tree, "spnl_recd_conn_srtt_us_val(", "the child span converts on its own"
     # Declaration side: srtt_us is derived (not a raw exposed field) and an Integer
     p = CAP.record_properties("conn").find { |x| x[:name] == "srtt_us" }
     refute_nil p, "ev.srtt_us disappeared (existing consumers break)"

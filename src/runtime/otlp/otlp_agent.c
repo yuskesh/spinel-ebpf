@@ -631,20 +631,19 @@ void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap) {
  * on the codegen side, where the TCP_STATE_* constants are still three short of
  * the kernel's and nobody had noticed. */
 
-/* `ev.srtt_us` is the net.peer.srtt_us attribute itself. The kernel's
- * tcp_sock->srtt_us is in eighths of a microsecond, so the real value is that
- * shifted right by three.
+/* `ev.srtt_us` is the net.peer.srtt_us attribute itself -- and it is NO LONGER
+ * IMPLEMENTED HERE. The kernel's tcp_sock->srtt_us is in eighths of a
+ * microsecond, so the real value is that shifted right by three; that shift was
+ * the whole body.
  *
  * This field was once exposed raw, and was the one property where the value Ruby
  * saw differed from the value on the wire: a 1 ms round trip read as 1000 in the
- * span and 8000 in Ruby. Writing "divide by 8" in a note is a warning, not a
- * contract. Confining the unit to one function -- called by both span-building
- * forms and by the request-tree assembly -- makes "what Ruby sees is what goes out"
- * structural instead. A scale is part of what a number means, so it belongs on
- * this side. */
-long spnl_conn_srtt_us(const spnl_rec_conn_t *r) {
-    return r ? (long)(r->srtt_us >> 3) : 0;
-}
+ * span and 8000 in Ruby. Confining the unit to one function fixed that for the
+ * readers inside this process. Making it one DECLARATION (impl_form int_expr,
+ * `srtt_us >> 3`) fixes it for every reader of the contract, including one in
+ * another language that has neither the function nor this file -- a function is
+ * shared only by the translation units that link it. The generated body is
+ * spnl_recd_conn_srtt_us_val() in record_mirror_gen.h. */
 
 /* Build the span its egress declaration describes from one record. Both the
  * one-call push and the explicit to_span go through this, as they do for the other
@@ -684,7 +683,7 @@ static int conn_fill_span(const spnl_rec_conn_t *rr, int64_t off, uint64_t *seed
     /* Microseconds. semconv has no attribute for round-trip time, so the name is
      * ours. The scaling lives in the derivation, so this is literally the output of
      * the same function `ev.srtt_us` calls. */
-    snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US);     snprintf(attrs[n].val,sizeof attrs[n].val,"%lld",(long long)spnl_conn_srtt_us(rr)); n++;
+    snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US);     snprintf(attrs[n].val,sizeof attrs[n].val,"%lld",(long long)spnl_recd_conn_srtt_us_val(rr)); n++;
     /* active/passive. semconv has no connection-direction key -> custom. */
     snprintf(attrs[n].key,sizeof attrs[n].key,"%s",SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION);  snprintf(attrs[n].val,sizeof attrs[n].val,"%s",dir); n++;
     /* Direction is a reading of "who opened this", and it folds everything that
@@ -1713,25 +1712,20 @@ static void offcpu_set_stack_ctx(struct bpf_object *obj, const char *stacks_map)
     snprintf(g_offcpu_stacks, sizeof g_offcpu_stacks, "%s", stacks_map ? stacks_map : "");
 }
 
-/* `ev.offcpu_ns` is the spnl.offcpu_ns attribute itself. The clamp is not
- * decoration: the off-CPU total is accumulated by the scheduler tracepoint while
- * the window is measured by the recv/send pair, and two hooks measuring separately
- * can produce a total that exceeds the window. Spans have always reported the
- * clamped value, so Ruby gets the clamped value too. Handing over the raw one would
- * agree on ordinary records and differ only on anomalous ones -- lying exactly
- * where a filter matters most. */
-long spnl_offcpu_offcpu_ns(const spnl_rec_offcpu_t *r) {
-    if (!r) return 0;
-    return (long)(r->offcpu_ns > r->duration_ns ? r->duration_ns : r->offcpu_ns);
-}
-
-/* `ev.oncpu_ns` is the spnl.oncpu_ns attribute: not a field but a difference, the
- * window minus the wait. That makes ev.oncpu_ns + ev.offcpu_ns == ev.duration_ns
- * true by construction. */
-long spnl_offcpu_oncpu_ns(const spnl_rec_offcpu_t *r) {
-    if (!r) return 0;
-    return (long)(r->duration_ns - (uint64_t)spnl_offcpu_offcpu_ns(r));
-}
+/* `ev.offcpu_ns` (the spnl.offcpu_ns attribute) and `ev.oncpu_ns` (spnl.oncpu_ns)
+ * are NOT IMPLEMENTED HERE either. The clamp is not decoration -- the off-CPU
+ * total is accumulated by the scheduler tracepoint while the window is measured
+ * by the recv/send pair, and two hooks measuring separately can produce a total
+ * that exceeds the window, so spans have always reported the clamped value --
+ * but the clamp is one EXPRESSION, `min(offcpu_ns, duration_ns)`, and an
+ * expression is not domain logic. The same judgement that made a closed set of
+ * names a declaration makes arithmetic over a record's own fields one: the body
+ * is generated (spnl_recd_offcpu_offcpu_ns_val / _oncpu_ns_val).
+ *
+ * There is nothing to gain on this side -- the output does not change by a byte.
+ * What gains is a READER of the contract, which otherwise has to reconstruct the
+ * clamp and the scale from prose in a `note`, and a scale or a clamp read wrong
+ * is wrong silently. */
 
 /* `ev.wait_kind` is the spnl.wait.kind attribute itself, from the same classifier. */
 void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap) {
@@ -1786,8 +1780,8 @@ static int offcpu_fill_span(const spnl_rec_offcpu_t *rr, uint64_t now_unix, uint
     spnl_http_method(rr->req, method, (int)sizeof method);
     spnl_http_path(rr->req, path, (int)sizeof path);
     int status = (int)spnl_http_status(rr->resp);
-    uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);   /* ev.offcpu_ns, same function */
-    uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);    /* ev.oncpu_ns,  same function */
+    uint64_t offcpu = (uint64_t)spnl_recd_offcpu_offcpu_ns_val(rr);   /* ev.offcpu_ns, same declaration */
+    uint64_t oncpu  = (uint64_t)spnl_recd_offcpu_oncpu_ns_val(rr);    /* ev.oncpu_ns,  same declaration */
     spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);           /* ev.wait_kind, same function */
     spnl_offcpu_wait_stack(rr, ws, (int)sizeof ws);          /* ev.wait_stack_trace, same function */
     uint64_t start_unix = now_unix - rr->duration_ns;
@@ -1871,7 +1865,7 @@ int spnl_otlp_offcpu_span_push_obj(struct bpf_object *obj, const char *map_name,
          * has no wait and so gets no child, which is an honest waterfall of pure
          * on-CPU time. The values come from the same derivations the parent used, so
          * parent and child cannot disagree. */
-        uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);
+        uint64_t offcpu = (uint64_t)spnl_recd_offcpu_offcpu_ns_val(rr);
         if (offcpu > 0) {
             char wk[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP] = {0};
             spnl_offcpu_wait_kind(rr, wk, (int)sizeof wk);
@@ -1999,10 +1993,10 @@ static int otlp_tree_fill_conn(const spnl_rec_conn_t *co, int64_t off, int as_ch
     int an = 0;
     snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_ADDRESS); snprintf(a[an].val,sizeof a[an].val,"%s",peer); an++;
     snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_PORT); snprintf(a[an].val,sizeof a[an].val,"%u",co->dport); an++;
-    /* The unit conversion lives in one function, whose output is what both
+    /* The unit conversion lives in one DECLARATION, whose output is what both
      * ev.srtt_us and the one-call span carry. Whether the attribute appears at all
      * is still decided from the raw field, so behaviour here is unchanged. */
-    if (co->srtt_us > 0) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US); snprintf(a[an].val,sizeof a[an].val,"%lld",(long long)spnl_conn_srtt_us(co)); an++; }
+    if (co->srtt_us > 0) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US); snprintf(a[an].val,sizeof a[an].val,"%lld",(long long)spnl_recd_conn_srtt_us_val(co)); an++; }
     if (co->comm[0]) { snprintf(a[an].key,sizeof a[an].key,"%s",SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME); snprintf(a[an].val,sizeof a[an].val,"%s",co->comm); an++; }
     s->attrs = a; s->nattrs = an;
     return 1;
@@ -2061,8 +2055,8 @@ int spnl_otlp_request_tree_push_obj(struct bpf_object *obj,
         int status = (int)spnl_http_status(rr->resp);
         /* The clamp and the difference are declared derivations too, so this second
          * consumer of the record reports exactly what the first one does. */
-        uint64_t offcpu = (uint64_t)spnl_offcpu_offcpu_ns(rr);
-        uint64_t oncpu  = (uint64_t)spnl_offcpu_oncpu_ns(rr);
+        uint64_t offcpu = (uint64_t)spnl_recd_offcpu_offcpu_ns_val(rr);
+        uint64_t oncpu  = (uint64_t)spnl_recd_offcpu_oncpu_ns_val(rr);
         /* The exact window start. An older record without one falls back to
          * now minus duration. */
         uint64_t start_unix;

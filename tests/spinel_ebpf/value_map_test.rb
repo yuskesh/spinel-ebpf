@@ -310,7 +310,7 @@ class ValueMapTest < Minitest::Test
   end
 
   def test_generator_refuses_a_cap_that_the_closed_set_does_not_fit
-    ok, out = build_with_mutated_schema { |s| s.sub('"tcp_state", "code_to_name", 24,', '"tcp_state", "code_to_name", 8,') }
+    ok, out = build_with_mutated_schema { |s| s.sub('"tcp_state", "code_to_name", "declared", 24,', '"tcp_state", "code_to_name", "declared", 8,') }
     refute ok, "a cap too small for the closed set got through"
     assert_includes out, "cap smaller than its own closed set"
   end
@@ -323,7 +323,7 @@ class ValueMapTest < Minitest::Test
 
   def test_generator_refuses_a_map_nobody_uses
     ok, out = build_with_mutated_schema { |s|
-      s.sub(/\{ "tcp_state", "str", "oldstate", "tcp_state", "code_to_name", 24,.*?\},\n/m, "")
+      s.sub(/\{ "tcp_state", "str", "oldstate", "tcp_state", "code_to_name", "declared", 24,.*?\},\n/m, "")
     }
     refute ok, "a value map nobody uses got through"
     assert_includes out, "named by no derivation"

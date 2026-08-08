@@ -75,7 +75,15 @@ class RecordGateTest < Minitest::Test
               "offset" => 24, "bytes" => 8, "expose" => "" },
           ],
           "egress" => { "push_fn" => "spnl_otlp_demo_span_push", "span_name" => "demo {x}",
-                        "span_kind" => "INTERNAL", "attributes" => %w[a.b c.d],
+                        "span_kind" => "INTERNAL",
+                        # An attribute row carries the rule for WHEN it is on the span, so the
+                        # baseline can catch "the key is still there, it just stopped
+                        # appearing" -- a change nothing downstream errors on.
+                        "timing_form" => { "start" => "record_ktime:hdr.timestamp",
+                                           "clock" => "monotonic", "end" => "start" },
+                        "drop_when" => "never",
+                        "attributes" => [{ "key" => "a.b", "present" => "always" },
+                                         { "key" => "c.d", "present" => "nonzero(pid)" }],
                         "enrichers" => %w[k8s] },
           "metrics" => [
             { "id" => "count", "name" => "spnl.demo.count", "kind" => "counter",
@@ -85,7 +93,8 @@ class RecordGateTest < Minitest::Test
           ],
           "consumer" => { "drain_fn" => "spnl_rec_demo_drain", "to_span_fn" => "spnl_rec_demo_to_span",
                           "properties" => [{ "name" => "pid", "kind" => "field",
-                                             "expose" => "int", "ffi" => "spnl_rec_demo_pid" }] },
+                                             "expose" => "int", "ffi" => "spnl_rec_demo_pid",
+                                             "residue" => "declared" }] },
         },
       } }
   end
@@ -237,13 +246,33 @@ class RecordGateTest < Minitest::Test
   end
 
   def test_dropping_an_egress_attribute_is_rejected
-    v = mutate { |d| d["channels"]["demo"]["egress"]["attributes"] = %w[a.b] }
+    v = mutate { |d| d["channels"]["demo"]["egress"]["attributes"] = [{ "key" => "a.b", "present" => "always" }] }
     assert_match(/egress attribute `c\.d` was removed/, v.join("\n"))
   end
 
   def test_adding_an_egress_attribute_is_allowed
-    v = mutate { |d| d["channels"]["demo"]["egress"]["attributes"] << "e.f" }
+    v = mutate { |d| d["channels"]["demo"]["egress"]["attributes"] << { "key" => "e.f", "present" => "always" } }
     assert_empty v
+  end
+
+  # The quiet one. The key survives, every span still validates, and the
+  # attribute simply stops appearing on records it used to describe -- so a
+  # dashboard filtering on it goes empty with nothing to point at.
+  def test_narrowing_when_an_attribute_appears_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["egress"]["attributes"][0]["present"] = "nonzero(pid)" }
+    assert_match(/`a\.b` changed WHEN it is present/, v.join("\n"))
+  end
+
+  def test_changing_the_span_timing_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["egress"]["timing_form"]["end"] = "start_plus:duration_ns" }
+    assert_match(/egress timing_form changed/, v.join("\n"))
+  end
+
+  # Taking a body away from every existing reader. The other direction (giving
+  # one) is additive and stays silent.
+  def test_moving_a_derivation_out_of_the_declaration_is_rejected
+    v = mutate { |d| d["channels"]["demo"]["consumer"]["properties"][0]["residue"] = "parse" }
+    assert_match(/`pid` was declared and is now parse/, v.join("\n"))
   end
 
   def test_renaming_the_push_fn_is_rejected
