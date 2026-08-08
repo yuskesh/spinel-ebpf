@@ -440,7 +440,7 @@ module SpinelEbpf
           why: "libbpf sets value_size = sizeof(X); the kernel refuses a RINGBUF with " \
                "key_size or value_size != 0 (EINVAL). ebpf-go zeroes it instead " \
                "(MapType.canHaveValueSize), so this spelling looks correct if the only " \
-               "loader tried is Go -- cilium/ebpf's own examples/ringbuffer object does " \
+               "loader tried is Go -- cilium/ebpf's own prebuilt ringbuffer example does " \
                "not load under libbpf either" },
         { spelling: "BTF_TYPE_EMIT(struct X)",
           in_btf: false, libbpf_loads: true,
