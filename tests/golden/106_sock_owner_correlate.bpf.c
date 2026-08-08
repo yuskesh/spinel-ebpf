@@ -59,6 +59,12 @@ struct {
     __uint(max_entries, 256 * 1024);
 } u_106_sock_owner_correlate_conn_events SEC(".maps");
 
+/* Publishes the layout above to .BTF so a reader in another language does not
+ * have to copy it by hand. A RINGBUF map declares no value type and the struct
+ * is only ever a local pointer in a static function, so nothing else in this
+ * object names it. Never loaded: .spnl_records is not a section libbpf maps. */
+const struct u_106_sock_owner_correlate_conn_event *_spnl_rec_conn_event SEC(".spnl_records");
+
 /* === per-unit socket->owner correlation map === */
 struct u_106_sock_owner_correlate_sock_owner_info {
     __u32 pid;

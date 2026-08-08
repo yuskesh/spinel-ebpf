@@ -155,6 +155,12 @@ struct {
     __uint(max_entries, 256 * 1024);
 } u_108_http_l7_http_events SEC(".maps");
 
+/* Publishes the layout above to .BTF so a reader in another language does not
+ * have to copy it by hand. A RINGBUF map declares no value type and the struct
+ * is only ever a local pointer in a static function, so nothing else in this
+ * object names it. Never loaded: .spnl_records is not a section libbpf maps. */
+const struct u_108_http_l7_http_event *_spnl_rec_http_event SEC(".spnl_records");
+
 /* ctx for kprobe__tcp_sendmsg — userspace fills before bpf_prog_test_run */
 struct kprobe__tcp_sendmsg_ctx {
     __s64 sk;

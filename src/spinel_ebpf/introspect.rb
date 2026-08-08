@@ -447,6 +447,15 @@ module SpinelEbpf
       rcs = record_consumers(source)
       unless res.empty? && rcs.empty?
         out << "\nrecord channels (the ringbuf byte layout, and the span it becomes):\n"
+        # The same layouts also ship INSIDE the .bpf.o. Printed here rather than
+        # only in `capabilities` because this screen is where somebody decides
+        # how to read the records, and the answer "do not retype them" has to be
+        # next to the table they would otherwise retype from.
+        rbtf = SpinelEbpf::Capabilities::RECORD_BTF
+        out << format("  (the layouts below also ship in the .bpf.o's BTF — DATASEC %s, one Var\n" \
+                      "   per channel — so a reader in another language generates its structs\n" \
+                      "   rather than copying this table: %s)\n",
+                      rbtf[:section], rbtf[:reader_recipe])
         (res.group_by { |r| r[:channel] }.keys | rcs.map { |c| c[:channel] }).each do |cid|
           sites = res.select { |r| r[:channel] == cid }
           c = SpinelEbpf::Capabilities.record_channel(cid)

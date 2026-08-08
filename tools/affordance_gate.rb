@@ -921,7 +921,19 @@ module AffordanceGate
   MapDecl = Struct.new(:name, :type, :form, :max_entries, :key, :value,
                        :key_size, :value_size, :flags, :values_of, keyword_init: true)
 
-  MAP_SEC_NOT_A_MAP = %w[license maps struct_ops struct_ops.link].freeze
+  # Sections that look section-like but create no map. Each entry is a CLAIM and
+  # needs a measurement, because the catch-all below is the only thing standing
+  # between "a new form appeared" and silence.
+  #
+  #   license / maps / struct_ops[.link]  handled by their own branches above
+  #   spnl_records                        the record type witnesses. libbpf says
+  #     "elf: skipping unrecognized data section" and creates nothing: measured
+  #     with `bpftool gen skeleton`, which lists the same maps before and after
+  #     the witness is added, and with `bpftool map show` on a running probe.
+  #     Contrast the .bss spelling of the same idea, which DOES add a map -- that
+  #     is why this list is a claim about a specific section and not a blanket
+  #     "unknown sections are fine".
+  MAP_SEC_NOT_A_MAP = %w[license maps struct_ops struct_ops.link spnl_records].freeze
   LIBBPF_HEADER_MAPS = {
     "bpf/usdt.bpf.h" => [["__bpf_usdt_specs", "ARRAY"], ["__bpf_usdt_ip_to_spec_id", "HASH"],
                          [".kconfig", "ARRAY"]],

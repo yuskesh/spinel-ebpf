@@ -97,6 +97,12 @@ struct {
     __uint(max_entries, 256 * 1024);
 } u_122_go_tls_native_http_events SEC(".maps");
 
+/* Publishes the layout above to .BTF so a reader in another language does not
+ * have to copy it by hand. A RINGBUF map declares no value type and the struct
+ * is only ever a local pointer in a static function, so nothing else in this
+ * object names it. Never loaded: .spnl_records is not a section libbpf maps. */
+const struct u_122_go_tls_native_http_event *_spnl_rec_http_event SEC(".spnl_records");
+
 /* === per-unit Go g-keyed recv stash === */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
