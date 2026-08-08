@@ -73,10 +73,25 @@
         "push_fn": "spnl_otlp_dns_span_push",
         "span_name": "resolve {dns.question.name}",
         "span_kind": "INTERNAL",
+        "timing_form": {
+          "start": "record_ktime:hdr.timestamp",
+          "clock": "monotonic",
+          "end": "start_plus:duration_ns"
+        },
+        "drop_when": "empty(qname)",
         "attributes": [
-          "dns.question.name",
-          "process.executable.name",
-          "spnl.dns.latency_ns"
+          {
+            "key": "dns.question.name",
+            "present": "always"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          },
+          {
+            "key": "spnl.dns.latency_ns",
+            "present": "nonzero(duration_ns)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -93,7 +108,8 @@
             "expose": "int",
             "ffi": "spnl_rec_dns_pid",
             "cap": null,
-            "kfilter": "pid"
+            "kfilter": "pid",
+            "residue": ""
           },
           {
             "name": "comm",
@@ -101,7 +117,8 @@
             "expose": "str",
             "ffi": "spnl_rec_dns_comm",
             "cap": null,
-            "kfilter": "comm"
+            "kfilter": "comm",
+            "residue": ""
           },
           {
             "name": "cgid",
@@ -109,7 +126,8 @@
             "expose": "int",
             "ffi": "spnl_rec_dns_cgid",
             "cap": null,
-            "kfilter": "cgroup_id"
+            "kfilter": "cgroup_id",
+            "residue": ""
           },
           {
             "name": "duration_ns",
@@ -117,7 +135,8 @@
             "expose": "int",
             "ffi": "spnl_rec_dns_duration_ns",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "qname",
@@ -125,13 +144,12 @@
             "expose": "str",
             "ffi": "spnl_rec_dns_qname",
             "cap": 256,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           }
         ]
       },
-      "metrics": [
-
-      ]
+      "metrics": []
     },
     "conn": {
       "record_struct": "<unit>_conn_event",
@@ -235,15 +253,45 @@
         "push_fn": "spnl_otlp_conn_span_push",
         "span_name": "connect {network.peer.address}:{network.peer.port}",
         "span_kind": "INTERNAL",
+        "timing_form": {
+          "start": "record_ktime:hdr.timestamp",
+          "clock": "monotonic",
+          "end": "start"
+        },
+        "drop_when": "never",
         "attributes": [
-          "network.peer.address",
-          "network.peer.port",
-          "network.transport",
-          "network.type",
-          "net.peer.srtt_us",
-          "spnl.conn.direction",
-          "spnl.conn.tcp_state",
-          "process.executable.name"
+          {
+            "key": "network.peer.address",
+            "present": "always"
+          },
+          {
+            "key": "network.peer.port",
+            "present": "always"
+          },
+          {
+            "key": "network.transport",
+            "present": "always"
+          },
+          {
+            "key": "network.type",
+            "present": "always"
+          },
+          {
+            "key": "net.peer.srtt_us",
+            "present": "always"
+          },
+          {
+            "key": "spnl.conn.direction",
+            "present": "always"
+          },
+          {
+            "key": "spnl.conn.tcp_state",
+            "present": "always"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -261,7 +309,8 @@
             "expose": "int",
             "ffi": "spnl_rec_conn_pid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "comm",
@@ -269,7 +318,8 @@
             "expose": "str",
             "ffi": "spnl_rec_conn_comm",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "dport",
@@ -277,7 +327,8 @@
             "expose": "int",
             "ffi": "spnl_rec_conn_dport",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "cgid",
@@ -285,7 +336,8 @@
             "expose": "int",
             "ffi": "spnl_rec_conn_cgid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "peer",
@@ -293,7 +345,8 @@
             "expose": "str",
             "ffi": "spnl_rec_conn_peer",
             "cap": 64,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "render"
           },
           {
             "name": "direction",
@@ -301,7 +354,8 @@
             "expose": "str",
             "ffi": "spnl_rec_conn_direction",
             "cap": 16,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "declared"
           },
           {
             "name": "tcp_state",
@@ -309,7 +363,8 @@
             "expose": "str",
             "ffi": "spnl_rec_conn_tcp_state",
             "cap": 24,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "declared"
           },
           {
             "name": "srtt_us",
@@ -317,7 +372,8 @@
             "expose": "int",
             "ffi": "spnl_rec_conn_srtt_us",
             "cap": 0,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "declared"
           }
         ]
       },
@@ -428,13 +484,37 @@
         "push_fn": "spnl_otlp_l7_span_push",
         "span_name": "request {network.peer.address}:{network.peer.port}",
         "span_kind": "CLIENT",
+        "timing_form": {
+          "start": "record_ktime:start_ktime",
+          "clock": "monotonic",
+          "end": "start_plus:duration_ns"
+        },
+        "drop_when": "never",
         "attributes": [
-          "network.peer.address",
-          "network.peer.port",
-          "network.transport",
-          "network.type",
-          "spnl.l7.latency_ns",
-          "process.executable.name"
+          {
+            "key": "network.peer.address",
+            "present": "always"
+          },
+          {
+            "key": "network.peer.port",
+            "present": "always"
+          },
+          {
+            "key": "network.transport",
+            "present": "always"
+          },
+          {
+            "key": "network.type",
+            "present": "always"
+          },
+          {
+            "key": "spnl.l7.latency_ns",
+            "present": "always"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -451,7 +531,8 @@
             "expose": "int",
             "ffi": "spnl_rec_l7_pid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "comm",
@@ -459,7 +540,8 @@
             "expose": "str",
             "ffi": "spnl_rec_l7_comm",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "dport",
@@ -467,7 +549,8 @@
             "expose": "int",
             "ffi": "spnl_rec_l7_dport",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "duration_ns",
@@ -475,7 +558,8 @@
             "expose": "int",
             "ffi": "spnl_rec_l7_duration_ns",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "cgid",
@@ -483,13 +567,12 @@
             "expose": "int",
             "ffi": "spnl_rec_l7_cgid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           }
         ]
       },
-      "metrics": [
-
-      ]
+      "metrics": []
     },
     "http": {
       "record_struct": "<unit>_http_event",
@@ -594,16 +677,49 @@
         "push_fn": "spnl_otlp_http_span_push",
         "span_name": "{http.request.method} {url.path}",
         "span_kind": "CLIENT",
+        "timing_form": {
+          "start": "record_ktime:start_ktime",
+          "clock": "monotonic",
+          "end": "start_plus:duration_ns"
+        },
+        "drop_when": "never",
         "attributes": [
-          "http.request.method",
-          "url.path",
-          "http.response.status_code",
-          "url.scheme",
-          "network.peer.address",
-          "network.peer.port",
-          "network.transport",
-          "spnl.http.latency_ns",
-          "process.executable.name"
+          {
+            "key": "http.request.method",
+            "present": "nonempty(method)"
+          },
+          {
+            "key": "url.path",
+            "present": "nonempty(path)"
+          },
+          {
+            "key": "http.response.status_code",
+            "present": "nonzero(status)"
+          },
+          {
+            "key": "url.scheme",
+            "present": "all(zero(daddr),zero(dport))"
+          },
+          {
+            "key": "network.peer.address",
+            "present": "any(nonzero(daddr),nonzero(dport))"
+          },
+          {
+            "key": "network.peer.port",
+            "present": "any(nonzero(daddr),nonzero(dport))"
+          },
+          {
+            "key": "network.transport",
+            "present": "always"
+          },
+          {
+            "key": "spnl.http.latency_ns",
+            "present": "always"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -620,7 +736,8 @@
             "expose": "int",
             "ffi": "spnl_rec_http_pid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "comm",
@@ -628,7 +745,8 @@
             "expose": "str",
             "ffi": "spnl_rec_http_comm",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "dport",
@@ -636,7 +754,8 @@
             "expose": "int",
             "ffi": "spnl_rec_http_dport",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "duration_ns",
@@ -644,7 +763,8 @@
             "expose": "int",
             "ffi": "spnl_rec_http_duration_ns",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "cgid",
@@ -652,7 +772,8 @@
             "expose": "int",
             "ffi": "spnl_rec_http_cgid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "method",
@@ -660,7 +781,8 @@
             "expose": "str",
             "ffi": "spnl_rec_http_method",
             "cap": 65,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           },
           {
             "name": "path",
@@ -668,7 +790,8 @@
             "expose": "str",
             "ffi": "spnl_rec_http_path",
             "cap": 65,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           },
           {
             "name": "status",
@@ -676,7 +799,8 @@
             "expose": "int",
             "ffi": "spnl_rec_http_status",
             "cap": 0,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           }
         ]
       },
@@ -810,15 +934,45 @@
         "push_fn": "spnl_otlp_redis_span_push",
         "span_name": "{db.operation.name}",
         "span_kind": "CLIENT",
+        "timing_form": {
+          "start": "record_ktime:start_ktime",
+          "clock": "monotonic",
+          "end": "start_plus:duration_ns"
+        },
+        "drop_when": "never",
         "attributes": [
-          "db.system",
-          "db.operation.name",
-          "db.query.text",
-          "error.type",
-          "network.peer.address",
-          "network.peer.port",
-          "network.transport",
-          "process.executable.name"
+          {
+            "key": "db.system",
+            "present": "always"
+          },
+          {
+            "key": "db.operation.name",
+            "present": "unexpressible(the gate is a RESP command parse of req[64] that this channel does not publish as a derived property -- redis has no typed consumer, so there is no property to name. Publishing the parse as a derivation would make this nonempty(<that property>))"
+          },
+          {
+            "key": "db.query.text",
+            "present": "unexpressible(same gate as db.operation.name: the RESP command parse is not a published property of this channel)"
+          },
+          {
+            "key": "error.type",
+            "present": "byte_eq(resp,0,'-')"
+          },
+          {
+            "key": "network.peer.address",
+            "present": "always"
+          },
+          {
+            "key": "network.peer.port",
+            "present": "always"
+          },
+          {
+            "key": "network.transport",
+            "present": "always"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -826,9 +980,7 @@
         ]
       },
       "consumer": null,
-      "metrics": [
-
-      ]
+      "metrics": []
     },
     "offcpu": {
       "record_struct": "<unit>_offcpu_event",
@@ -932,15 +1084,45 @@
         "push_fn": "spnl_otlp_offcpu_span_push",
         "span_name": "{http.request.method} {url.path}",
         "span_kind": "SERVER",
+        "timing_form": {
+          "start": "wall_now_minus:duration_ns",
+          "clock": "",
+          "end": "start_plus:duration_ns"
+        },
+        "drop_when": "never",
         "attributes": [
-          "http.request.method",
-          "url.path",
-          "http.response.status_code",
-          "spnl.offcpu_ns",
-          "spnl.oncpu_ns",
-          "spnl.wait.kind",
-          "spnl.wait.stack",
-          "process.executable.name"
+          {
+            "key": "http.request.method",
+            "present": "nonempty(method)"
+          },
+          {
+            "key": "url.path",
+            "present": "nonempty(path)"
+          },
+          {
+            "key": "http.response.status_code",
+            "present": "nonzero(status)"
+          },
+          {
+            "key": "spnl.offcpu_ns",
+            "present": "always"
+          },
+          {
+            "key": "spnl.oncpu_ns",
+            "present": "always"
+          },
+          {
+            "key": "spnl.wait.kind",
+            "present": "always"
+          },
+          {
+            "key": "spnl.wait.stack",
+            "present": "nonempty(wait_stack_trace)"
+          },
+          {
+            "key": "process.executable.name",
+            "present": "nonempty(comm)"
+          }
         ],
         "enrichers": [
           "k8s",
@@ -957,7 +1139,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_pid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "comm",
@@ -965,7 +1148,8 @@
             "expose": "str",
             "ffi": "spnl_rec_offcpu_comm",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "duration_ns",
@@ -973,7 +1157,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_duration_ns",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "cgid",
@@ -981,7 +1166,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_cgid",
             "cap": null,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": ""
           },
           {
             "name": "method",
@@ -989,7 +1175,8 @@
             "expose": "str",
             "ffi": "spnl_rec_offcpu_method",
             "cap": 65,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           },
           {
             "name": "path",
@@ -997,7 +1184,8 @@
             "expose": "str",
             "ffi": "spnl_rec_offcpu_path",
             "cap": 65,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           },
           {
             "name": "status",
@@ -1005,7 +1193,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_status",
             "cap": 0,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "parse"
           },
           {
             "name": "offcpu_ns",
@@ -1013,7 +1202,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_offcpu_ns",
             "cap": 0,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "declared"
           },
           {
             "name": "oncpu_ns",
@@ -1021,7 +1211,8 @@
             "expose": "int",
             "ffi": "spnl_rec_offcpu_oncpu_ns",
             "cap": 0,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "declared"
           },
           {
             "name": "wait_kind",
@@ -1029,7 +1220,8 @@
             "expose": "str",
             "ffi": "spnl_rec_offcpu_wait_kind",
             "cap": 16,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "ambient"
           },
           {
             "name": "wait_stack_trace",
@@ -1037,13 +1229,12 @@
             "expose": "str",
             "ffi": "spnl_rec_offcpu_wait_stack_trace",
             "cap": 448,
-            "kfilter": ""
+            "kfilter": "",
+            "residue": "ambient"
           }
         ]
       },
-      "metrics": [
-
-      ]
+      "metrics": []
     },
     "l7stream": {
       "record_struct": "<unit>_l7stream_event",
@@ -1090,9 +1281,7 @@
       ],
       "egress": null,
       "consumer": null,
-      "metrics": [
-
-      ]
+      "metrics": []
     }
   }
 }

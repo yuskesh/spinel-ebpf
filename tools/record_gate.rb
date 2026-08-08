@@ -107,12 +107,20 @@ module RecordGate
           { "name" => f["name"], "ctype" => f["ctype"], "count" => f["count"],
             "offset" => f["offset"], "bytes" => f["bytes"], "expose" => f["expose"].to_s }
         },
+        # `timing_form`, `drop_when` and each attribute's `present` are in the
+        # snapshot for the same reason the attribute KEYS are: they are what a
+        # consumer outside this process acts on. Changing `nonempty(comm)` to
+        # `always` does not move a byte in this repository and changes what every
+        # reader emits -- so it is a reviewed diff, not a quiet edit. The prose
+        # `condition` beside them stays out, like every other note.
         "egress"           => e && {
-          "push_fn"    => e["push_fn"],
-          "span_name"  => e["span_name"],
-          "span_kind"  => e["span_kind"],
-          "attributes" => Array(e["attributes"]).map { |a| a["key"] },
-          "enrichers"  => Array(e["enrichers"]),
+          "push_fn"     => e["push_fn"],
+          "span_name"   => e["span_name"],
+          "span_kind"   => e["span_kind"],
+          "timing_form" => e["timing_form"],
+          "drop_when"   => e["drop_when"],
+          "attributes"  => Array(e["attributes"]).map { |a| { "key" => a["key"], "present" => a["present"] } },
+          "enrichers"   => Array(e["enrichers"]),
         },
         "consumer"         => cons && {
           "drain_fn"   => cons["drain_fn"],
@@ -129,9 +137,14 @@ module RecordGate
           # compiling (the transform points at `filter_by` instead), so adding
           # one breaks programs that exist -- append-only applies to the refusal
           # surface, not just the byte layout.
+          # `residue` says whether a consumer has to implement the property
+          # itself. Moving one from "parse" to "declared" is additive (the reader
+          # gets a body it used to write); moving it the other way asks every
+          # existing reader for code it does not have.
           "properties" => Array(cons["properties"]).map { |p|
             { "name" => p["name"], "kind" => p["kind"], "expose" => p["expose"],
-              "ffi" => p["ffi"], "cap" => p["cap"], "kfilter" => p["kfilter"].to_s }
+              "ffi" => p["ffi"], "cap" => p["cap"], "kfilter" => p["kfilter"].to_s,
+              "residue" => p["residue"].to_s }
           },
         },
         # What the channel's records aggregate into. `series_bound` is the
@@ -231,11 +244,49 @@ module RecordGate
           next if oe[k] == ne[k]
           v << "channel `#{id}`: egress #{k} changed #{oe[k].inspect} -> #{ne[k].inspect}"
         end
-        (Array(oe["attributes"]) - Array(ne["attributes"])).each do |k|
+        # Attribute rows carry their presence rule, so an attribute can now break
+        # in two ways -- it can disappear, or it can start appearing on a
+        # different set of records. The second is the quieter one: every span
+        # still validates, and a query that counted on the attribute being there
+        # silently stops matching.
+        okeys = Array(oe["attributes"]).map { |a| a.is_a?(Hash) ? a["key"] : a }
+        # An OLD snapshot carries bare key strings; a new one carries
+        # {key, present}. Reading both is what lets the baseline move without
+        # pretending the old file said something it did not.
+        nattr = Array(ne["attributes"]).to_h { |a| a.is_a?(Hash) ? [a["key"], a["present"]] : [a, nil] }
+        (okeys - nattr.keys).each do |k|
           v << "channel `#{id}`: egress attribute `#{k}` was removed (queries and dashboards use it)"
+        end
+        Array(oe["attributes"]).each do |a|
+          next unless a.is_a?(Hash) && nattr.key?(a["key"])
+          next if a["present"] == nattr[a["key"]]
+          v << "channel `#{id}`: egress attribute `#{a['key']}` changed WHEN it is present " \
+               "#{a['present'].inspect} -> #{nattr[a['key']].inspect} (the key is unchanged, so " \
+               "nothing downstream errors -- it just stops appearing on records it used to describe)"
+        end
+        %w[timing_form drop_when].each do |k|
+          next if oe[k] == ne[k]
+          v << "channel `#{id}`: egress #{k} changed #{oe[k].inspect} -> #{ne[k].inspect} " \
+               "(a consumer computes span times / discards records from this)"
         end
         (Array(oe["enrichers"]) - Array(ne["enrichers"])).each do |k|
           v << "channel `#{id}`: layer-2 enricher `#{k}` no longer applies"
+        end
+      end
+
+      # -- derivations: who has to implement them -------------------------------
+      oc2, nc2 = och["consumer"], nch["consumer"]
+      if oc2 && nc2
+        nres = Array(nc2["properties"]).to_h { |p| [p["name"], p["residue"].to_s] }
+        Array(oc2["properties"]).each do |p|
+          o = p["residue"].to_s
+          n = nres[p["name"]]
+          next if n.nil? || o == n || o.empty?
+          # declared -> anything asks every existing consumer for code it does
+          # not have; the other direction hands it a body it used to write.
+          next unless o == "declared"
+          v << "channel `#{id}`: property `#{p['name']}` was #{o} and is now #{n} -- a consumer " \
+               "that read it from the contract now has to implement it"
         end
       end
 

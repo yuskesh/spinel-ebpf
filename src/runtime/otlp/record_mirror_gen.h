@@ -123,6 +123,13 @@ static inline void spnl_valmap_conn_direction(long v, char *out, int cap) {
 
 extern void spnl_recmetric_observe(int metric, const char *const *label_values,
                                    int nlabels, int has_value, double value);
+
+/* the egress rule table type (one row per declared attribute). */
+typedef struct {
+    const char *key;
+    int (*present)(const void *rec);   /* NULL = the declaration refuses to express it */
+    const char *unexpressible;         /* the declared reason, or NULL */
+} spnl_egress_rule_t;
 /* ===================== channel "dns" =====================
  * record struct: <unit>_dns_event   ringbuf map: <unit>_dns_events (256 * 1024)
  * 7 fields, 128 bytes on the wire. */
@@ -218,6 +225,14 @@ static inline int spnl_rec_dns_unpack(const void *data, size_t size, spnl_rec_dn
 const spnl_rec_dns_t *spnl_rec_dns_at(int i);
 void spnl_dns_qname(const unsigned char *src, char *out, int cap);   /* qname <- raw */
 
+/* the channel's derivations, one record-taking helper each */
+static inline int spnl_recd_dns_qname_empty(const spnl_rec_dns_t *r) {
+    char b[SPNL_REC_DERIVED_DNS_QNAME_CAP];
+    b[0] = '\0';
+    spnl_dns_qname(r->raw, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+
 long spnl_rec_dns_pid(int i) {
     const spnl_rec_dns_t *r = spnl_rec_dns_at(i);
     return r ? (long)r->pid : 0;   /* producer tgid (init-ns) */
@@ -240,6 +255,36 @@ const char *spnl_rec_dns_qname(int i) {
     if (!r) return "";
     spnl_dns_qname(r->raw, buf, (int)sizeof buf);   /* derived: qname */
     return buf;
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
+
+/* --- egress RULES for channel "dns" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_dns_has_dns_question_name(const spnl_rec_dns_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_dns_has_process_executable_name(const spnl_rec_dns_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_dns_has_spnl_dns_latency_ns(const spnl_rec_dns_t *r) { (void)r; return (r->duration_ns != 0); }   /* nonzero(duration_ns) */
+static inline int spnl_rec_dns_hasv_dns_question_name(const void *r) { return spnl_rec_dns_has_dns_question_name((const spnl_rec_dns_t *)r); }
+static inline int spnl_rec_dns_hasv_process_executable_name(const void *r) { return spnl_rec_dns_has_process_executable_name((const spnl_rec_dns_t *)r); }
+static inline int spnl_rec_dns_hasv_spnl_dns_latency_ns(const void *r) { return spnl_rec_dns_has_spnl_dns_latency_ns((const spnl_rec_dns_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_dns[] = {
+    { "dns.question.name", spnl_rec_dns_hasv_dns_question_name, (const char *)0 },
+    { "process.executable.name", spnl_rec_dns_hasv_process_executable_name, (const char *)0 },
+    { "spnl.dns.latency_ns", spnl_rec_dns_hasv_spnl_dns_latency_ns, (const char *)0 },
+};
+static inline int spnl_rec_dns_dropped(const spnl_rec_dns_t *r) { (void)r; return (spnl_recd_dns_qname_empty(r)); }   /* empty(qname) */
+static inline uint64_t spnl_rec_dns_span_start_unix(const spnl_rec_dns_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)wall_now_ns;
+    return (uint64_t)((int64_t)r->hdr.timestamp + ktime_off);   /* record_ktime:hdr.timestamp */
+}
+static inline uint64_t spnl_rec_dns_span_end_unix(const spnl_rec_dns_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_dns_span_start_unix(r, ktime_off, wall_now_ns);
+    return (start + (uint64_t)r->duration_ns);   /* start_plus:duration_ns */
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 
@@ -335,7 +380,7 @@ static inline int spnl_rec_conn_unpack(const void *data, size_t size, spnl_rec_c
 #define SPNL_EGRESS_CONN_ATTR_NETWORK_PEER_PORT       "network.peer.port"   /* semconv <- dport */
 #define SPNL_EGRESS_CONN_ATTR_NETWORK_TRANSPORT       "network.transport"   /* semconv <- constant "tcp" */
 #define SPNL_EGRESS_CONN_ATTR_NETWORK_TYPE            "network.type"   /* semconv <- family (AF_INET -> "ipv4", AF_INET6 -> "ipv6") */
-#define SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US        "net.peer.srtt_us"   /* spinel <- srtt_us >> 3 (spnl_conn_srtt_us -- the same function as the property ev.srtt_us) */
+#define SPNL_EGRESS_CONN_ATTR_NET_PEER_SRTT_US        "net.peer.srtt_us"   /* spinel <- srtt_us >> 3 (the declared int_expr derivation -- the same value as the property ev.srtt_us) */
 #define SPNL_EGRESS_CONN_ATTR_SPNL_CONN_DIRECTION     "spnl.conn.direction"   /* spinel <- oldstate (SYN_SENT -> active, SYN_RECV -> passive, else other) */
 #define SPNL_EGRESS_CONN_ATTR_SPNL_CONN_TCP_STATE     "spnl.conn.tcp_state"   /* spinel <- oldstate -> value map `tcp_state` (the kernel's enum, by name) */
 #define SPNL_EGRESS_CONN_ATTR_PROCESS_EXECUTABLE_NAME "process.executable.name"   /* semconv <- comm[16] */
@@ -365,7 +410,30 @@ const spnl_rec_conn_t *spnl_rec_conn_at(int i);
 void spnl_conn_peer(const spnl_rec_conn_t *r, char *out, int cap);   /* peer <- family + daddr / daddr6_hi,daddr6_lo + dport */
 /* direction <- oldstate via the generated value map spnl_valmap_conn_direction() */
 /* tcp_state <- oldstate via the generated value map spnl_valmap_tcp_state() */
-long spnl_conn_srtt_us(const spnl_rec_conn_t *r);   /* srtt_us <- srtt_us (the kernel's 1/8 us scale) */
+/* srtt_us <- the declared expression `srtt_us >> 3` (generated, not hand-written) */
+
+/* the channel's derivations, one record-taking helper each */
+static inline int spnl_recd_conn_peer_empty(const spnl_rec_conn_t *r) {
+    char b[SPNL_REC_DERIVED_CONN_PEER_CAP];
+    b[0] = '\0';
+    spnl_conn_peer(r, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline int spnl_recd_conn_direction_empty(const spnl_rec_conn_t *r) {
+    char b[SPNL_REC_DERIVED_CONN_DIRECTION_CAP];
+    b[0] = '\0';
+    spnl_valmap_conn_direction((long)r->oldstate, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline int spnl_recd_conn_tcp_state_empty(const spnl_rec_conn_t *r) {
+    char b[SPNL_REC_DERIVED_CONN_TCP_STATE_CAP];
+    b[0] = '\0';
+    spnl_valmap_tcp_state((long)r->oldstate, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline long spnl_recd_conn_srtt_us_val(const spnl_rec_conn_t *r) {
+    return (long)(((r->srtt_us) >> (3)));   /* declared: srtt_us >> 3 */
+}
 
 long spnl_rec_conn_pid(int i) {
     const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
@@ -406,7 +474,7 @@ const char *spnl_rec_conn_tcp_state(int i) {
 }
 long spnl_rec_conn_srtt_us(int i) {
     const spnl_rec_conn_t *r = spnl_rec_conn_at(i);
-    return r ? (long)spnl_conn_srtt_us(r) : 0;   /* derived: srtt_us */
+    return r ? spnl_recd_conn_srtt_us_val(r) : 0;   /* derived: srtt_us */
 }
 
 /* --- metric intake for channel "conn" ---
@@ -425,6 +493,51 @@ static inline void spnl_recmetric_observe_conn(const spnl_rec_conn_t *r) {
         lv[0] = lb0;
         spnl_recmetric_observe(0, lv, 1, 0, 0.0);
     }
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
+
+/* --- egress RULES for channel "conn" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_conn_has_network_peer_address(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_network_peer_port(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_network_transport(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_network_type(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_net_peer_srtt_us(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_spnl_conn_direction(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_spnl_conn_tcp_state(const spnl_rec_conn_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_conn_has_process_executable_name(const spnl_rec_conn_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_conn_hasv_network_peer_address(const void *r) { return spnl_rec_conn_has_network_peer_address((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_network_peer_port(const void *r) { return spnl_rec_conn_has_network_peer_port((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_network_transport(const void *r) { return spnl_rec_conn_has_network_transport((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_network_type(const void *r) { return spnl_rec_conn_has_network_type((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_net_peer_srtt_us(const void *r) { return spnl_rec_conn_has_net_peer_srtt_us((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_spnl_conn_direction(const void *r) { return spnl_rec_conn_has_spnl_conn_direction((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_spnl_conn_tcp_state(const void *r) { return spnl_rec_conn_has_spnl_conn_tcp_state((const spnl_rec_conn_t *)r); }
+static inline int spnl_rec_conn_hasv_process_executable_name(const void *r) { return spnl_rec_conn_has_process_executable_name((const spnl_rec_conn_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_conn[] = {
+    { "network.peer.address", spnl_rec_conn_hasv_network_peer_address, (const char *)0 },
+    { "network.peer.port", spnl_rec_conn_hasv_network_peer_port, (const char *)0 },
+    { "network.transport", spnl_rec_conn_hasv_network_transport, (const char *)0 },
+    { "network.type", spnl_rec_conn_hasv_network_type, (const char *)0 },
+    { "net.peer.srtt_us", spnl_rec_conn_hasv_net_peer_srtt_us, (const char *)0 },
+    { "spnl.conn.direction", spnl_rec_conn_hasv_spnl_conn_direction, (const char *)0 },
+    { "spnl.conn.tcp_state", spnl_rec_conn_hasv_spnl_conn_tcp_state, (const char *)0 },
+    { "process.executable.name", spnl_rec_conn_hasv_process_executable_name, (const char *)0 },
+};
+static inline int spnl_rec_conn_dropped(const spnl_rec_conn_t *r) { (void)r; return 0; }   /* never */
+static inline uint64_t spnl_rec_conn_span_start_unix(const spnl_rec_conn_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)wall_now_ns;
+    return (uint64_t)((int64_t)r->hdr.timestamp + ktime_off);   /* record_ktime:hdr.timestamp */
+}
+static inline uint64_t spnl_rec_conn_span_end_unix(const spnl_rec_conn_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_conn_span_start_unix(r, ktime_off, wall_now_ns);
+    return start;   /* start */
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 
@@ -545,6 +658,45 @@ long spnl_rec_l7_duration_ns(int i) {
 long spnl_rec_l7_cgid(int i) {
     const spnl_rec_l7_t *r = spnl_rec_l7_at(i);
     return r ? (long)r->cgid : 0;   /* cgroup id -> k8s.* pod attribution */
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
+
+/* --- egress RULES for channel "l7" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_l7_has_network_peer_address(const spnl_rec_l7_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_l7_has_network_peer_port(const spnl_rec_l7_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_l7_has_network_transport(const spnl_rec_l7_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_l7_has_network_type(const spnl_rec_l7_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_l7_has_spnl_l7_latency_ns(const spnl_rec_l7_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_l7_has_process_executable_name(const spnl_rec_l7_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_l7_hasv_network_peer_address(const void *r) { return spnl_rec_l7_has_network_peer_address((const spnl_rec_l7_t *)r); }
+static inline int spnl_rec_l7_hasv_network_peer_port(const void *r) { return spnl_rec_l7_has_network_peer_port((const spnl_rec_l7_t *)r); }
+static inline int spnl_rec_l7_hasv_network_transport(const void *r) { return spnl_rec_l7_has_network_transport((const spnl_rec_l7_t *)r); }
+static inline int spnl_rec_l7_hasv_network_type(const void *r) { return spnl_rec_l7_has_network_type((const spnl_rec_l7_t *)r); }
+static inline int spnl_rec_l7_hasv_spnl_l7_latency_ns(const void *r) { return spnl_rec_l7_has_spnl_l7_latency_ns((const spnl_rec_l7_t *)r); }
+static inline int spnl_rec_l7_hasv_process_executable_name(const void *r) { return spnl_rec_l7_has_process_executable_name((const spnl_rec_l7_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_l7[] = {
+    { "network.peer.address", spnl_rec_l7_hasv_network_peer_address, (const char *)0 },
+    { "network.peer.port", spnl_rec_l7_hasv_network_peer_port, (const char *)0 },
+    { "network.transport", spnl_rec_l7_hasv_network_transport, (const char *)0 },
+    { "network.type", spnl_rec_l7_hasv_network_type, (const char *)0 },
+    { "spnl.l7.latency_ns", spnl_rec_l7_hasv_spnl_l7_latency_ns, (const char *)0 },
+    { "process.executable.name", spnl_rec_l7_hasv_process_executable_name, (const char *)0 },
+};
+static inline int spnl_rec_l7_dropped(const spnl_rec_l7_t *r) { (void)r; return 0; }   /* never */
+static inline uint64_t spnl_rec_l7_span_start_unix(const spnl_rec_l7_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)wall_now_ns;
+    return (uint64_t)((int64_t)r->start_ktime + ktime_off);   /* record_ktime:start_ktime */
+}
+static inline uint64_t spnl_rec_l7_span_end_unix(const spnl_rec_l7_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_l7_span_start_unix(r, ktime_off, wall_now_ns);
+    return (start + (uint64_t)r->duration_ns);   /* start_plus:duration_ns */
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 
@@ -671,6 +823,23 @@ void spnl_http_method(const unsigned char *src, char *out, int cap);   /* method
 void spnl_http_path(const unsigned char *src, char *out, int cap);   /* path <- req */
 long spnl_http_status(const unsigned char *src);   /* status <- resp */
 
+/* the channel's derivations, one record-taking helper each */
+static inline int spnl_recd_http_method_empty(const spnl_rec_http_t *r) {
+    char b[SPNL_REC_DERIVED_HTTP_METHOD_CAP];
+    b[0] = '\0';
+    spnl_http_method(r->req, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline int spnl_recd_http_path_empty(const spnl_rec_http_t *r) {
+    char b[SPNL_REC_DERIVED_HTTP_PATH_CAP];
+    b[0] = '\0';
+    spnl_http_path(r->req, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline long spnl_recd_http_status_val(const spnl_rec_http_t *r) {
+    return spnl_http_status(r->resp);
+}
+
 long spnl_rec_http_pid(int i) {
     const spnl_rec_http_t *r = spnl_rec_http_at(i);
     return r ? (long)r->pid : 0;   /* producer tgid */
@@ -707,7 +876,7 @@ const char *spnl_rec_http_path(int i) {
 }
 long spnl_rec_http_status(int i) {
     const spnl_rec_http_t *r = spnl_rec_http_at(i);
-    return r ? (long)spnl_http_status(r->resp) : 0;   /* derived: status */
+    return r ? spnl_recd_http_status_val(r) : 0;   /* derived: status */
 }
 
 /* --- metric intake for channel "http" ---
@@ -725,11 +894,59 @@ static inline void spnl_recmetric_observe_http(const spnl_rec_http_t *r) {
         const char *lv[2];
         spnl_http_method(r->req, lb0, (int)sizeof lb0);
         lv[0] = lb0;
-        snprintf(lb1, sizeof lb1, "%ld", spnl_http_status(r->resp));
+        snprintf(lb1, sizeof lb1, "%ld", spnl_recd_http_status_val(r));
         lv[1] = lb1;
         double v = (double)(r->duration_ns) / 1e9;
         spnl_recmetric_observe(1, lv, 2, 1, v);
     }
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
+
+/* --- egress RULES for channel "http" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_http_has_http_request_method(const spnl_rec_http_t *r) { (void)r; return (!spnl_recd_http_method_empty(r)); }   /* nonempty(method) */
+static inline int spnl_rec_http_has_url_path(const spnl_rec_http_t *r) { (void)r; return (!spnl_recd_http_path_empty(r)); }   /* nonempty(path) */
+static inline int spnl_rec_http_has_http_response_status_code(const spnl_rec_http_t *r) { (void)r; return (spnl_recd_http_status_val(r) != 0); }   /* nonzero(status) */
+static inline int spnl_rec_http_has_url_scheme(const spnl_rec_http_t *r) { (void)r; return ((r->daddr == 0) && (r->dport == 0)); }   /* all(zero(daddr),zero(dport)) */
+static inline int spnl_rec_http_has_network_peer_address(const spnl_rec_http_t *r) { (void)r; return ((r->daddr != 0) || (r->dport != 0)); }   /* any(nonzero(daddr),nonzero(dport)) */
+static inline int spnl_rec_http_has_network_peer_port(const spnl_rec_http_t *r) { (void)r; return ((r->daddr != 0) || (r->dport != 0)); }   /* any(nonzero(daddr),nonzero(dport)) */
+static inline int spnl_rec_http_has_network_transport(const spnl_rec_http_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_http_has_spnl_http_latency_ns(const spnl_rec_http_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_http_has_process_executable_name(const spnl_rec_http_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_http_hasv_http_request_method(const void *r) { return spnl_rec_http_has_http_request_method((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_url_path(const void *r) { return spnl_rec_http_has_url_path((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_http_response_status_code(const void *r) { return spnl_rec_http_has_http_response_status_code((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_url_scheme(const void *r) { return spnl_rec_http_has_url_scheme((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_network_peer_address(const void *r) { return spnl_rec_http_has_network_peer_address((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_network_peer_port(const void *r) { return spnl_rec_http_has_network_peer_port((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_network_transport(const void *r) { return spnl_rec_http_has_network_transport((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_spnl_http_latency_ns(const void *r) { return spnl_rec_http_has_spnl_http_latency_ns((const spnl_rec_http_t *)r); }
+static inline int spnl_rec_http_hasv_process_executable_name(const void *r) { return spnl_rec_http_has_process_executable_name((const spnl_rec_http_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_http[] = {
+    { "http.request.method", spnl_rec_http_hasv_http_request_method, (const char *)0 },
+    { "url.path", spnl_rec_http_hasv_url_path, (const char *)0 },
+    { "http.response.status_code", spnl_rec_http_hasv_http_response_status_code, (const char *)0 },
+    { "url.scheme", spnl_rec_http_hasv_url_scheme, (const char *)0 },
+    { "network.peer.address", spnl_rec_http_hasv_network_peer_address, (const char *)0 },
+    { "network.peer.port", spnl_rec_http_hasv_network_peer_port, (const char *)0 },
+    { "network.transport", spnl_rec_http_hasv_network_transport, (const char *)0 },
+    { "spnl.http.latency_ns", spnl_rec_http_hasv_spnl_http_latency_ns, (const char *)0 },
+    { "process.executable.name", spnl_rec_http_hasv_process_executable_name, (const char *)0 },
+};
+static inline int spnl_rec_http_dropped(const spnl_rec_http_t *r) { (void)r; return 0; }   /* never */
+static inline uint64_t spnl_rec_http_span_start_unix(const spnl_rec_http_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)wall_now_ns;
+    return (uint64_t)((int64_t)r->start_ktime + ktime_off);   /* record_ktime:start_ktime */
+}
+static inline uint64_t spnl_rec_http_span_end_unix(const spnl_rec_http_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_http_span_start_unix(r, ktime_off, wall_now_ns);
+    return (start + (uint64_t)r->duration_ns);   /* start_plus:duration_ns */
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 
@@ -829,6 +1046,51 @@ static inline int spnl_rec_redis_unpack(const void *data, size_t size, spnl_rec_
 #define SPNL_EGRESS_REDIS_ATTR_NETWORK_PEER_PORT       "network.peer.port"   /* semconv <- dport */
 #define SPNL_EGRESS_REDIS_ATTR_NETWORK_TRANSPORT       "network.transport"   /* semconv <- constant "tcp" */
 #define SPNL_EGRESS_REDIS_ATTR_PROCESS_EXECUTABLE_NAME "process.executable.name"   /* semconv <- comm[16] */
+
+/* --- egress RULES for channel "redis" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_redis_has_db_system(const spnl_rec_redis_t *r) { (void)r; return 1; }   /* always */
+/* db.operation.name: NO predicate is generated -- the declaration refuses to express this one.
+ * unexpressible(the gate is a RESP command parse of req[64] that this channel does not publish as a derived property -- redis has no typed consumer, so there is no property to name. Publishing the parse as a derivation would make this nonempty(<that property>)) */
+/* db.query.text: NO predicate is generated -- the declaration refuses to express this one.
+ * unexpressible(same gate as db.operation.name: the RESP command parse is not a published property of this channel) */
+static inline int spnl_rec_redis_has_error_type(const spnl_rec_redis_t *r) { (void)r; return (r->resp[0] == '-'); }   /* byte_eq(resp,0,'-') */
+static inline int spnl_rec_redis_has_network_peer_address(const spnl_rec_redis_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_redis_has_network_peer_port(const spnl_rec_redis_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_redis_has_network_transport(const spnl_rec_redis_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_redis_has_process_executable_name(const spnl_rec_redis_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_redis_hasv_db_system(const void *r) { return spnl_rec_redis_has_db_system((const spnl_rec_redis_t *)r); }
+static inline int spnl_rec_redis_hasv_error_type(const void *r) { return spnl_rec_redis_has_error_type((const spnl_rec_redis_t *)r); }
+static inline int spnl_rec_redis_hasv_network_peer_address(const void *r) { return spnl_rec_redis_has_network_peer_address((const spnl_rec_redis_t *)r); }
+static inline int spnl_rec_redis_hasv_network_peer_port(const void *r) { return spnl_rec_redis_has_network_peer_port((const spnl_rec_redis_t *)r); }
+static inline int spnl_rec_redis_hasv_network_transport(const void *r) { return spnl_rec_redis_has_network_transport((const spnl_rec_redis_t *)r); }
+static inline int spnl_rec_redis_hasv_process_executable_name(const void *r) { return spnl_rec_redis_has_process_executable_name((const spnl_rec_redis_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_redis[] = {
+    { "db.system", spnl_rec_redis_hasv_db_system, (const char *)0 },
+    { "db.operation.name", (int (*)(const void *))0, "unexpressible(the gate is a RESP command parse of req[64] that this channel does not publish as a derived property -- redis has no typed consumer, so there is no property to name. Publishing the parse as a derivation would make this nonempty(<that property>))" },
+    { "db.query.text", (int (*)(const void *))0, "unexpressible(same gate as db.operation.name: the RESP command parse is not a published property of this channel)" },
+    { "error.type", spnl_rec_redis_hasv_error_type, (const char *)0 },
+    { "network.peer.address", spnl_rec_redis_hasv_network_peer_address, (const char *)0 },
+    { "network.peer.port", spnl_rec_redis_hasv_network_peer_port, (const char *)0 },
+    { "network.transport", spnl_rec_redis_hasv_network_transport, (const char *)0 },
+    { "process.executable.name", spnl_rec_redis_hasv_process_executable_name, (const char *)0 },
+};
+static inline int spnl_rec_redis_dropped(const spnl_rec_redis_t *r) { (void)r; return 0; }   /* never */
+static inline uint64_t spnl_rec_redis_span_start_unix(const spnl_rec_redis_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)wall_now_ns;
+    return (uint64_t)((int64_t)r->start_ktime + ktime_off);   /* record_ktime:start_ktime */
+}
+static inline uint64_t spnl_rec_redis_span_end_unix(const spnl_rec_redis_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_redis_span_start_unix(r, ktime_off, wall_now_ns);
+    return (start + (uint64_t)r->duration_ns);   /* start_plus:duration_ns */
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
 
 /* ===================== channel "offcpu" =====================
  * record struct: <unit>_offcpu_event   ringbuf map: <unit>_offcpu_events (256 * 1024)
@@ -954,10 +1216,45 @@ const spnl_rec_offcpu_t *spnl_rec_offcpu_at(int i);
 void spnl_http_method(const unsigned char *src, char *out, int cap);   /* method <- req */
 void spnl_http_path(const unsigned char *src, char *out, int cap);   /* path <- req */
 long spnl_http_status(const unsigned char *src);   /* status <- resp */
-long spnl_offcpu_offcpu_ns(const spnl_rec_offcpu_t *r);   /* offcpu_ns <- offcpu_ns clamped to duration_ns */
-long spnl_offcpu_oncpu_ns(const spnl_rec_offcpu_t *r);   /* oncpu_ns <- duration_ns - min(offcpu_ns, duration_ns) */
+/* offcpu_ns <- the declared expression `min(offcpu_ns, duration_ns)` (generated, not hand-written) */
+/* oncpu_ns <- the declared expression `duration_ns - derived(offcpu_ns)` (generated, not hand-written) */
 void spnl_offcpu_wait_kind(const spnl_rec_offcpu_t *r, char *out, int cap);   /* wait_kind <- wait_stack -> kallsyms scan of the captured frames */
 void spnl_offcpu_wait_stack(const spnl_rec_offcpu_t *r, char *out, int cap);   /* wait_stack_trace <- wait_stack -> the same frames wait_kind classifies, symbolised */
+
+/* the channel's derivations, one record-taking helper each */
+static inline int spnl_recd_offcpu_method_empty(const spnl_rec_offcpu_t *r) {
+    char b[SPNL_REC_DERIVED_OFFCPU_METHOD_CAP];
+    b[0] = '\0';
+    spnl_http_method(r->req, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline int spnl_recd_offcpu_path_empty(const spnl_rec_offcpu_t *r) {
+    char b[SPNL_REC_DERIVED_OFFCPU_PATH_CAP];
+    b[0] = '\0';
+    spnl_http_path(r->req, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline long spnl_recd_offcpu_status_val(const spnl_rec_offcpu_t *r) {
+    return spnl_http_status(r->resp);
+}
+static inline long spnl_recd_offcpu_offcpu_ns_val(const spnl_rec_offcpu_t *r) {
+    return (long)(((r->offcpu_ns) < (r->duration_ns) ? (r->offcpu_ns) : (r->duration_ns)));   /* declared: min(offcpu_ns, duration_ns) */
+}
+static inline long spnl_recd_offcpu_oncpu_ns_val(const spnl_rec_offcpu_t *r) {
+    return (long)(((r->duration_ns) - (((uint64_t)spnl_recd_offcpu_offcpu_ns_val(r)))));   /* declared: duration_ns - derived(offcpu_ns) */
+}
+static inline int spnl_recd_offcpu_wait_kind_empty(const spnl_rec_offcpu_t *r) {
+    char b[SPNL_REC_DERIVED_OFFCPU_WAIT_KIND_CAP];
+    b[0] = '\0';
+    spnl_offcpu_wait_kind(r, b, (int)sizeof b);
+    return b[0] == '\0';
+}
+static inline int spnl_recd_offcpu_wait_stack_trace_empty(const spnl_rec_offcpu_t *r) {
+    char b[SPNL_REC_DERIVED_OFFCPU_WAIT_STACK_TRACE_CAP];
+    b[0] = '\0';
+    spnl_offcpu_wait_stack(r, b, (int)sizeof b);
+    return b[0] == '\0';
+}
 
 long spnl_rec_offcpu_pid(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
@@ -991,15 +1288,15 @@ const char *spnl_rec_offcpu_path(int i) {
 }
 long spnl_rec_offcpu_status(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
-    return r ? (long)spnl_http_status(r->resp) : 0;   /* derived: status */
+    return r ? spnl_recd_offcpu_status_val(r) : 0;   /* derived: status */
 }
 long spnl_rec_offcpu_offcpu_ns(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
-    return r ? (long)spnl_offcpu_offcpu_ns(r) : 0;   /* derived: offcpu_ns */
+    return r ? spnl_recd_offcpu_offcpu_ns_val(r) : 0;   /* derived: offcpu_ns */
 }
 long spnl_rec_offcpu_oncpu_ns(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
-    return r ? (long)spnl_offcpu_oncpu_ns(r) : 0;   /* derived: oncpu_ns */
+    return r ? spnl_recd_offcpu_oncpu_ns_val(r) : 0;   /* derived: oncpu_ns */
 }
 const char *spnl_rec_offcpu_wait_kind(int i) {
     const spnl_rec_offcpu_t *r = spnl_rec_offcpu_at(i);
@@ -1014,6 +1311,51 @@ const char *spnl_rec_offcpu_wait_stack_trace(int i) {
     if (!r) return "";
     spnl_offcpu_wait_stack(r, buf, (int)sizeof buf);   /* derived: wait_stack_trace */
     return buf;
+}
+#endif /* SPNL_REC_CONSUME_IMPL */
+
+/* --- egress RULES for channel "offcpu" ---
+ * The three things a reader of these records has to decide and could not
+ * read off the contract before: what a derivation computes when it is
+ * arithmetic, when an attribute is on the span, and what the span's start
+ * and end are. Each is generated from a declaration in a closed grammar
+ * (record_schema.h), and the same statements are in --json verbatim, so a
+ * consumer written in another language reads them rather than the prose. */
+#ifdef SPNL_REC_CONSUME_IMPL
+static inline int spnl_rec_offcpu_has_http_request_method(const spnl_rec_offcpu_t *r) { (void)r; return (!spnl_recd_offcpu_method_empty(r)); }   /* nonempty(method) */
+static inline int spnl_rec_offcpu_has_url_path(const spnl_rec_offcpu_t *r) { (void)r; return (!spnl_recd_offcpu_path_empty(r)); }   /* nonempty(path) */
+static inline int spnl_rec_offcpu_has_http_response_status_code(const spnl_rec_offcpu_t *r) { (void)r; return (spnl_recd_offcpu_status_val(r) != 0); }   /* nonzero(status) */
+static inline int spnl_rec_offcpu_has_spnl_offcpu_ns(const spnl_rec_offcpu_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_offcpu_has_spnl_oncpu_ns(const spnl_rec_offcpu_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_offcpu_has_spnl_wait_kind(const spnl_rec_offcpu_t *r) { (void)r; return 1; }   /* always */
+static inline int spnl_rec_offcpu_has_spnl_wait_stack(const spnl_rec_offcpu_t *r) { (void)r; return (!spnl_recd_offcpu_wait_stack_trace_empty(r)); }   /* nonempty(wait_stack_trace) */
+static inline int spnl_rec_offcpu_has_process_executable_name(const spnl_rec_offcpu_t *r) { (void)r; return (r->comm[0] != '\0'); }   /* nonempty(comm) */
+static inline int spnl_rec_offcpu_hasv_http_request_method(const void *r) { return spnl_rec_offcpu_has_http_request_method((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_url_path(const void *r) { return spnl_rec_offcpu_has_url_path((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_http_response_status_code(const void *r) { return spnl_rec_offcpu_has_http_response_status_code((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_spnl_offcpu_ns(const void *r) { return spnl_rec_offcpu_has_spnl_offcpu_ns((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_spnl_oncpu_ns(const void *r) { return spnl_rec_offcpu_has_spnl_oncpu_ns((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_spnl_wait_kind(const void *r) { return spnl_rec_offcpu_has_spnl_wait_kind((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_spnl_wait_stack(const void *r) { return spnl_rec_offcpu_has_spnl_wait_stack((const spnl_rec_offcpu_t *)r); }
+static inline int spnl_rec_offcpu_hasv_process_executable_name(const void *r) { return spnl_rec_offcpu_has_process_executable_name((const spnl_rec_offcpu_t *)r); }
+static const spnl_egress_rule_t spnl_egress_rules_offcpu[] = {
+    { "http.request.method", spnl_rec_offcpu_hasv_http_request_method, (const char *)0 },
+    { "url.path", spnl_rec_offcpu_hasv_url_path, (const char *)0 },
+    { "http.response.status_code", spnl_rec_offcpu_hasv_http_response_status_code, (const char *)0 },
+    { "spnl.offcpu_ns", spnl_rec_offcpu_hasv_spnl_offcpu_ns, (const char *)0 },
+    { "spnl.oncpu_ns", spnl_rec_offcpu_hasv_spnl_oncpu_ns, (const char *)0 },
+    { "spnl.wait.kind", spnl_rec_offcpu_hasv_spnl_wait_kind, (const char *)0 },
+    { "spnl.wait.stack", spnl_rec_offcpu_hasv_spnl_wait_stack, (const char *)0 },
+    { "process.executable.name", spnl_rec_offcpu_hasv_process_executable_name, (const char *)0 },
+};
+static inline int spnl_rec_offcpu_dropped(const spnl_rec_offcpu_t *r) { (void)r; return 0; }   /* never */
+static inline uint64_t spnl_rec_offcpu_span_start_unix(const spnl_rec_offcpu_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    (void)ktime_off;
+    return (wall_now_ns - (uint64_t)r->duration_ns);   /* wall_now_minus:duration_ns */
+}
+static inline uint64_t spnl_rec_offcpu_span_end_unix(const spnl_rec_offcpu_t *r, int64_t ktime_off, uint64_t wall_now_ns) {
+    uint64_t start = spnl_rec_offcpu_span_start_unix(r, ktime_off, wall_now_ns);
+    return (start + (uint64_t)r->duration_ns);   /* start_plus:duration_ns */
 }
 #endif /* SPNL_REC_CONSUME_IMPL */
 

@@ -488,8 +488,13 @@ module SpinelEbpf
           next unless e
           out << format("    egress: %s -> span \"%s\" (SpanKind %s)\n",
                         e[:push_fn], e[:span_name], e[:span_kind])
+          # The machine forms, not the prose. `describe` is what an author (or a
+          # model writing a probe) reads to know what leaves the process, and
+          # "when is this attribute here" is a question a sentence answers worse
+          # than a predicate does.
+          out << Capabilities.record_timing_line(e)
           e[:attributes].each do |a|
-            out << format("      %-24s %-8s <- %s  [%s]\n", a[:key], a[:stability], a[:source], a[:condition])
+            out << format("      %-24s %-8s <- %s  [%s]\n", a[:key], a[:stability], a[:source], a[:present])
           end
           unless Array(e[:enrichers]).empty?
             out << format("      + enrichers (environment-gated, no probe change): %s\n", Array(e[:enrichers]).join(", "))

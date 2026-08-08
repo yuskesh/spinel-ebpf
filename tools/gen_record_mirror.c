@@ -44,6 +44,7 @@
  * same bytes out (re-running must produce an empty diff).
  */
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -261,7 +262,8 @@ static const char *expose_ffi(const char *expose, const char *what) {
  * without learning what AF_INET6 is or that it should divide by 8 -- and because
  * the span builder calls the same function, what Ruby sees and what goes on the
  * wire cannot be two spellings of the same idea that drift. */
-enum { DERIV_BYTES_STR, DERIV_BYTES_INT, DERIV_RECORD_STR, DERIV_RECORD_INT, DERIV_CODE_NAME };
+enum { DERIV_BYTES_STR, DERIV_BYTES_INT, DERIV_RECORD_STR, DERIV_RECORD_INT, DERIV_CODE_NAME,
+       DERIV_INT_EXPR };
 
 static int derived_form(const CcRecDerived *d) {
     if (strcmp(d->impl_form, "bytes_to_str")  == 0) return DERIV_BYTES_STR;
@@ -273,6 +275,9 @@ static int derived_form(const CcRecDerived *d) {
      * names a CcValueMap, and the function below is generated from it -- because a
      * code's mapping is not domain logic, it is the table. See record_schema.h. */
     if (strcmp(d->impl_form, "code_to_name")  == 0) return DERIV_CODE_NAME;
+    /* The second of the same kind: `impl` is the expression itself and the body
+     * below is generated from it. See record_schema.h (int_expr). */
+    if (strcmp(d->impl_form, "int_expr")      == 0) return DERIV_INT_EXPR;
     die("unknown derivation impl_form", d->impl_form);
     return -1;
 }
@@ -280,10 +285,17 @@ static int derived_form(const CcRecDerived *d) {
 /* the two axes above, read back off the form (the generator only ever asks these
  * two questions: what to hand the function, and what shape comes back) */
 static int derived_takes_record(int form) {
-    return form == DERIV_RECORD_STR || form == DERIV_RECORD_INT;
+    return form == DERIV_RECORD_STR || form == DERIV_RECORD_INT || form == DERIV_INT_EXPR;
 }
 static int derived_returns_int(int form) {
-    return form == DERIV_BYTES_INT || form == DERIV_RECORD_INT;
+    return form == DERIV_BYTES_INT || form == DERIV_RECORD_INT || form == DERIV_INT_EXPR;
+}
+/* The forms whose BODY the generator emits. `residue` must agree with this,
+ * and the check below is the whole reason the class is declared rather than
+ * inferred -- a derivation cannot claim a reader has to write it while the
+ * generator writes it, nor the reverse. */
+static int derived_is_declared(int form) {
+    return form == DERIV_CODE_NAME || form == DERIV_INT_EXPR;
 }
 
 /* --- value maps ------------------------------------------------------------
@@ -431,6 +443,10 @@ static void emit_valmaps(void) {
  * cannot truncate differently on the two sides. The number is per-derivation so
  * it can be an actual bound (see the `cap` comment on CcRecDerived) instead of
  * one value shared by everybody. */
+/* Defined with the rest of the int_expr grammar below; check_derived() parses
+ * the expression as its check. */
+static void int_expr_c(const CcRecSchema *s, const char *text, char *out, size_t cap, const char *what);
+
 static void derived_cap_macro(const char *ID, const CcRecDerived *d, char *out, size_t cap) {
     char NUP[96];
     upcase(d->name, NUP, sizeof NUP);
@@ -457,6 +473,17 @@ static void derived_cap_macro(const char *ID, const CcRecDerived *d, char *out, 
 static void check_derived(const CcRecSchema *s, const CcRecDerived *d) {
     int form = derived_form(d);
     const char *want = derived_returns_int(form) ? "int" : "str";
+    /* The residue class, and its agreement with the form. "declared" means this
+     * generator emits the body; the other three mean a reader has to write one,
+     * and they differ in what a reader can even attempt -- "ambient" reads state
+     * that is not in the record at all. */
+    if (!d->residue) die("derivation declares no residue class", d->name);
+    if (strcmp(d->residue, "declared") && strcmp(d->residue, "parse") &&
+        strcmp(d->residue, "render")   && strcmp(d->residue, "ambient"))
+        die("unknown residue class (declared | parse | render | ambient)", d->residue);
+    if (derived_is_declared(form) != (strcmp(d->residue, "declared") == 0))
+        die("residue class disagrees with impl_form: a code_to_name/int_expr derivation IS "
+            "declared and anything else is not", d->name);
     if (strcmp(d->expose, want) != 0)
         die("derivation's expose type does not match its impl_form", d->name);
     if (derived_returns_int(form)) {
@@ -467,6 +494,14 @@ static void check_derived(const CcRecSchema *s, const CcRecDerived *d) {
     for (int i = 0; i < s->nfields; i++)
         if (s->fields[i].expose && strcmp(s->fields[i].name, d->name) == 0)
             die("a derivation and an exposed field claim the same property name", d->name);
+    if (form == DERIV_INT_EXPR) {
+        /* Parsing it here is the check: an expression that names a field this
+         * channel does not have, or that uses a shape outside the grammar, is a
+         * build failure at the declaration rather than in generated text. */
+        char probe[2048];
+        int_expr_c(s, d->impl, probe, sizeof probe, d->name);
+        return;
+    }
     if (derived_takes_record(form)) return;
     for (int i = 0; i < s->nfields; i++) {
         const CcRecField *f = &s->fields[i];
@@ -494,6 +529,616 @@ static void check_derived(const CcRecSchema *s, const CcRecDerived *d) {
         return;
     }
     die("derivation reads a field this record does not declare", d->from);
+}
+
+/* ================= Three more things the declaration now DECIDES ============
+ *
+ * S1-S3 made the layout and the attribute keys data. What stayed prose was the
+ * part a *reader* needs and the C runtime did not: how a derivation is computed
+ * when it is arithmetic, when an attribute is on the span, and what the span's
+ * start and end are. Handing the same .bpf.o to a consumer written elsewhere
+ * measured the cost of that: four places where the contract was carried in a
+ * sentence and had to be re-implemented from it. Each of the three below is a closed grammar this
+ * generator PARSES, so a spelling outside it is a build failure rather than a
+ * sentence nobody checks, and each is published verbatim in --json so that a
+ * reader in any language gets the same statement the C side gets. */
+
+/* --- int_expr: arithmetic derivations --------------------------------------
+ *
+ * Closed grammar: scalar int fields of THIS channel, integer literals,
+ * + - * / << >>, min(), max(), parentheses. Emitted in the field's own C type,
+ * so the arithmetic is what the compiler would have done on the hand-written
+ * line the declaration replaces (the three it replaces were: a >>3 on a signed
+ * 64-bit field, and a clamp and a difference on two unsigned ones). */
+
+typedef struct {
+    const char        *p;
+    const CcRecSchema *s;
+    const char        *what;
+} ExprCur;
+
+/* Both grammars below emit twice from ONE parse: the C the runtime compiles, and
+ * a JSON tree the --json artifact publishes. That second output is what makes
+ * the closed grammar usable by a consumer in another language WITHOUT writing a
+ * parser for it -- which would otherwise be a fifth thing a consumer has to
+ * hand-write. Emitting both from one walk is the point: a text form and a tree that
+ * disagreed would be worse than prose. */
+static int g_ex_json;   /* 0 = emit C, 1 = emit the JSON tree */
+
+static void ex_ws(ExprCur *c) { while (*c->p == ' ' || *c->p == '\t') c->p++; }
+
+static int ex_eat(ExprCur *c, const char *tok) {
+    size_t n = strlen(tok);
+    ex_ws(c);
+    if (strncmp(c->p, tok, n) != 0) return 0;
+    c->p += n;
+    return 1;
+}
+
+/* A field of this channel by name+length (the cursor does not NUL-terminate). */
+static const CcRecField *rec_field_n(const CcRecSchema *s, const char *name, size_t len) {
+    for (int i = 0; i < s->nfields; i++)
+        if (strlen(s->fields[i].name) == len && strncmp(s->fields[i].name, name, len) == 0)
+            return &s->fields[i];
+    return NULL;
+}
+
+static const CcRecDerived *rec_derived_n(const CcRecSchema *s, const char *name, size_t len) {
+    for (int i = 0; i < s->nderived; i++)
+        if (strlen(s->derived[i].name) == len && strncmp(s->derived[i].name, name, len) == 0)
+            return &s->derived[i];
+    return NULL;
+}
+
+static void ex_put(char *out, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) die("int_expr: generated expression is too long", fmt);
+}
+
+static void ex_shift(ExprCur *c, char *out, size_t cap);
+
+static void ex_prim(ExprCur *c, char *out, size_t cap) {
+    ex_ws(c);
+    if (*c->p == '(') {
+        char a[512];
+        c->p++;
+        ex_shift(c, a, sizeof a);
+        if (!ex_eat(c, ")")) die("int_expr: missing ')'", c->what);
+        ex_put(out, cap, g_ex_json ? "%s" : "(%s)", a);
+        return;
+    }
+    if (strncmp(c->p, "min(", 4) == 0 || strncmp(c->p, "max(", 4) == 0) {
+        int is_min = (c->p[1] == 'i');
+        char a[512], b[512];
+        c->p += 4;
+        ex_shift(c, a, sizeof a);
+        if (!ex_eat(c, ",")) die("int_expr: min/max takes two operands", c->what);
+        ex_shift(c, b, sizeof b);
+        if (!ex_eat(c, ")")) die("int_expr: missing ')'", c->what);
+        /* Spelled as the C the hand-written body used, so the promotion rules
+         * (and therefore the result on a pathological record) are unchanged. */
+        if (g_ex_json) ex_put(out, cap, "{\"op\": \"%s\", \"args\": [%s, %s]}", is_min ? "min" : "max", a, b);
+        else           ex_put(out, cap, "((%s) %s (%s) ? (%s) : (%s))", a, is_min ? "<" : ">", b, a, b);
+        return;
+    }
+    if (strncmp(c->p, "derived(", 8) == 0) {
+        /* One int_expr may read an EARLIER derivation of the same channel, and it
+         * has to be spelled differently from a field because the two namespaces
+         * overlap on purpose: offcpu declares both a field `offcpu_ns` (what
+         * sched_switch accumulated) and a derived `offcpu_ns` (that value clamped
+         * to the window), and the whole point of that split is that they are
+         * different
+         * numbers. Without this form, oncpu_ns would have to re-spell the clamp,
+         * and "the clamp exists in exactly one place" -- the invariant
+         * capabilities_test.rb pins -- would be gone. */
+        const char *st;
+        const CcRecDerived *d;
+        c->p += 8;
+        ex_ws(c);
+        st = c->p;
+        while (isalnum((unsigned char)*c->p) || *c->p == '_') c->p++;
+        d = rec_derived_n(c->s, st, (size_t)(c->p - st));
+        if (!ex_eat(c, ")")) die("int_expr: derived() is missing its ')'", c->what);
+        if (!d) die("int_expr: derived() names a property this channel does not declare", c->what);
+        if (strcmp(d->expose, "int") != 0) die("int_expr: derived() reads a str derivation", d->name);
+        /* Forward references would generate a call to a helper that does not
+         * exist yet; declaration order is the only order there is. */
+        if (strcmp(d->name, c->what) == 0) die("int_expr: derivation reads itself", d->name);
+        {
+            int seen_self = 0;
+            for (int i = 0; i < c->s->nderived; i++) {
+                if (strcmp(c->s->derived[i].name, c->what) == 0) seen_self = 1;
+                if (strcmp(c->s->derived[i].name, d->name) == 0 && seen_self)
+                    die("int_expr: derived() reads a derivation declared later", d->name);
+            }
+        }
+        if (g_ex_json) ex_put(out, cap, "{\"derived\": \"%s\"}", d->name);
+        else           ex_put(out, cap, "((uint64_t)spnl_recd_%s_%s_val(r))", c->s->id, d->name);
+        return;
+    }
+    if (isdigit((unsigned char)*c->p)) {
+        const char *st = c->p;
+        while (isdigit((unsigned char)*c->p)) c->p++;
+        if (g_ex_json) ex_put(out, cap, "{\"lit\": %.*s}", (int)(c->p - st), st);
+        else           ex_put(out, cap, "%.*s", (int)(c->p - st), st);
+        return;
+    }
+    if (isalpha((unsigned char)*c->p) || *c->p == '_') {
+        const char *st = c->p;
+        const CcRecField *f;
+        while (isalnum((unsigned char)*c->p) || *c->p == '_') c->p++;
+        f = rec_field_n(c->s, st, (size_t)(c->p - st));
+        if (!f) die("int_expr names something that is not a field of this channel", c->what);
+        if (f->count > 0) die("int_expr reads an array field (the grammar is arithmetic over scalars)", f->name);
+        if (g_ex_json) ex_put(out, cap, "{\"field\": \"%s\"}", f->name);
+        else           ex_put(out, cap, "r->%s", f->name);
+        return;
+    }
+    die("int_expr: unexpected token", c->what);
+}
+
+static void ex_mul(ExprCur *c, char *out, size_t cap) {
+    char a[512], b[512];
+    ex_prim(c, a, sizeof a);
+    for (;;) {
+        const char *op = NULL;
+        ex_ws(c);
+        if (*c->p == '*') op = "*";
+        else if (*c->p == '/') op = "/";
+        else break;
+        c->p++;
+        ex_prim(c, b, sizeof b);
+        if (g_ex_json) snprintf(out, cap, "{\"op\": \"%s\", \"args\": [%s, %s]}", op, a, b);
+        else           snprintf(out, cap, "((%s) %s (%s))", a, op, b);
+        if (strlen(out) + 1 >= cap) die("int_expr: expression too long", c->what);
+        snprintf(a, sizeof a, "%s", out);
+    }
+    ex_put(out, cap, "%s", a);
+}
+
+static void ex_add(ExprCur *c, char *out, size_t cap) {
+    char a[512], b[512];
+    ex_mul(c, a, sizeof a);
+    for (;;) {
+        const char *op = NULL;
+        ex_ws(c);
+        if (*c->p == '+') op = "+";
+        else if (*c->p == '-') op = "-";
+        else break;
+        c->p++;
+        ex_mul(c, b, sizeof b);
+        if (g_ex_json) snprintf(out, cap, "{\"op\": \"%s\", \"args\": [%s, %s]}", op, a, b);
+        else           snprintf(out, cap, "((%s) %s (%s))", a, op, b);
+        if (strlen(out) + 1 >= cap) die("int_expr: expression too long", c->what);
+        snprintf(a, sizeof a, "%s", out);
+    }
+    ex_put(out, cap, "%s", a);
+}
+
+static void ex_shift(ExprCur *c, char *out, size_t cap) {
+    char a[512], b[512];
+    ex_add(c, a, sizeof a);
+    for (;;) {
+        const char *op = NULL;
+        ex_ws(c);
+        if (strncmp(c->p, "<<", 2) == 0) op = "<<";
+        else if (strncmp(c->p, ">>", 2) == 0) op = ">>";
+        else break;
+        c->p += 2;
+        ex_add(c, b, sizeof b);
+        if (g_ex_json) snprintf(out, cap, "{\"op\": \"%s\", \"args\": [%s, %s]}", op, a, b);
+        else           snprintf(out, cap, "((%s) %s (%s))", a, op, b);
+        if (strlen(out) + 1 >= cap) die("int_expr: expression too long", c->what);
+        snprintf(a, sizeof a, "%s", out);
+    }
+    ex_put(out, cap, "%s", a);
+}
+
+/* Parse `text` as an int_expr over `s` and write the C expression to `out`. */
+static void int_expr_c(const CcRecSchema *s, const char *text, char *out, size_t cap, const char *what) {
+    ExprCur c = { text, s, what };
+    ex_shift(&c, out, cap);
+    ex_ws(&c);
+    if (*c.p) die("int_expr has trailing text the grammar does not accept", what);
+}
+
+/* --- present / drop_when predicates ----------------------------------------
+ *
+ * Same idea one level up: a closed grammar over the channel's OWN vocabulary
+ * (its fields and its derived properties), parsed here and emitted as a C
+ * boolean. `unexpressible(<reason>)` is a first-class member of the grammar
+ * rather than an escape hatch: a rule that cannot be written must SAY so, with
+ * a reason, because the alternative -- leaving it prose while calling the rest
+ * machine-readable -- makes every downstream reader believe a coverage claim
+ * that is false exactly where it matters. It is the same refusal a consumer
+ * transform makes when it cannot express a narrowing, moved into a declaration. */
+
+static int pred_unexpressible(const char *t) {
+    return t && strncmp(t, "unexpressible(", 14) == 0;
+}
+
+static void pred_c(const CcRecSchema *s, const char *text, char *out, size_t cap, const char *what);
+
+/* one predicate at the cursor */
+static void pred_one(ExprCur *c, char *out, size_t cap) {
+    char inner[1024];
+    ex_ws(c);
+    if (ex_eat(c, "always")) { ex_put(out, cap, g_ex_json ? "{\"pred\": \"always\"}" : "1"); return; }
+    if (ex_eat(c, "never"))  { ex_put(out, cap, g_ex_json ? "{\"pred\": \"never\"}"  : "0"); return; }
+
+    if (strncmp(c->p, "all(", 4) == 0 || strncmp(c->p, "any(", 4) == 0) {
+        int is_all = (c->p[0] == 'a' && c->p[1] == 'l');
+        const char *joiner = g_ex_json ? ", " : (is_all ? " && " : " || ");
+        char acc[1024];
+        int n = 0;
+        c->p += 4;
+        acc[0] = '\0';
+        for (;;) {
+            pred_one(c, inner, sizeof inner);
+            if (n++) { if (strlen(acc) + strlen(joiner) + 1 >= sizeof acc) die("predicate too long", c->what);
+                       strcat(acc, joiner); }
+            if (strlen(acc) + strlen(inner) + 1 >= sizeof acc) die("predicate too long", c->what);
+            strcat(acc, inner);
+            if (ex_eat(c, ",")) continue;
+            break;
+        }
+        if (n < 2) die("all()/any() with fewer than two operands (say the operand itself)", c->what);
+        if (!ex_eat(c, ")")) die("predicate: missing ')'", c->what);
+        if (g_ex_json) ex_put(out, cap, "{\"pred\": \"%s\", \"args\": [%s]}", is_all ? "all" : "any", acc);
+        else           ex_put(out, cap, "(%s)", acc);
+        return;
+    }
+
+    if (strncmp(c->p, "byte_eq(", 8) == 0) {
+        const char *st;
+        const CcRecField *f;
+        long idx = 0;
+        char lit;
+        c->p += 8;
+        ex_ws(c);
+        st = c->p;
+        while (isalnum((unsigned char)*c->p) || *c->p == '_') c->p++;
+        f = rec_field_n(c->s, st, (size_t)(c->p - st));
+        if (!f) die("byte_eq names something that is not a field of this channel", c->what);
+        if (f->count <= 0) die("byte_eq reads a scalar field (use zero()/nonzero())", f->name);
+        if (!ex_eat(c, ",")) die("byte_eq: missing ','", c->what);
+        ex_ws(c);
+        if (!isdigit((unsigned char)*c->p)) die("byte_eq: index must be a literal", c->what);
+        while (isdigit((unsigned char)*c->p)) idx = idx * 10 + (*c->p++ - '0');
+        if (idx >= f->count) die("byte_eq index is past the end of the field", f->name);
+        if (!ex_eat(c, ",")) die("byte_eq: missing ','", c->what);
+        ex_ws(c);
+        if (*c->p != '\'' || c->p[1] == '\0' || c->p[2] != '\'')
+            die("byte_eq: the third operand must be a single-character literal", c->what);
+        lit = c->p[1];
+        c->p += 3;
+        if (!ex_eat(c, ")")) die("predicate: missing ')'", c->what);
+        if (g_ex_json)
+            ex_put(out, cap, "{\"pred\": \"byte_eq\", \"of\": {\"field\": \"%s\"}, \"index\": %ld, \"byte\": %d}",
+                   f->name, idx, (int)(unsigned char)lit);
+        else
+            ex_put(out, cap, "(r->%s[%ld] == '%c')", f->name, idx, lit);
+        return;
+    }
+
+    {
+        /* the four unary shapes: (non)empty over a string, (non)zero over an int */
+        static const struct { const char *word; int want_str; int negate; const char *word_json; } U[] = {
+            { "nonempty(", 1, 0, "nonempty" }, { "empty(", 1, 1, "empty" },
+            { "nonzero(",  0, 0, "nonzero"  }, { "zero(",  0, 1, "zero"  },
+        };
+        for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
+            size_t wl = strlen(U[k].word);
+            const char *st;
+            const CcRecField *f;
+            const CcRecDerived *d;
+            size_t nlen;
+            if (strncmp(c->p, U[k].word, wl) != 0) continue;
+            c->p += wl;
+            ex_ws(c);
+            st = c->p;
+            while (isalnum((unsigned char)*c->p) || *c->p == '_') c->p++;
+            nlen = (size_t)(c->p - st);
+            if (!ex_eat(c, ")")) die("predicate: missing ')'", c->what);
+            f = rec_field_n(c->s, st, nlen);
+            d = rec_derived_n(c->s, st, nlen);
+            if (!f && !d) die("predicate names a property this channel does not declare", c->what);
+            if (f && d) die("predicate names a property that is both a field and a derivation", c->what);
+            if (f) {
+                int is_str = (f->count > 0);
+                if (is_str != U[k].want_str)
+                    die(U[k].want_str ? "empty()/nonempty() over a scalar field (use zero()/nonzero())"
+                                      : "zero()/nonzero() over an array field (use empty()/nonempty())",
+                        f->name);
+                if (g_ex_json)
+                    ex_put(out, cap, "{\"pred\": \"%s\", \"of\": {\"field\": \"%s\"}}",
+                           U[k].word_json, f->name);
+                else if (is_str) ex_put(out, cap, "(r->%s[0] %s '\\0')", f->name, U[k].negate ? "==" : "!=");
+                else             ex_put(out, cap, "(r->%s %s 0)", f->name, U[k].negate ? "==" : "!=");
+            } else {
+                int d_str = (strcmp(d->expose, "str") == 0);
+                if (d_str != U[k].want_str)
+                    die(U[k].want_str ? "empty()/nonempty() over an int derivation (use zero()/nonzero())"
+                                      : "zero()/nonzero() over a str derivation (use empty()/nonempty())",
+                        d->name);
+                /* The generated helpers below (spnl_recd_<ch>_<prop>_*) are the
+                 * derivation's own output, so a presence rule and the value the
+                 * attribute carries cannot come from two different readings. */
+                if (g_ex_json)
+                    ex_put(out, cap, "{\"pred\": \"%s\", \"of\": {\"derived\": \"%s\"}}",
+                           U[k].word_json, d->name);
+                else if (d_str) ex_put(out, cap, "(%sspnl_recd_%s_%s_empty(r))", U[k].negate ? "" : "!", c->s->id, d->name);
+                else            ex_put(out, cap, "(spnl_recd_%s_%s_val(r) %s 0)", c->s->id, d->name, U[k].negate ? "==" : "!=");
+            }
+            return;
+        }
+    }
+    die("predicate: not a form of the closed grammar (always/never/empty/nonempty/zero/nonzero/byte_eq/all/any/unexpressible)", c->what);
+}
+
+static void pred_c(const CcRecSchema *s, const char *text, char *out, size_t cap, const char *what) {
+    ExprCur c = { text, s, what };
+    if (!text || !*text) die("predicate is empty (say `always`, or `unexpressible(<reason>)`)", what);
+    if (pred_unexpressible(text)) {
+        size_t n = strlen(text);
+        if (text[n - 1] != ')') die("unexpressible(...) is missing its ')'", what);
+        if (n < 14 + 20 + 1) die("unexpressible(...) without a real reason (say what is missing)", what);
+        if (g_ex_json) {
+            /* the reason is prose and may contain quotes; the caller escapes it */
+            snprintf(out, cap, "{\"pred\": \"unexpressible\"}");
+        } else {
+            out[0] = '\0';
+        }
+        return;
+    }
+    pred_one(&c, out, cap);
+    ex_ws(&c);
+    if (*c.p) die("predicate has trailing text the grammar does not accept", what);
+}
+
+/* --- the span's timing ----------------------------------------------------- */
+
+static const CcClock *find_clock(const char *id, const char *what) {
+    int n = 0;
+    const CcClock *const *v = cc_clock_all(&n);
+    for (int i = 0; i < n; i++) if (strcmp(v[i]->id, id) == 0) return v[i];
+    die("span timing names an undeclared clock", what);
+    return NULL;
+}
+
+/* The named thing must be an int property of the channel; returns its C read. */
+static void timing_operand(const CcRecSchema *s, const char *name, char *out, size_t cap, const char *what) {
+    const CcRecField *f = rec_field_n(s, name, strlen(name));
+    const CcRecDerived *d = rec_derived_n(s, name, strlen(name));
+    if (f) {
+        if (f->count > 0) die("span timing reads an array field", name);
+        snprintf(out, cap, "r->%s", f->name);
+        return;
+    }
+    if (d) {
+        if (strcmp(d->expose, "int") != 0) die("span timing reads a str derivation", name);
+        snprintf(out, cap, "(uint64_t)spnl_recd_%s_%s_val(r)", s->id, d->name);
+        return;
+    }
+    /* the one dotted name: the common event header's timestamp */
+    if (strcmp(name, "hdr.timestamp") == 0) {
+        const CcRecField *h = rec_field_n(s, "hdr", 3);
+        if (!h || strcmp(h->ctype, "struct spnl_event_hdr") != 0)
+            die("span timing reads hdr.timestamp on a channel with no common event header", what);
+        snprintf(out, cap, "r->hdr.timestamp");
+        return;
+    }
+    die("span timing names a property this channel does not declare", what);
+}
+
+/* Validate the two timing forms and write the C for start / end. */
+static void timing_c(const CcRecSchema *s, char *start, size_t scap, char *end, size_t ecap,
+                     int *uses_ktime_off, int *uses_wall_now) {
+    const CcEgressSpan *e = s->egress;
+    char op[160];
+    *uses_ktime_off = 0;
+    *uses_wall_now = 0;
+
+    if (!e->start_form || !e->end_form) die("egress span declares no timing form", s->id);
+
+    if (strncmp(e->start_form, "record_ktime:", 13) == 0) {
+        if (!e->start_clock || !*e->start_clock)
+            die("a record_ktime start must name the clock the field is on", s->id);
+        find_clock(e->start_clock, s->id);
+        timing_operand(s, e->start_form + 13, op, sizeof op, s->id);
+        snprintf(start, scap, "(uint64_t)((int64_t)%s + ktime_off)", op);
+        *uses_ktime_off = 1;
+    } else if (strncmp(e->start_form, "wall_now_minus:", 15) == 0) {
+        if (e->start_clock && *e->start_clock)
+            die("a wall_now_minus start reads no record clock, so it must not name one", s->id);
+        timing_operand(s, e->start_form + 15, op, sizeof op, s->id);
+        snprintf(start, scap, "(wall_now_ns - (uint64_t)%s)", op);
+        *uses_wall_now = 1;
+    } else {
+        die("unknown span start form (record_ktime:<field> | wall_now_minus:<prop>)", e->start_form);
+    }
+
+    if (strcmp(e->end_form, "start") == 0) {
+        snprintf(end, ecap, "start");
+    } else if (strncmp(e->end_form, "start_plus:", 11) == 0) {
+        timing_operand(s, e->end_form + 11, op, sizeof op, s->id);
+        snprintf(end, ecap, "(start + (uint64_t)%s)", op);
+    } else {
+        die("unknown span end form (start | start_plus:<prop>)", e->end_form);
+    }
+}
+
+/* --- what all of the above turns into, in the generated header ------------- */
+
+/* A lower-case, identifier-safe tail for an attribute key (the macro tail is
+ * upper-case; a function name wants the other case, and both come from the one
+ * transform so they cannot name different attributes). */
+static void key_fn_tail(const char *key, char *out, size_t cap) {
+    key_macro_tail(key, out, cap);
+    for (char *p = out; *p; p++) *p = (char)tolower((unsigned char)*p);
+}
+
+/* Every derivation, as ONE record-taking helper -- the accessor, a metric label,
+ * a presence predicate and the span builder all read the value through it, so a
+ * property cannot be reached by two different spellings (which is how the srtt derivation
+ * drifted once). For an int_expr derivation this helper IS the implementation. */
+/* One sentence per residue class, written once. A generated reader prints THIS
+ * where it would otherwise have printed nothing (a generated reader registered all
+ * thirteen non-declared derivations as the same panicking function variable, so
+ * "you can write this, the bytes are in the record" and "this is not derivable
+ * from the record at all" arrived as the same message). */
+static const char *derived_residue_means(const char *residue) {
+    if (strcmp(residue, "declared") == 0)
+        return "generated from the declaration; no consumer implements it";
+    if (strcmp(residue, "parse") == 0)
+        return "a variable-length walk over wire bytes the record carries; a consumer must implement "
+               "it, and everything it reads is in the record";
+    if (strcmp(residue, "render") == 0)
+        return "a standard rendering of record fields, with a branch chosen by another field; a "
+               "consumer must implement it, and everything it reads is in the record";
+    if (strcmp(residue, "ambient") == 0)
+        return "NOT derivable from the record: the input is outside it (the loaded object's BPF "
+               "stack map and the running kernel's symbols), so a consumer that does not hold that "
+               "state cannot produce this property at all";
+    die("unknown residue class", residue);
+    return NULL;
+}
+
+/* One row per declared egress attribute: the key, the predicate that decides
+ * whether it is on the span, and -- for a rule the declaration refuses to
+ * express -- the reason, with a NULL predicate so that "cannot say" cannot be
+ * read as "always". Emitted once; the per-channel tables follow each channel. */
+static void emit_egress_rule_type(void) {
+    printf("\n/* the egress rule table type (one row per declared attribute). */\n");
+    printf("typedef struct {\n");
+    printf("    const char *key;\n");
+    printf("    int (*present)(const void *rec);   /* NULL = the declaration refuses to express it */\n");
+    printf("    const char *unexpressible;         /* the declared reason, or NULL */\n");
+    printf("} spnl_egress_rule_t;\n");
+}
+
+static void emit_derived_helpers(const CcRecSchema *s, const char *ID) {
+    char expr[2048];
+    if (!s->nderived) return;
+    printf("\n/* the channel's derivations, one record-taking helper each */\n");
+    for (int i = 0; i < s->nderived; i++) {
+        const CcRecDerived *d = &s->derived[i];
+        int form = derived_form(d);
+        char capname[192];
+        if (derived_returns_int(form)) {
+            printf("static inline long spnl_recd_%s_%s_val(const spnl_rec_%s_t *r) {\n", s->id, d->name, s->id);
+            if (form == DERIV_INT_EXPR) {
+                int_expr_c(s, d->impl, expr, sizeof expr, d->name);
+                printf("    return (long)(%s);   /* declared: %s */\n", expr, d->impl);
+            } else if (derived_takes_record(form)) {
+                printf("    return %s(r);\n", d->impl);
+            } else {
+                printf("    return %s(r->%s);\n", d->impl, d->from);
+            }
+            printf("}\n");
+        } else {
+            derived_cap_macro(ID, d, capname, sizeof capname);
+            printf("static inline int spnl_recd_%s_%s_empty(const spnl_rec_%s_t *r) {\n", s->id, d->name, s->id);
+            printf("    char b[%s];\n", capname);
+            printf("    b[0] = '\\0';\n");
+            if (form == DERIV_CODE_NAME)
+                printf("    spnl_valmap_%s((long)r->%s, b, (int)sizeof b);\n", d->impl, d->from);
+            else if (derived_takes_record(form))
+                printf("    %s(r, b, (int)sizeof b);\n", d->impl);
+            else
+                printf("    %s(r->%s, b, (int)sizeof b);\n", d->impl, d->from);
+            printf("    return b[0] == '\\0';\n}\n");
+        }
+    }
+}
+
+static void emit_egress_rules(const CcRecSchema *s, const char *ID) {
+    const CcEgressSpan *e = s->egress;
+    char expr[2048], tail[128], start[256], end[256];
+    int uses_off = 0, uses_now = 0;
+    (void)ID;
+
+    printf("\n/* --- egress RULES for channel \"%s\" ---\n", s->id);
+    printf(" * The three things a reader of these records has to decide and could not\n");
+    printf(" * read off the contract before: what a derivation computes when it is\n");
+    printf(" * arithmetic, when an attribute is on the span, and what the span's start\n");
+    printf(" * and end are. Each is generated from a declaration in a closed grammar\n");
+    printf(" * (record_schema.h), and the same statements are in --json verbatim, so a\n");
+    printf(" * consumer written in another language reads them rather than the prose. */\n");
+    printf("#ifdef SPNL_REC_CONSUME_IMPL\n");
+
+    /* when each attribute is on the span */
+    for (int i = 0; i < e->nattrs; i++) {
+        const CcEgressAttr *a = &e->attrs[i];
+        key_fn_tail(a->key, tail, sizeof tail);
+        pred_c(s, a->present, expr, sizeof expr, a->key);
+        if (pred_unexpressible(a->present)) {
+            printf("/* %s: NO predicate is generated -- the declaration refuses to express this one.\n", a->key);
+            printf(" * %s */\n", a->present);
+            continue;
+        }
+        /* `(void)r` because a constant predicate ("always") does not read the
+         * record, and the generated header is compiled with -Werror. */
+        printf("static inline int spnl_rec_%s_has_%s(const spnl_rec_%s_t *r) { (void)r; return %s; }   /* %s */\n",
+               s->id, tail, s->id, expr, a->present);
+    }
+
+    /* The same rules as a TABLE, so that a consumer (and the test that measures
+     * the declaration against the real span builder) can walk them instead of
+     * hand-writing a key -> predicate dispatch. An attribute added to the
+     * declaration appears here without anybody remembering to add it, which is
+     * the property that makes the runtime test a check on the contract rather
+     * than a second copy of it. An `unexpressible` rule carries its reason and a
+     * NULL predicate -- so a consumer cannot silently treat it as "always". */
+    for (int i = 0; i < e->nattrs; i++) {
+        const CcEgressAttr *a = &e->attrs[i];
+        if (pred_unexpressible(a->present)) continue;
+        key_fn_tail(a->key, tail, sizeof tail);
+        printf("static inline int spnl_rec_%s_hasv_%s(const void *r) { return spnl_rec_%s_has_%s((const spnl_rec_%s_t *)r); }\n",
+               s->id, tail, s->id, tail, s->id);
+    }
+    printf("static const spnl_egress_rule_t spnl_egress_rules_%s[] = {\n", s->id);
+    for (int i = 0; i < e->nattrs; i++) {
+        const CcEgressAttr *a = &e->attrs[i];
+        if (pred_unexpressible(a->present)) {
+            printf("    { \"%s\", (int (*)(const void *))0, ", a->key);
+            printf("\"");
+            for (const char *q = a->present; *q; q++) {
+                if (*q == '"' || *q == '\\') putchar('\\');
+                putchar(*q);
+            }
+            printf("\" },\n");
+            continue;
+        }
+        key_fn_tail(a->key, tail, sizeof tail);
+        printf("    { \"%s\", spnl_rec_%s_hasv_%s, (const char *)0 },\n", a->key, s->id, tail);
+    }
+    printf("};\n");
+
+    /* when a record produces no span at all */
+    if (e->drop_when && *e->drop_when) {
+        pred_c(s, e->drop_when, expr, sizeof expr, "drop_when");
+        if (!pred_unexpressible(e->drop_when))
+            printf("static inline int spnl_rec_%s_dropped(const spnl_rec_%s_t *r) { (void)r; return %s; }   /* %s */\n",
+                   s->id, s->id, expr, e->drop_when);
+    }
+
+    /* the span's start and end, in unix nanoseconds */
+    timing_c(s, start, sizeof start, end, sizeof end, &uses_off, &uses_now);
+    printf("static inline uint64_t spnl_rec_%s_span_start_unix(const spnl_rec_%s_t *r, int64_t ktime_off, uint64_t wall_now_ns) {\n",
+           s->id, s->id);
+    if (!uses_off) printf("    (void)ktime_off;\n");
+    if (!uses_now) printf("    (void)wall_now_ns;\n");
+    printf("    return %s;   /* %s */\n}\n", start, e->start_form);
+    printf("static inline uint64_t spnl_rec_%s_span_end_unix(const spnl_rec_%s_t *r, int64_t ktime_off, uint64_t wall_now_ns) {\n",
+           s->id, s->id);
+    printf("    uint64_t start = spnl_rec_%s_span_start_unix(r, ktime_off, wall_now_ns);\n", s->id);
+    printf("    return %s;   /* %s */\n}\n", end, e->end_form);
+
+    printf("#endif /* SPNL_REC_CONSUME_IMPL */\n");
 }
 
 /* --- metrics ---------------------------------------------------------------
@@ -720,11 +1365,12 @@ static void emit_label_render(const CcRecSchema *s, const char *from, int idx) {
             printf("        %s(r, lb%d, (int)sizeof lb%d);\n", d->impl, idx, idx);
             break;
         case DERIV_BYTES_INT:
-            printf("        snprintf(lb%d, sizeof lb%d, \"%%ld\", %s(r->%s));\n",
-                   idx, idx, d->impl, d->from);
-            break;
         case DERIV_RECORD_INT:
-            printf("        snprintf(lb%d, sizeof lb%d, \"%%ld\", %s(r));\n", idx, idx, d->impl);
+        case DERIV_INT_EXPR:
+            /* Every int derivation is read through its generated helper, so a
+             * metric label and the typed consumer cannot reach the value two ways. */
+            printf("        snprintf(lb%d, sizeof lb%d, \"%%ld\", spnl_recd_%s_%s_val(r));\n",
+                   idx, idx, s->id, d->name);
             break;
         case DERIV_CODE_NAME:
             printf("        spnl_valmap_%s((long)r->%s, lb%d, (int)sizeof lb%d);\n",
@@ -780,8 +1426,7 @@ static void emit_metric_observe(const CcRecSchema *s, int base_index) {
             (void)find_property(s, m->value_from, &d);
             printf("        double v = (double)(");
             if (d) {
-                if (derived_form(d) == DERIV_RECORD_INT) printf("%s(r)", d->impl);
-                else                                     printf("%s(r->%s)", d->impl, d->from);
+                printf("spnl_recd_%s_%s_val(r)", s->id, d->name);
             } else {
                 printf("r->%s", m->value_from);
             }
@@ -1062,6 +1707,10 @@ static void emit_consumer(const CcRecSchema *s) {
         const CcRecDerived *d = &s->derived[i];
         check_derived(s, d);   /* form / expose / `from` agree -- see derived_form() */
         switch (derived_form(d)) {
+            case DERIV_INT_EXPR:    /* generated below; the runtime defines nothing */
+                printf("/* %s <- the declared expression `%s` (generated, not hand-written) */\n",
+                       d->name, d->impl);
+                break;
             case DERIV_CODE_NAME:   /* generated above; the runtime defines nothing */
                 printf("/* %s <- %s via the generated value map spnl_valmap_%s() */\n",
                        d->name, d->from, d->impl);
@@ -1083,6 +1732,7 @@ static void emit_consumer(const CcRecSchema *s) {
                 break;
         }
     }
+    emit_derived_helpers(s, ID);
     printf("\n");
 
     for (int i = 0; i < s->nfields; i++) {
@@ -1107,7 +1757,9 @@ static void emit_consumer(const CcRecSchema *s) {
         else                            snprintf(arg, sizeof arg, "r->%s", d->from);
         emit_accessor_head(s, d->expose, d->name, d->name);
         if (derived_returns_int(form)) {   /* axis 2: what shape comes back */
-            printf("    return r ? (long)%s(%s) : 0;   /* derived: %s */\n", d->impl, arg, d->name);
+            (void)arg;
+            printf("    return r ? spnl_recd_%s_%s_val(r) : 0;   /* derived: %s */\n",
+                   s->id, d->name, d->name);
             printf("}\n");
         } else {
             derived_cap_macro(ID, d, capname, sizeof capname);
@@ -1229,6 +1881,10 @@ static void emit_channel(const CcRecSchema *s) {
      * named-event meaning in Ruby. */
     if (s->typed_consumer) emit_consumer(s);
     else if (s->nderived) die("derived properties declared without typed_consumer", s->id);
+    /* The egress RULES (presence predicates, drop rule, span timing) come after
+     * the consumer, because a predicate may be stated over a derived property and
+     * reads it through the helper the consumer emitted. */
+    if (s->egress) emit_egress_rules(s, ID);
 
     /* `kfilter` names the in-kernel filter key that selects on the same
      * value. It is only meaningful on a field a consumer can actually read --
@@ -1250,6 +1906,27 @@ static void emit_channel(const CcRecSchema *s) {
  * offsets/sizes below come from layout() -- the one implementation -- so
  * `capabilities --json` reports the bytes the kernel actually writes rather than
  * a Ruby re-derivation of the C alignment rules. */
+
+/* The same declaration, as a tree a consumer can WALK. `present` and an int_expr
+ * are closed grammars, and a closed grammar published only as text asks every
+ * reader to write a parser for it -- which would be a new hand-written thing,
+ * not a removed one. Both come out of the SAME parse as the C, so the text and
+ * the tree cannot describe different rules. */
+static void json_pred_ast(const CcRecSchema *s, const char *text) {
+    char buf[4096];
+    g_ex_json = 1;
+    pred_c(s, text, buf, sizeof buf, "json");
+    g_ex_json = 0;
+    fputs(buf, stdout);
+}
+
+static void json_expr_ast(const CcRecSchema *s, const char *text) {
+    char buf[4096];
+    g_ex_json = 1;
+    int_expr_c(s, text, buf, sizeof buf, "json");
+    g_ex_json = 0;
+    fputs(buf, stdout);
+}
 
 static void json_str(const char *s) {
     putchar('"');
@@ -1385,6 +2062,21 @@ static void json_channel(const CcRecSchema *s) {
         json_kv("span_name", tmpl, ",\n        ");
         json_kv("span_kind", e->span_kind, ",\n        ");
         json_kv("timing", e->timing, ",\n        ");
+        /* The same statement in the closed form a reader can act on. The prose
+         * above stays because it says WHY (and, for the off-CPU channel, what the
+         * OTHER consumer of the record does); this says what to compute. */
+        fputs("\"timing_form\": { ", stdout);
+        json_kv("start", e->start_form, ", ");
+        json_kv("clock", e->start_clock ? e->start_clock : "", ", ");
+        json_kv("end", e->end_form, " }");
+        fputs(",\n        ", stdout);
+        /* When a record produces no span at all -- a property of the channel,
+         * which used to be a parenthesis inside one attribute's condition on the
+         * DNS channel and nowhere at all on the others. */
+        json_kv("drop_when", (e->drop_when && *e->drop_when) ? e->drop_when : "never", ",\n        ");
+        fputs("\"drop_when_ast\": ", stdout);
+        json_pred_ast(s, (e->drop_when && *e->drop_when) ? e->drop_when : "never");
+        fputs(",\n        ", stdout);
         json_kv("note", e->note ? e->note : "", ",\n        ");
         fputs("\"attributes\": [\n", stdout);
         for (int i = 0; i < e->nattrs; i++) {
@@ -1394,6 +2086,13 @@ static void json_channel(const CcRecSchema *s) {
             json_kv("source", a->source, ", ");
             json_kv("stability", a->stability, ", ");
             json_kv("condition", a->condition, ", ");
+            /* The machine form of the same sentence, in the closed grammar
+             * record_schema.h documents -- or `unexpressible(<reason>)` where the
+             * channel does not publish enough to state it. */
+            json_kv("present", a->present, ", ");
+            fputs("\"present_ast\": ", stdout);
+            json_pred_ast(s, a->present);
+            fputs(", ", stdout);
             json_kv("note", a->note ? a->note : "", " }");
             printf("%s\n", i + 1 < e->nattrs ? "," : "");
         }
@@ -1452,6 +2151,8 @@ static void json_channel(const CcRecSchema *s) {
             json_kv("ffi", buf, ", ");
             if (derived_form(d) == DERIV_CODE_NAME)
                 snprintf(buf, sizeof buf, "%s -> value map `%s`", d->from, d->impl);
+            else if (derived_form(d) == DERIV_INT_EXPR)
+                snprintf(buf, sizeof buf, "declared expression `%s`", d->impl);
             else
                 snprintf(buf, sizeof buf, "%s -> %s()", d->from, d->impl);
             json_kv("source", buf, ", ");
@@ -1468,6 +2169,18 @@ static void json_channel(const CcRecSchema *s) {
              * derivation -- both the accessor and the span builder pass it, so it
              * is the width `ev.<name>` and the attribute share. 0 for an int. */
             printf("\"cap\": %d, ", d->cap);
+            if (derived_form(d) == DERIV_INT_EXPR) {
+                json_kv("expr", d->impl, ", ");
+                fputs("\"expr_ast\": ", stdout);
+                json_expr_ast(s, d->impl);
+                fputs(", ", stdout);
+            }
+            /* Which side of the reader boundary this derivation's BODY is on.
+             * "declared" = generated (the reader writes nothing); the other three
+             * each mean something different about what a reader can do, and
+             * identical panics said none of it. */
+            json_kv("residue", d->residue, ", ");
+            json_kv("residue_means", derived_residue_means(d->residue), ", ");
             json_kv("note", d->note ? d->note : "", " }");
             printf("%s\n", ++emitted < nprop ? "," : "");
         }
@@ -1527,6 +2240,25 @@ static void emit_json(void) {
     /* Histogram bucket boundaries, declared once and shared. Published so
      * that "are these comparable with an OBI histogram" is answerable from the
      * affordance surface rather than by diffing two C files. */
+    /* The clock a record's timestamps are on, and the conversion to a wall clock.
+     * The runtime has had this right for a long time; what it did not have was a
+     * place to SAY it, so every other reader wrote its own -- and one that writes
+     * none gets spans dated 1970 with no error anywhere. */
+    fputs("\"clocks\": [\n", stdout);
+    {
+        int nclk = 0;
+        const CcClock *const *clk = cc_clock_all(&nclk);
+        for (int i = 0; i < nclk; i++) {
+            printf("    { ");
+            json_kv("id", clk[i]->id, ", ");
+            json_kv("kernel_src", clk[i]->kernel_src, ", ");
+            json_kv("posix_clock", clk[i]->posix_clock, ", ");
+            json_kv("to_wall", clk[i]->to_wall, ", ");
+            json_kv("note", clk[i]->note, " }");
+            printf("%s\n", i + 1 < nclk ? "," : "");
+        }
+    }
+    fputs("  ],\n  ", stdout);
     fputs("\"bounds_sets\": [\n", stdout);
     for (int i = 0; i < g_nbounds; i++) {
         const CcBoundsSet *b = g_bounds[i];
@@ -1687,6 +2419,8 @@ int main(int argc, char **argv) {
         printf("\nextern void spnl_recmetric_observe(int metric, const char *const *label_values,\n");
         printf("                                   int nlabels, int has_value, double value);\n");
     }
+
+    emit_egress_rule_type();   /* the per-channel rule tables reference it */
 
     for (int i = 0; i < g_nchannels; i++) {
         if (i) printf("\n");
