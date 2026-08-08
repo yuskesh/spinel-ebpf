@@ -177,6 +177,61 @@ static void tpl_emit_lines(Lines *L, const char *tpl, const TplSlot *slots, int 
  * the kernel struct (here), the userspace mirror (S2) and the capabilities
  * surface (S3). This emitter is the S1 consumer: it prints the record struct and
  * its ringbuf map, byte-identically to the template it replaces. */
+/* Put the record layout into the object's .BTF.
+ *
+ * The .bpf.o WRITES these records but does not say what they look like. A
+ * BPF_MAP_TYPE_RINGBUF declares no key/value type, and the struct only ever
+ * appears as a local pointer inside a `static` function, so clang has no reason
+ * to emit it: measured on a one-channel object, the record struct is absent from
+ * the whole 900-line BTF dump. A reader written in another language therefore
+ * has to copy the layout by hand, and gets it wrong SILENTLY -- a Go struct with
+ * every field name, type and order correct read cgid = 764504178688 instead of
+ * 178 on 5 records out of 5, with no error, because Go's encoding/binary does
+ * not reproduce C's internal padding (29 of the 64 declared fields shift that
+ * way, and cgid is the key Kubernetes pod attribution is looked up by).
+ *
+ * One pointer that is never read is enough to make clang emit the type. What it
+ * must NOT do is change what the kernel loads, so the spelling is load-bearing
+ * (all of these were measured):
+ *
+ *   __type(value, struct X)   BTF yes, but libbpf then sets value_size and the
+ *                             kernel rejects a RINGBUF with value_size != 0
+ *                             (EINVAL). cilium/ebpf zeroes it instead, so this
+ *                             spelling looks right if Go is the only loader tried
+ *   __type(<other>, ...)      libbpf: "unknown field" -> open fails (map
+ *                             definitions are strict)
+ *   BTF_TYPE_EMIT(struct X)   nothing emitted: `(void)(type *)0` is the kernel's
+ *                             DWARF-to-pahole idiom, and clang -target bpf builds
+ *                             .BTF itself from the types the program uses
+ *   btf_decl_tag alone        nothing emitted: a decl tag rides on a type clang
+ *                             already emits, it cannot keep one alive
+ *   global with no SEC        BTF yes, but it lands in .bss and libbpf then
+ *                             creates an EXTRA MAP
+ *   SEC(".rodata")            same, an extra .rodata map
+ *   static without `used`     -O2 drops it; no BTF
+ *   static function `used`    BTF yes, but .text grows
+ *   SEC(".debug_*")           works and is silent, but then `llvm-strip -g`
+ *                             fails: the .BTF relocation against the witness
+ *                             keeps the section alive
+ *   SEC(".spnl_records")      <- this. No map, no .text change, survives strip.
+ *
+ * Because every witness shares one section, the object also carries an INDEX of
+ * its record types (BTF DATASEC ".spnl_records"), so a generator on the other
+ * side does not have to be told which types matter.
+ *
+ * Cost: 8 bytes of a section nothing maps, ~250 bytes of .BTF per channel, and
+ * one libbpf info line at open ("elf: skipping unrecognized data section"),
+ * which names our section so it reads as ours rather than as a mystery. */
+static void cc_rec_emit_type_witness(Buf *b, const CcRecSchema *s, const char *unit) {
+  buf_puts(b,
+    "\n/* Publishes the layout above to .BTF so a reader in another language does not\n"
+    " * have to copy it by hand. A RINGBUF map declares no value type and the struct\n"
+    " * is only ever a local pointer in a static function, so nothing else in this\n"
+    " * object names it. Never loaded: .spnl_records is not a section libbpf maps. */\n");
+  buf_printf(b, "const struct %s_%s *_spnl_rec_%s SEC(\".spnl_records\");\n",
+             unit, s->struct_suffix, s->struct_suffix);
+}
+
 static void cc_rec_emit_channel(Buf *b, const CcRecSchema *s, const char *unit) {
   /* A channel that lives inside a larger section (http/redis/offcpu keep their
    * pending/stash maps in a template) declares no banner: the section already
@@ -192,6 +247,7 @@ static void cc_rec_emit_channel(Buf *b, const CcRecSchema *s, const char *unit) 
   buf_puts(b, "struct {\n    __uint(type, BPF_MAP_TYPE_RINGBUF);\n");
   buf_printf(b, "    __uint(max_entries, %s);\n", s->ringbuf_size);
   buf_printf(b, "} %s_%s SEC(\".maps\");\n", unit, s->map_suffix);
+  cc_rec_emit_type_witness(b, s, unit);
 }
 
 /* ---------- types (CcTy mirrors upstream types.h; Stage 2 reads it directly

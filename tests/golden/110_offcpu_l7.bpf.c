@@ -154,6 +154,12 @@ struct {
     __uint(max_entries, 256 * 1024);
 } u_110_offcpu_l7_offcpu_events SEC(".maps");
 
+/* Publishes the layout above to .BTF so a reader in another language does not
+ * have to copy it by hand. A RINGBUF map declares no value type and the struct
+ * is only ever a local pointer in a static function, so nothing else in this
+ * object names it. Never loaded: .spnl_records is not a section libbpf maps. */
+const struct u_110_offcpu_l7_offcpu_event *_spnl_rec_offcpu_event SEC(".spnl_records");
+
 /* per-unit stack-trace map (16384 unique stacks * 127 frames each).
  * stack_id() returns the kernel stack id, user_stack_id() returns the
  * userspace one. Host code reads the map by stack id to get the PCs. */

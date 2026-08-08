@@ -398,6 +398,67 @@ module SpinelEbpf
     RECORD_SCHEMA_JSON = File.expand_path("record_schema_gen.json", __dir__).freeze
 
     # ===================================================================
+    # The record layouts also travel INSIDE the .bpf.o.
+    #
+    # Everything above is readable only by something that can run this Ruby. The
+    # .bpf.o goes further than that -- it is a plain libbpf object, so it can be
+    # handed to a loader in another language -- and it used to WRITE the records
+    # without saying what they look like: a RINGBUF map declares no value type
+    # and the struct is only ever a local pointer inside a `static` function, so
+    # clang had no reason to put it in .BTF. The reader then copies the layout by
+    # hand and is wrong silently.
+    #
+    # The fix is one pointer per channel that nothing reads, in a section libbpf
+    # does not map. It makes clang emit the struct, and because all the witnesses
+    # share one section the object also carries an INDEX of its record types
+    # (DATASEC .spnl_records), so a generator on the other side does not have to
+    # be told which types matter.
+    #
+    # `not_a_map` and `costs` are stated because the obvious spellings of the
+    # same idea are not free, and a reader deciding whether to trust this needs
+    # the difference: `__type(value, struct X)` on a ringbuf puts the type in BTF
+    # and then FAILS TO LOAD under libbpf (the kernel refuses a ringbuf with
+    # value_size != 0), and a witness with no section lands in .bss, where libbpf
+    # creates an extra map.
+    # ===================================================================
+    RECORD_BTF = {
+      section: ".spnl_records",
+      var: "_spnl_rec_<struct_suffix>",
+      emitted_for: "every packed-record channel the unit actually emits",
+      index: "BTF DATASEC '.spnl_records' lists one Var per channel; each Var is a " \
+             "pointer to that channel's record struct",
+      reader_recipe: "bpf2go -type <unit>_<struct_suffix> (or ebpf-go's btf package: " \
+                     "walk the .spnl_records datasec)",
+      not_a_map: "libbpf skips the section (it prints 'elf: skipping unrecognized data " \
+                 "section .spnl_records' at open) and creates nothing; the kernel-side " \
+                 "map set is unchanged",
+      costs: { text_bytes: 0, section_bytes_per_channel: 8, btf_bytes_per_channel: "~410-443",
+               object_bytes_per_channel: "~576-616" },
+      rejected_spellings: [
+        { spelling: "__type(value, struct X) on the ringbuf map",
+          in_btf: true, libbpf_loads: false,
+          why: "libbpf sets value_size = sizeof(X); the kernel refuses a RINGBUF with " \
+               "key_size or value_size != 0 (EINVAL). ebpf-go zeroes it instead " \
+               "(MapType.canHaveValueSize), so this spelling looks correct if the only " \
+               "loader tried is Go -- cilium/ebpf's own prebuilt ringbuffer example does " \
+               "not load under libbpf either" },
+        { spelling: "BTF_TYPE_EMIT(struct X)",
+          in_btf: false, libbpf_loads: true,
+          why: "((void)(type *)0) is the kernel's DWARF->pahole idiom. clang -target bpf " \
+               "generates .BTF itself and only for types the program uses, so the cast is " \
+               "optimised away and nothing is emitted" },
+        { spelling: "a global witness with no SEC",
+          in_btf: true, libbpf_loads: true,
+          why: "lands in .bss, so libbpf creates an extra internal map (the skeleton grows " \
+               "a `bss` member) -- a change to what the kernel loads, not just to metadata" },
+        { spelling: "__attribute__((btf_decl_tag)) on the struct alone",
+          in_btf: false, libbpf_loads: true,
+          why: "a decl tag is emitted only for a type clang already emits; it cannot keep " \
+               "an otherwise-unreferenced struct alive" },
+      ],
+    }.freeze
+
+    # ===================================================================
     # The vocabulary of the userspace consumer DSL, in machine-readable form.
     #
     # Where the record contracts above say what can be read, this says how to write
@@ -3563,6 +3624,16 @@ WITHDRAWN_SUGAR = {}.freeze
         # boundaries were aligned to those defaults, and the array is now one
         # declaration that both readers use.
         record_bounds_sets: record_bounds_sets,
+        # The same layouts, published in the OBJECT rather than here.
+        # `record_channels` above is what a reader gets if it can run this Ruby;
+        # RECORD_BTF is what it gets if all it has is the .bpf.o. Both are
+        # derived from record_schema.h, so they cannot disagree -- but only one
+        # of them travels with the object, and a reader that has to copy a layout
+        # by hand gets it wrong silently (a Go struct with every field name, type
+        # and order correct read cgid = 764504178688 instead of 178 on 5 records
+        # out of 5, because encoding/binary does not reproduce C's internal
+        # padding; 29 of 64 declared fields shift that way).
+        record_btf: RECORD_BTF,
         # The consumer DSL's vocabulary and the rule by which `to_span` resolves.
         # typed_channels lists the ids for which `on_emit :<id>` is a typed consumer;
         # any other id is a named event.
