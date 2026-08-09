@@ -10,6 +10,13 @@
 #
 #   scripts/setup.sh
 #
+# Not on a macOS host directly. There, mount the repo into a container and give
+# the VM enough memory -- Apple `container` defaults to 1 GB, which OOM-kills
+# the parallel compiler jobs ("cc: fatal error: Killed signal ..."):
+#
+#   container run --rm --memory 8g --volume "$PWD:/work" --workdir /work \
+#     docker.io/library/debian:trixie sh -c 'scripts/setup.sh'
+#
 # Produces, under deps/spinel:
 #   bin/spinel              the compiler (used for --dump-ast and the --ir mode)
 #   build/csrc/*.o          compiler objects the in-process eBPF codegen links
