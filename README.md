@@ -241,6 +241,18 @@ A setup script fetches the fork (at a pinned tag) and builds it into `deps/spine
 scripts/setup.sh
 ```
 
+The script must run inside the Linux build environment, not on the macOS host —
+macOS has no usable `make`/toolchain for this build. On Apple Silicon, mount the
+repo into a `debian:trixie` container (running as root, so the script installs
+its own prerequisites) and give the VM enough memory: Apple `container` defaults
+to 1 GB, which gets the parallel compiler jobs OOM-killed
+(`cc: fatal error: Killed signal terminated program cc1`).
+
+```sh
+container run --rm --memory 8g --volume "$PWD:/work" --workdir /work \
+  docker.io/library/debian:trixie sh -c 'scripts/setup.sh'
+```
+
 It produces `bin/spinel` + `build/csrc/*.o` + `build/libprism.a` (the in-process
 codegen links against these). Afterwards `bin/spinel-ebpf` works with no further
 configuration — its default `SPINEL_DIR` is `deps/spinel`. Override with
