@@ -1,0 +1,68 @@
+ROOT 0
+SOURCE_FILE tests/fixtures/confusable/wrong_dst_on_recv.rb
+N 0 ProgramNode
+N 1 StatementsNode
+N 2 DefNode
+S 2 name kprobe__udp_recvmsg
+N 3 ParametersNode
+N 4 RequiredParameterNode
+S 4 name sk
+N 5 RequiredParameterNode
+S 5 name msg
+N 6 RequiredParameterNode
+S 6 name len
+N 7 RequiredParameterNode
+S 7 name flags
+N 8 RequiredParameterNode
+S 8 name addr_len
+A 3 requireds 4,5,6,7,8
+A 3 optionals 
+A 3 keywords 
+A 3 posts 
+R 2 parameters 3
+N 9 StatementsNode
+N 10 IfNode
+N 11 CallNode
+S 11 name ==
+N 12 CallNode
+S 12 name udp_dport
+R 12 receiver -1
+N 13 ArgumentsNode
+N 14 LocalVariableReadNode
+S 14 name sk
+N 15 LocalVariableReadNode
+S 15 name msg
+A 13 arguments 14,15
+R 12 arguments 13
+R 12 block -1
+S 12 call_operator .
+R 11 receiver 12
+N 16 ArgumentsNode
+N 17 IntegerNode
+I 17 value 53
+A 16 arguments 17
+R 11 arguments 16
+R 11 block -1
+S 11 call_operator .
+R 10 predicate 11
+N 18 StatementsNode
+N 19 CallNode
+S 19 name hist_observe
+R 19 receiver -1
+N 20 ArgumentsNode
+N 21 IntegerNode
+I 21 value 1
+A 20 arguments 21
+R 19 arguments 20
+R 19 block -1
+S 19 call_operator .
+A 18 body 19
+R 10 statements 18
+R 10 subsequent -1
+N 22 IntegerNode
+I 22 value 0
+A 9 body 10,22
+R 2 body 9
+R 2 receiver -1
+A 1 body 2
+R 0 statements 1

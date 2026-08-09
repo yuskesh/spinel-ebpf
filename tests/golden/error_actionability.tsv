@@ -1,0 +1,105 @@
+# spinel-ebpf error-actionability debt.
+#
+# The RULE is universal and lives in tools/error_gate.rb: every user-facing
+# error site must name the SUBJECT (what in the author's file went wrong)
+# and a REMEDY (a different concrete spelling to write next). This file is
+# not an inventory of the surface -- it is the list of sites that do not
+# meet the rule yet. A new error site that fails the rule fails the gate;
+# it does not quietly join a census.
+#
+# missing: subject | remedy | subject+remedy
+# note is prose, is NOT compared, and is REQUIRED: an entry with no note
+# cannot be told from one nobody remembers (same rule as product_reach.tsv).
+#
+# Refresh: ruby tools/error_gate.rb --update   (and review the diff.)
+#
+# id	file	missing	note
+capabilities.rb:850	src/spinel_ebpf/capabilities.rb	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:1242	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:1258	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:1318	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:1512	src/codegen_c/spinel_ebpf_cc.c	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:1579	src/codegen_c/spinel_ebpf_cc.c	remedy	arity-without-a-number: the message says the count is wrong but not what it should be. The affordance knows, so this is mechanical to fix.
+cc:1611	src/codegen_c/spinel_ebpf_cc.c	remedy	arity-without-a-number: the message says the count is wrong but not what it should be. The affordance knows, so this is mechanical to fix.
+cc:1871	src/codegen_c/spinel_ebpf_cc.c	subject	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:1886	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2110	src/codegen_c/spinel_ebpf_cc.c	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:2154	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2159	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:2194	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2199	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:2237	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2241	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:2774	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:2795	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:2925	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2930	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:2948	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:2976	src/codegen_c/spinel_ebpf_cc.c	remedy	arity-without-a-number: the message says the count is wrong but not what it should be. The affordance knows, so this is mechanical to fix.
+cc:3195	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:3464	src/codegen_c/spinel_ebpf_cc.c	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:3763	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:3782	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:4056	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:4136	src/codegen_c/spinel_ebpf_cc.c	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:4138	src/codegen_c/spinel_ebpf_cc.c	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:4179	src/codegen_c/spinel_ebpf_cc.c	remedy	arity-without-a-number: the message says the count is wrong but not what it should be. The affordance knows, so this is mechanical to fix.
+cc:4432	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:4443	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:5121	src/codegen_c/spinel_ebpf_cc.c	subject	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:5165	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:5376	src/codegen_c/spinel_ebpf_cc.c	remedy	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:5786	src/codegen_c/spinel_ebpf_cc.c	remedy	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:5801	src/codegen_c/spinel_ebpf_cc.c	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:5811	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:5867	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:6063	src/codegen_c/spinel_ebpf_cc.c	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+cc:6244	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6249	src/codegen_c/spinel_ebpf_cc.c	remedy	literal-required: the message states the required FORM but not an example of it. Cheap to fix by naming the shape; grouped here so the fix lands once.
+cc:6261	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6263	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:6269	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6271	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6275	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6321	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6324	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6485	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:6507	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:6831	src/codegen_c/spinel_ebpf_cc.c	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+cc:6853	src/codegen_c/spinel_ebpf_cc.c	remedy	amp target (experimental): that path is a v0 subset and its diagnostics have not had the same pass. Lower priority than the eBPF surface.
+cc:6861	src/codegen_c/spinel_ebpf_cc.c	remedy	amp target (experimental): that path is a v0 subset and its diagnostics have not had the same pass. Lower priority than the eBPF surface.
+cc:6867	src/codegen_c/spinel_ebpf_cc.c	remedy	amp target (experimental): that path is a v0 subset and its diagnostics have not had the same pass. Lower priority than the eBPF surface.
+cc:7180	src/codegen_c/spinel_ebpf_cc.c	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+cc:7560	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:7917	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:7942	src/codegen_c/spinel_ebpf_cc.c	subject+remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:8005	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+cc:803	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:8035	src/codegen_c/spinel_ebpf_cc.c	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+cc:8140	src/codegen_c/spinel_ebpf_cc.c	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+consumer.rb:307	src/spinel_ebpf/consumer.rb	remedy	consumer or boundary: the message names the offending declaration and explains the constraint in prose, but offers no alternative spelling because there is none -- the operation is simply not expressible on that property.
+consumer.rb:326	src/spinel_ebpf/consumer.rb	remedy	declaration hygiene: the mistake is a duplicate, empty or conflicting declaration, and the remedy is to delete or merge something rather than to write a different spelling. The rule cannot see a deletion as a remedy; whether it should is an open question.
+consumer.rb:412	src/spinel_ebpf/consumer.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+dispatch_shim.rb:57	src/spinel_ebpf/dispatch_shim.rb	remedy	consumer or boundary: the message names the offending declaration and explains the constraint in prose, but offers no alternative spelling because there is none -- the operation is simply not expressible on that property.
+dispatch_shim.rb:71	src/spinel_ebpf/dispatch_shim.rb	remedy	consumer or boundary: the message names the offending declaration and explains the constraint in prose, but offers no alternative spelling because there is none -- the operation is simply not expressible on that property.
+keep_filter.rb:200	src/spinel_ebpf/keep_filter.rb	remedy	unported: the remedy is a construct the codegen has not implemented, so there is no spelling to offer yet. Fixing the MESSAGE is not the fix; porting is.
+parse_spinel_ast.rb:230	src/spinel_ebpf/parse_spinel_ast.rb	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.
+partition.rb:436	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:446	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:595	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:642	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:828	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:873	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+partition.rb:985	src/spinel_ebpf/partition.rb	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+plugin.rb:131	src/spinel_ebpf/plugin.rb	remedy	plugin driver: the remedy is a change to a manifest file, not to the .rb, so no in-language spelling exists. Arguably a different audience.
+plugin.rb:143	src/spinel_ebpf/plugin.rb	remedy	capacity: the limit IS the remedy -- there is no other spelling to name, only less of this one. Worth revisiting only if a cap is ever raised.
+plugin.rb:175	src/spinel_ebpf/plugin.rb	remedy	plugin driver: the remedy is a change to a manifest file, not to the .rb, so no in-language spelling exists. Arguably a different audience.
+plugin.rb:184	src/spinel_ebpf/plugin.rb	remedy	plugin driver: the remedy is a change to a manifest file, not to the .rb, so no in-language spelling exists. Arguably a different audience.
+spinel-ebpf:346	bin/spinel-ebpf	remedy	plugin driver: the remedy is a change to a manifest file, not to the .rb, so no in-language spelling exists. Arguably a different audience.
+spinel-ebpf:3883	bin/spinel-ebpf	subject+remedy	CLI usage: the remedy is an invocation rather than a spelling in the .rb. Held apart on purpose -- see the `environment` audience for the rest of this class.
+spinel-ebpf:3992	bin/spinel-ebpf	subject	CLI usage: the remedy is an invocation rather than a spelling in the .rb. Held apart on purpose -- see the `environment` audience for the rest of this class.
+spinel-ebpf:615	bin/spinel-ebpf	subject	CLI usage: the remedy is an invocation rather than a spelling in the .rb. Held apart on purpose -- see the `environment` audience for the rest of this class.
+spinel-ebpf:639	bin/spinel-ebpf	subject	CLI usage: the remedy is an invocation rather than a spelling in the .rb. Held apart on purpose -- see the `environment` audience for the rest of this class.
+spinel-ebpf:79	bin/spinel-ebpf	subject	CLI usage: the remedy is an invocation rather than a spelling in the .rb. Held apart on purpose -- see the `environment` audience for the rest of this class.
+spinel-ebpf:88	bin/spinel-ebpf	remedy-claimed-in-slot	remedy is in a runtime slot: the message DOES name where to go, but the list is built at runtime, so this static rule cannot verify what lands there. Recorded as a limit of the instrument, not of the message.
+validate.rb:499	src/spinel_ebpf/validate.rb	remedy	unclassified: reviewed once and left; no alternative spelling was obvious. Revisit with the corpus-firing data if a user reaches it.

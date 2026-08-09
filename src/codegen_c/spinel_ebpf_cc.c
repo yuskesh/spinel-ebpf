@@ -2055,7 +2055,13 @@ static void cc_emit_flow_del(Lines *body, const char *mn) {
  * (grouped by which argument carries the path, because that is what the reader
  * has to pick). Generated from CC_DPATH_OK so the list cannot drift from the
  * measurement -- reason + evidence + how to fix (see error_quality_test). */
-static char *cc_dpath_hooks_str(void) {
+/* `selectors_only` drops the hooks that load bpf_d_path but refuse to SELECT on
+ * the result (the overlayfs four). Listing them here was worse than an over-long
+ * list: this message IS the remedy, so naming a hook that the very next gate
+ * refuses hands the author a fix that does not fix. A message can be "actionable"
+ * by every textual measure and still be wrong, which is the one failure a
+ * text-shaped audit cannot see. */
+static char *cc_dpath_hooks_str(int selectors_only) {
   static const char *const label[] = { "file arg", "path arg", "binprm arg" };
   Buf b; memset(&b, 0, sizeof b);
   for (int f = 0; f < 3; f++) {
@@ -2063,6 +2069,7 @@ static char *cc_dpath_hooks_str(void) {
     int n = 0;
     for (int i = 0; CC_DPATH_OK[i].sec; i++) {
       if ((int)CC_DPATH_OK[i].form != f) continue;
+      if (selectors_only && CC_DPATH_OK[i].no_select) continue;
       const char *sec = CC_DPATH_OK[i].sec, *slash = strchr(sec, '/');
       /* SEC -> the `def` name the user writes: lsm/file_open -> lsm__file_open */
       buf_printf(&b, "%sdef %.*s__%s", n++ ? " / " : "",
@@ -2081,7 +2088,7 @@ static const CcDpathHook *cc_require_dpath_ok(const char *who, CcDpathUse use) {
   (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
   const CcDpathHook *h = cc_dpath_hook(a.sec);
   if (!h) {
-    char *hooks = cc_dpath_hooks_str();
+    char *hooks = cc_dpath_hooks_str(use == CC_DP_USE_SELECT);
     char *msg = msprintf("%s: bpf_d_path is kernel-gated (measured: LSM allows it "
                          "only on sleepable hooks, fmod_ret/fentry only on the kernel's "
                          "btf_allowlist_d_path; kprobe never). Write it in one of the "
@@ -2562,6 +2569,156 @@ static const CcNsKey *cc_ns_arg(AST *ast, int nid, const char *who) {
 }
 
 /* lower an expression node -> append its C text to `b`. Stage-1 subset. */
+/* The datagram-destination gate.
+ *
+ * Measured: `sock_dport(sk) == 53` in a udp_sendmsg probe reports
+ * NOTHING for a sender that does not connect (dnsmasq's upstream forwarding:
+ * 0 spans before, 4 after) -- skc_dport is 0 there, so the filter is simply
+ * false. That is why `udp_dport(sk, msg)` exists: it folds in udp_sendmsg's own
+ * rule. But nothing prevented picking the other one, and the wrong pick is
+ * invisible: both names exist, both type-check, both pass the verifier, and on a
+ * connected socket both return the same number.
+ *
+ * THIS IS NOT A BLOCKLIST. `sock_dport` is the correct accessor in tcp_sendmsg,
+ * in inet_sock_set_state, and -- this is the point -- in udp_RECVmsg, where
+ * `msg->msg_name` is an OUTPUT buffer the kernel has not written at function
+ * entry, so `udp_dport(sk, msg)` would read uninitialised caller stack as a
+ * sockaddr. The mistake is directional, so the gate is too: on a datagram SEND
+ * hook the socket does not know the destination, and on a datagram RECV hook the
+ * message does not.
+ *
+ * Only the DESTINATION accessors are gated. sock_sport / sock_saddr / sock_state
+ * / sock_family answer questions about the socket that the message never
+ * carries, so there is no other spelling to prefer and no mistake to make.
+ *
+ * The hook table is keyed on the kernel symbol, not on the attach kind: the same
+ * kprobe machinery attaches to both directions, and the direction is the whole
+ * distinction. */
+typedef struct { const char *kname; int recv; } CcDgramHook;
+static const CcDgramHook CC_DGRAM_HOOKS[] = {
+  { "udp_sendmsg",     0 }, { "udpv6_sendmsg",   0 },
+  { "udp_send_skb",    0 }, { "udp_v6_send_skb", 0 },
+  { "udp_recvmsg",     1 }, { "udpv6_recvmsg",   1 },
+  { "__udp_enqueue_schedule_skb", 1 },
+  { NULL, 0 }
+};
+/* Accessors that answer "where is this going" and therefore have a twin. */
+static int cc_is_dst_sock_acc(const char *n) {
+  return !strcmp(n, "sock_dport") || !strcmp(n, "sock_daddr") ||
+         !strcmp(n, "sock_daddr6_hi") || !strcmp(n, "sock_daddr6_lo");
+}
+static void cc_require_dgram_dst_direction(const char *who) {
+  if (!g_method || !g_method->name) return;
+  int is_udp_fn = !strcmp(who, "udp_dport") || !strcmp(who, "udp_daddr");
+  if (!is_udp_fn && !cc_is_dst_sock_acc(who)) return;
+
+  Attach a = {0};
+  AttachKind k = cc_detect_attach(g_method->name, &a);
+  /* The kernel symbol lives in the SEC, not in `kname` (which is the attach kind
+   * for every probe kind: "kprobe", "fentry", ...). Keying on kname instead was
+   * measured to match nothing at all -- the gate compiled, linked, and refused
+   * exactly zero programs, which is how a gate dies silently. */
+  const char *sym = NULL;
+  if (a.sec) { const char *sl = strrchr(a.sec, '/'); sym = sl ? sl + 1 : NULL; }
+  const CcDgramHook *h = NULL;
+  if (sym)
+    for (int i = 0; CC_DGRAM_HOOKS[i].kname; i++)
+      if (!strcmp(CC_DGRAM_HOOKS[i].kname, sym)) { h = &CC_DGRAM_HOOKS[i]; break; }
+  /* A return probe sees the call after the kernel has filled msg_name, but it
+   * has no msghdr argument of its own, so there is no choice to make there. */
+  int retprobe = (k == AK_KRETPROBE || k == AK_FEXIT);
+  if (!h || retprobe) { if (a.sec) free(a.sec); return; }
+
+  const char *msg = NULL;
+  if (!h->recv && !is_udp_fn) {
+    msg = msprintf(
+      "`%s` in `%s` answers a different question than the one this hook is about.\n"
+      "  What it returns: the peer this SOCKET is connected to (__sk_common.skc_dport).\n"
+      "  What you need here: where THIS datagram is going. A sender that passes the\n"
+      "  address on every send never connects, so skc_dport is 0 -- `%s(sk) == 53`\n"
+      "  is then simply false and the probe reports NOTHING. Not fewer events: none.\n"
+      "  Measured: dnsmasq's upstream forwarding went 0 spans -> 4.\n"
+      "  Write it as: %s(sk, msg)  (msg_name wins, else the connected peer --\n"
+      "  udp_sendmsg's own rule, folded in so you cannot apply half of it).\n"
+      "  `sock_dport` stays correct on tcp_sendmsg and on the recv side of this\n"
+      "  same function pair; it is wrong only here. You wrote it in",
+      who, g_method->name, who,
+      !strcmp(who, "sock_dport") ? "udp_dport" : "udp_daddr");
+  } else if (h->recv && is_udp_fn) {
+    msg = msprintf(
+      "`%s` in `%s` reads `msg->msg_name`, which on a RECEIVE hook is an OUTPUT\n"
+      "  buffer: at function entry the kernel has not written the peer address into\n"
+      "  it yet, so this reads uninitialised caller stack as a sockaddr. It does not\n"
+      "  fail -- it returns 0 when the garbage family byte is not AF_INET/AF_INET6,\n"
+      "  and an arbitrary 16-bit number when it happens to be.\n"
+      "  On the receive side the socket is the only thing that knows the peer.\n"
+      "  Write it as: %s(sk)\n"
+      "  (%s folds the send-side rule in; this gate is\n"
+      "  the other half. Latency probes pair udp_sendmsg with udp_recvmsg and need\n"
+      "  BOTH spellings, one per side.) You wrote it in",
+      who, g_method->name,
+      !strcmp(who, "udp_dport") ? "sock_dport" : "sock_daddr", who);
+  }
+  if (msg) die(msg, a.sec ? a.sec : g_method->name);
+  if (a.sec) free(a.sec);
+}
+
+/* prism class name -> what the AUTHOR wrote, why it cannot lower, and the
+ * advertised spelling that does the same job. The `wrote` column is the point:
+ * "LocalVariableOperatorWriteNode" is the compiler's word for `x += 1`, and a
+ * reader who is handed the former cannot find the latter in their file.
+ *
+ * This table only has to cover the constructs an author plausibly reaches; the
+ * fallback below prints the class name and points at the published syntax list,
+ * which is strictly what the message used to do on its own. */
+typedef struct { const char *node, *wrote, *why, *instead; } CcNodeAdvice;
+static const CcNodeAdvice CC_NODE_ADVICE[] = {
+  { "LocalVariableOperatorWriteNode", "x += n (compound assignment to a LOCAL)",
+    "only instance variables have a read-modify-write lowering (they are map entries); "
+    "a local is a C variable and the compound form was never ported",
+    "x = x + n  (or make it an ivar: `@x += n`)" },
+  { "LocalVariableOrWriteNode", "x ||= n", "no lowering for the conditional-assign forms",
+    "if x == 0\n    x = n\n  end" },
+  { "LocalVariableAndWriteNode", "x &&= n", "no lowering for the conditional-assign forms",
+    "if x != 0\n    x = n\n  end" },
+  { "WhileNode", "while ... end",
+    "the verifier rejects a loop whose trip count it cannot bound",
+    "n.times do |i| ... end  (bounded: bpf_loop, or an open-coded iterator for a literal n)" },
+  { "UntilNode", "until ... end", "same wall as `while`: an unbounded loop",
+    "n.times do |i| ... end" },
+  { "ForNode", "for x in ... end", "iterates a heap collection, which BPF has no allocator for",
+    "n.times do |i| ... end" },
+  { "CaseNode", "case ... when ... end", "the multi-way form was never ported",
+    "if a == 1\n    ...\n  elsif a == 2\n    ...\n  end" },
+  { "UnlessNode", "unless ... end", "the negated form was never ported",
+    "if !(cond) ... end" },
+  { "ArrayNode", "[ ... ] (array literal)",
+    "an array literal is a heap allocation and BPF has no allocator",
+    "a map (`@h`), or bpf_arena (arena_set/arena_get) for indexed storage" },
+  { "HashNode", "{ ... } (hash literal)", "same: a heap allocation",
+    "a map (`@h[k] += 1` style ivar), or flow_set/flow_get for keyed state" },
+  { "LambdaNode", "->(x) { ... } / lambda { ... }",
+    "there are no function pointers in the generated program",
+    "def helper(x) ... end  (a BPF-to-BPF call)" },
+  { "FloatNode", "a float literal", "there is no FPU in BPF",
+    "integer arithmetic; scale by a constant if you need fractions" },
+  { "RangeNode", "(a..b)", "a range is a heap object",
+    "n.times do |i| ... end" },
+  { "BeginNode", "begin/rescue", "there are no exceptions in the generated program",
+    "test the value with `if` -- helpers report failure as a return value" },
+  { "NextNode", "next", "there is no early exit out of a lowered block",
+    "guard the body: `if cond ... end`" },
+  { "BreakNode", "break", "the verifier needs the trip count fixed before the loop runs",
+    "let the loop run and guard the body with `if`" },
+  { NULL, NULL, NULL, NULL }
+};
+static const CcNodeAdvice *cc_node_advice(const char *ty) {
+  if (!ty) return NULL;
+  for (int i = 0; CC_NODE_ADVICE[i].node; i++)
+    if (!strcmp(CC_NODE_ADVICE[i].node, ty)) return &CC_NODE_ADVICE[i];
+  return NULL;
+}
+
 static void cc_lower_expr(AST *ast, int nid, Buf *b) {
   const char *ty = nt_type(ast, nid);
   if (!ty) die("missing node", NULL);
@@ -2715,6 +2872,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
     if (name) {
       const CcSockAcc *acc = cc_sock_acc(name);
       if (acc) {
+        cc_require_dgram_dst_direction(name);
         int args_id = nt_ref(ast, nid, "arguments");
         int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
         if (na != 1)
@@ -2734,6 +2892,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
      * connected peer") is udp_sendmsg's own, folded in here so the author neither
      * has to know it nor can apply half of it. */
     if (name && (!strcmp(name, "udp_dport") || !strcmp(name, "udp_daddr"))) {
+      cc_require_dgram_dst_direction(name);
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 2)
@@ -3666,9 +3825,38 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       int pi = cc_param_index(name);
       if (pi >= 0) { g_param_used[pi] = 1; buf_printf(b, "spnl_param_%s", name); return; }
     }
-    die("CallNode not yet ported (Stage 1)", name ? name : "?");
+    /* The two catch-alls at the bottom of the lowering used to name the
+     * COMPILER'S vocabulary and nothing else ("CallNode not yet ported: map",
+     * "node type not yet ported: IfNode"). Measured over the whole corpus, they
+     * were the only two diagnostics a shipped fixture reaches that name no
+     * remedy. A prism class name is not something the author typed, so they
+     * failed the first half too: the reader cannot even find the line. */
+    {
+      char *msg = msprintf(
+        "`%s` is not a builtin, and no `def %s` in this file defines it, so there "
+        "is nothing to lower it to.\n"
+        "  Two ways forward: define it here -- `def %s(...)` in the same file "
+        "becomes a BPF-to-BPF call -- or use a builtin.\n"
+        "  `spinel-ebpf capabilities --json` lists every builtin with its "
+        "signature; `spinel-ebpf check <file>` names the nearest one when a "
+        "spelling is close.\n"
+        "  You wrote it in",
+        name ? name : "?", name ? name : "?", name ? name : "?");
+      die(msg, g_method && g_method->name ? g_method->name : "<none>");
+    }
   }
-  die("node type not yet ported (Stage 1)", ty);
+  {
+    const CcNodeAdvice *ad = cc_node_advice(ty);
+    char *msg = msprintf(
+      "`%s` is not part of the Ruby subset that lowers to eBPF.%s%s%s\n"
+      "  The subset is published: `spinel-ebpf capabilities --json` -> `syntax` "
+      "(each entry carries the exact spelling and the machine it lowers to).\n"
+      "  You wrote it in",
+      ad ? ad->wrote : ty,
+      ad ? "\n  Why: " : "", ad ? ad->why : "",
+      ad ? msprintf("\n  Write it as: %s", ad->instead) : "");
+    die(msg, g_method && g_method->name ? g_method->name : "<none>");
+  }
 }
 
 /* expr node -> malloc'd C string. */
@@ -3872,6 +4060,51 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
     char *r = cc_emit_ivar_rmw(body, map, op, rhs);
     free(rhs); free(map);
     return r;
+  }
+  /* Early `return`. The shape an author reaches for first when the point of the
+   * probe is a DECISION --
+   *
+   *     def lsm__file_open(file)
+   *       if path_eq(file, "/etc/shadow")
+   *         return -1
+   *       end
+   *       0
+   *     end
+   *
+   * -- and it used to die with `node type not yet ported: ReturnNode`, which
+   * names a prism class and no way forward. Nothing about it is hard: the handler
+   * body is lowered into an `_inner` whose return type is already the method's,
+   * and the wrapper propagates it (that is how a verdict reaches the kernel at
+   * all), so an early return is a C `return` in the same function. A `void` inner
+   * cannot carry a value, and the frontend's inference gives a method with a
+   * valued return a non-void type, so the two arms below are exhaustive rather
+   * than defensive. */
+  if (!strcmp(ty, "ReturnNode")) {
+    int aid = nt_ref(ast, nid, "arguments");
+    int na = 0; const int *ids = aid >= 0 ? nt_arr(ast, aid, "arguments", &na) : NULL;
+    if (na > 1)
+      die("`return a, b` returns a tuple, and a BPF program returns one integer.\n"
+          "  Write it as: return <one expression>", "ReturnNode");
+    if (g_method && g_method->ret == CC_TY_VOID && g_method->so_kind == SO_NONE) {
+      if (na == 1)
+        die("`return <value>` in a handler whose value is never used.\n"
+            "  Why: this method was inferred to return nothing, so there is no slot "
+            "for the value to go into.\n"
+            "  Write it as: `return` on its own, or make the last expression of the "
+            "method the value you want (a verdict hook returns the last expression)",
+            g_method->name ? g_method->name : "?");
+      lines_push(body, strdup("return;"));
+    } else if (na == 1) {
+      char *v = cc_expr_str(ast, ids[0]);
+      lines_push(body, msprintf("return %s;", v));
+      free(v);
+    } else {
+      lines_push(body, strdup("return 0;"));
+    }
+    /* The statement produces no value: whatever follows it is unreachable, and
+     * the enclosing block's "last expression is the result" rule must not pick
+     * this up as one. */
+    return NULL;
   }
   if (!strcmp(ty, "IfNode")) return cc_if_node(ast, nid, body);
   if (!strcmp(ty, "ElseNode")) {

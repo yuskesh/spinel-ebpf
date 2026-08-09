@@ -83,6 +83,7 @@
 183_open_coded_loop	ok	
 184_if_expression_value	ok	
 185_emit_dns_kfield_filter	ok	
+186_early_return	ok	
 18_tp_args	ok	
 19_emit_str	ok	
 20_top_ivar	ok	
