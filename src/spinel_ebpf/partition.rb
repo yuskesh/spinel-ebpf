@@ -1150,6 +1150,38 @@ module SpinelEbpf
     DYNAMIC_ARRAY_OPS  = %w[push << unshift concat insert].freeze
 
     # Walk the subtree rooted at body_id; fill mi.flags.
+    # Modules whose body declares FFI (ffi_func / ffi_lib / ...) name extern C
+    # functions, which are host-only: BPF cannot replay a foreign call. The sp_*
+    # rule below catches the runtime's own helpers by naming convention, but a
+    # user FFI module (SQL.sqlite3_open, DUCK.duckdb_query, ...) follows no such
+    # convention and used to slip through, only to die later in codegen. Collect
+    # the declared FFI modules from the AST and treat any call through them as
+    # host I/O.
+    FFI_DSL_NAMES = %w[ffi_func ffi_lib ffi_cflags ffi_const ffi_buffer
+                       ffi_read_ptr ffi_read_u32 ffi_read_i32].freeze
+
+    def collect_ffi_modules(ast)
+      out = {}
+      root = ast.root_id
+      return out unless root
+      stmts_id = ast.attr(root, "statements", default: -1)
+      return out if stmts_id < 0
+      ast.array(stmts_id, "body", default: []).each do |sid|
+        n = ast.node(sid)
+        next unless n && n.type == "ModuleNode"
+        body_id = n.refs.fetch("body", -1)
+        next if body_id < 0
+        mod_name = ast.str_attr(n.refs.fetch("constant_path", -1), "name", default: "")
+        next if mod_name.empty?
+        has_ffi = ast.array(body_id, "body", default: []).any? do |bid|
+          bn = ast.node(bid)
+          bn && bn.type == "CallNode" && FFI_DSL_NAMES.include?(bn.attrs.fetch("name", ""))
+        end
+        out[mod_name] = true if has_ffi
+      end
+      out
+    end
+
     def analyze_method(mi, ast)
       visited = {}
       walk(mi.body_id, ast, mi.flags, visited)
@@ -1189,6 +1221,21 @@ module SpinelEbpf
         # Statically bounded loops would need constant-folding the predicate;
         # for the prototype, treat any while/until as unbounded.
         flags.uses_unbounded_loop = true
+      when "InstanceVariableWriteNode"
+        # `@x = []` / `@x = {}` / `@x = ""` / `@x = nil`: an ivar holding a
+        # dynamic structure (or nil) makes the class a host-side object. Only
+        # integer ivars map onto BPF (one HASH map per ivar). Without this a
+        # no-arg initialize whose body is only such assignments looked
+        # eBPF-eligible and died later in codegen. Note uses_dynamic_array_grow
+        # alone is informational and does not block, hence the extra flag.
+        vid = node.refs.fetch("value", -1)
+        vt = vid >= 0 ? ast.type_of(vid) : nil
+        if vt == "ArrayNode" || vt == "HashNode"
+          flags.uses_dynamic_array_grow = true
+          flags.uses_unsupported_type = true
+        elsif vt == "NilNode" || vt == "StringNode"
+          flags.uses_unsupported_type = true
+        end
       when "InterpolatedStringNode"
         flags.uses_dynamic_string_concat = true
       when "CallNode"
@@ -1213,6 +1260,11 @@ module SpinelEbpf
         # so treat as I/O. The naming convention `sp_*` is enforced by all
         # libspinel_rt-resident helpers (sp_net_*, sp_crypto_*, sp_bigint_*).
         if recv_type == "ConstantReadNode" && name && name.start_with?("sp_")
+          flags.uses_io = true
+        end
+        # Declaration-based FFI detection (does not depend on the sp_* naming
+        # convention above).
+        if recv_type == "ConstantReadNode" && recv_name && @ffi_modules && @ffi_modules[recv_name]
           flags.uses_io = true
         end
 
@@ -1333,6 +1385,7 @@ module SpinelEbpf
     # ---------- Top-level entry ----------
 
     def classify(ir, ast, force_native: nil)
+      @ffi_modules = collect_ffi_modules(ast)
       methods = enumerate_methods(ir, ast)
       methods.each do |mi|
         analyze_method(mi, ast)

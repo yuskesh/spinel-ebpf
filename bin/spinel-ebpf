@@ -1464,6 +1464,28 @@ def build_binary(base, build_dir, with_ebpf, dispatch_path: nil, verbose: false,
   opt_flags = ["-O#{opt_level.nil? ? 2 : opt_level}"] + (debug ? ["-g"] : [])
   link_args = link_args + extra_links
 
+  # Honour upstream spinel's FFI/package markers, the same four the upstream
+  # driver scrapes from the generated C (see scrape_ffi_markers in its main.c):
+  # SPINEL_LINK (-l flags from ffi_lib), SPINEL_CFLAGS (extra flags/sources from
+  # ffi_cflags), SPINEL_LINK_OBJ (per-package objects pulled in by require), and
+  # SPINEL_USES_THREADS (switch to the -DSP_THREADS runtime variant + -lpthread).
+  # Without this, any .rb using ffi_lib / ffi_cflags / a bundled package failed
+  # to link under --build. A .rb with no markers is unaffected.
+  ffi_cflag_markers = c_src.scan(%r{/\* SPINEL_CFLAGS: (.+?) \*/}).flatten
+  ffi_link_markers  = c_src.scan(%r{/\* SPINEL_LINK: (.+?) \*/}).flatten
+  ffi_obj_markers   = c_src.scan(%r{/\* SPINEL_LINK_OBJ: (.+?) \*/}).flatten
+  cflags_extra.concat(ffi_cflag_markers.flat_map { |m| m.split(" ") })
+  link_args.concat(ffi_link_markers.flat_map { |m| m.split(" ") })
+  spinel_base = File.dirname(spinel_lib)
+  ffi_obj_markers.each { |p| extra_sources << File.join(spinel_base, p) }
+  if c_src.include?("/* SPINEL_USES_THREADS */")
+    mt_rt = File.join(spinel_lib, "libspinel_rt_mt.a")
+    if File.exist?(mt_rt)
+      link_args = link_args.map { |a| a == spinel_rt ? mt_rt : a }
+      link_args << "-lpthread" unless link_args.include?("-lpthread")
+    end
+  end
+
   if emit_sources
     bpf_c_path = File.join(build_dir, "#{base}.bpf.c")
     return emit_source_bundle(emit_sources, base: base,
