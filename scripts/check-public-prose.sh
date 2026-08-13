@@ -31,6 +31,9 @@ cd "$ROOT"
 FILES="$(find . \
   -path ./.git -prune -o \
   -path ./deps -prune -o \
+  -path "*/vendor" -prune -o \
+  -path "*/build" -prune -o \
+  -path "*/data" -prune -o \
   -path ./build -prune -o \
   -path ./src/runtime/otlp/nanopb -prune -o \
   -path ./tools/rbpf-for-microcontrollers -prune -o \

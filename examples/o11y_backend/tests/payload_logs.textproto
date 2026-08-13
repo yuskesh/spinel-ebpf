@@ -1,0 +1,49 @@
+# ExportLogsServiceRequest test payload. Encode to .bin with protoc via
+# ../scripts/gen-test-payload.sh. The decoder smoke assertions match these values
+# one-to-one -- change both together.
+resource_logs {
+  resource {
+    attributes {
+      key: "service.name"
+      value { string_value: "api" }
+    }
+    attributes {
+      key: "host.name"
+      value { string_value: "dev-host" }
+    }
+  }
+  scope_logs {
+    log_records {
+      time_unix_nano: 1700000001000000000
+      severity_number: SEVERITY_NUMBER_INFO
+      severity_text: "INFO"
+      body { string_value: "request ok" }
+    }
+    log_records {
+      time_unix_nano: 1700000002000000000
+      severity_number: SEVERITY_NUMBER_ERROR
+      severity_text: "ERROR"
+      body { string_value: "connection timeout" }
+      attributes {
+        key: "http.status_code"
+        value { int_value: 504 }
+      }
+    }
+  }
+}
+resource_logs {
+  resource {
+    attributes {
+      key: "service.name"
+      value { string_value: "checkout" }
+    }
+  }
+  scope_logs {
+    log_records {
+      time_unix_nano: 1700000003000000000
+      severity_number: SEVERITY_NUMBER_FATAL
+      severity_text: "FATAL"
+      body { string_value: "payment failed" }
+    }
+  }
+}

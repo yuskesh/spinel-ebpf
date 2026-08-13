@@ -1,0 +1,14 @@
+# Fetched artifacts and runtime output (see scripts/fetch-duckdb.sh and README.md)
+vendor/
+build*/
+data*/
+nohup.out
+# binaries / generated C emitted by spinel (basename matches the .rb)
+ingestd
+ingestd.c
+queryd
+queryd.c
+tests/*.bin
+tests/*.parquet
+*.crt
+*.key
