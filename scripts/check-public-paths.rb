@@ -65,6 +65,9 @@ OWN_RE = token_pattern(OWN)
 files = Dir.glob("**/*", File::FNM_DOTMATCH)
            .reject { |f| File.directory?(f) }
            .reject { |f| PRUNE.any? { |p| "./#{f}".start_with?("#{p}/") } }
+           # Fetched or generated trees may exist locally at any depth (an
+           # example's vendor/, build/ or data/); they are not ours to police.
+           .reject { |f| f.split("/").any? { |seg| %w[vendor build data].include?(seg) } }
            .reject { |f| f.match?(BINARY) }
            .reject { |f| File.basename(f) == File.basename(__FILE__) }
 

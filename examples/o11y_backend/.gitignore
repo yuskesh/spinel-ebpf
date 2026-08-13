@@ -10,4 +10,5 @@ queryd
 queryd.c
 tests/*.bin
 tests/*.parquet
-tests/certs/
+*.crt
+*.key

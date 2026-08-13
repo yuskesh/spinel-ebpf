@@ -63,7 +63,7 @@ sh scripts/build-mbedtls.sh               # TLS static libs (only needed for TLS
 
 cd examples/o11y_backend
 sh scripts/fetch-duckdb.sh                # vendor/duckdb (version recorded in VERSION)
-sh scripts/gen-test-payload.sh            # tests/payload_logs.bin (needs protoc)
+sh scripts/gen-test-payload.sh            # writes the protobuf test payload (needs protoc)
 
 # build (ingestd is eBPF-mixed, queryd is native-only)
 ruby ../../bin/spinel-ebpf compile ingestd.rb --build -o build

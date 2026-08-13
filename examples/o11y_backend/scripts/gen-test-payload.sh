@@ -1,5 +1,5 @@
 #!/bin/sh
-# tests/payload_logs.textproto -> tests/payload_logs.bin
+# Encode ../tests/payload_logs.textproto into its .bin wire form.
 # Encoded with protoc against the opentelemetry-proto schemas. Fetch those
 # first with `SPNL_WITH_PROTO=1 scripts/setup.sh` (repo root); run this inside
 # the Linux build environment.

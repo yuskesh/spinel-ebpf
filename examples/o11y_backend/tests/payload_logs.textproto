@@ -1,5 +1,5 @@
 # ExportLogsServiceRequest test payload. Encode to .bin with protoc via
-# scripts/gen-test-payload.sh. The decoder smoke assertions match these values
+# ../scripts/gen-test-payload.sh. The decoder smoke assertions match these values
 # one-to-one -- change both together.
 resource_logs {
   resource {
