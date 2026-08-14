@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * amp_manifest.c -- the <base>.manifest parser (see amp_manifest.h).
  */

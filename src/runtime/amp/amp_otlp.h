@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * amp_otlp.h -- the drain on the application core: takes the records from the
  * shared ring and

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * spnl/amp_abi_stm32mp2m33.h -- fixed AMP ABI (board profile: STM32MP257F-DK Cortex-M33)
  *
