@@ -755,10 +755,12 @@ class CapabilitiesTest < Minitest::Test
   def test_ruby_subset_rejected_matches_partition_flags
     refute_empty CAP::RUBY_SUBSET[:supported]
     refute_empty CAP::RUBY_SUBSET[:rejected]
-    src = File.read(PARTITION_SRC)
-    body = src[/def ebpf_impossible\?(.+?)end/m, 1]
-    refute_nil body, "could not parse partition's ebpf_impossible?"
-    partition_flags = body.scan(/uses_[a-z_]+|inherits_unsupported/).uniq.map(&:to_sym)
+    # The impossibility set's source of truth moved to
+    # TargetProfile::LINUX_EBPF.fatal_flags (ebpf_impossible? is a delegator to
+    # the profile). Introspect the real object instead of regex-scanning the
+    # source -- what is being measured (lockstep with the rejected list) is
+    # unchanged.
+    partition_flags = SpinelEbpf::TargetProfile::LINUX_EBPF.fatal_flags
     # inherits_unsupported is derived (it propagates from other methods), so it is
     # not one of the directly rejected constructs.
     construct_flags = partition_flags - [:inherits_unsupported]

@@ -9,6 +9,7 @@
 require_relative "parse_spinel_ir"
 require_relative "parse_spinel_ast"
 require_relative "capabilities"   # the attach-word vocabulary (no cycle: capabilities requires nothing)
+require_relative "target_profile"
 
 module SpinelEbpf
   module Partition
@@ -189,34 +190,42 @@ module SpinelEbpf
         )
       end
 
+      # Eligibility is target-relative. A profile names which flags are fatal
+      # and (for restricted targets like AMP v0) which identifier calls exist
+      # at all. The historical ebpf_impossible?/reasons pair delegates to the
+      # linux-ebpf profile, so every existing caller and printed string is
+      # unchanged.
+      def impossible_for?(profile)
+        profile.fatal_flags.any? { |f| self[f] } ||
+          !unsupported_calls_for(profile).empty?
+      end
+
+      # Identifier-shaped calls the target's codegen cannot lower ([] when the
+      # profile has a full builtin surface).
+      def unsupported_calls_for(profile)
+        return [] if profile.call_allowlist.nil?
+        calls.select { |c| profile.identifier_call?(c) && !profile.allows_call?(c) }.uniq
+      end
+
       def ebpf_impossible?
-        uses_float ||
-          uses_regex ||
-          uses_io ||
-          uses_thread ||
-          uses_fiber ||
-          uses_closure ||
-          uses_recursion ||
-          uses_bignum ||
-          uses_unbounded_loop ||
-          uses_unsupported_type ||
-          inherits_unsupported
+        impossible_for?(TargetProfile::LINUX_EBPF)
+      end
+
+      def reasons_for(profile)
+        r = []
+        TargetProfile::FLAG_REASONS.each do |flag, text|
+          r << text if profile.fatal_flags.include?(flag) && self[flag]
+        end
+        bad = unsupported_calls_for(profile)
+        unless bad.empty?
+          r << "calls #{bad.map { |c| "'#{c}'" }.join(", ")} — not available on the #{profile.name} target" \
+               " (supported: #{profile.supported_summary})"
+        end
+        r
       end
 
       def reasons
-        r = []
-        r << "uses Float arithmetic (no FPU in BPF)"                if uses_float
-        r << "uses regex (no regex helper in BPF)"                  if uses_regex
-        r << "performs I/O (host-side only)"                        if uses_io
-        r << "creates Thread (kernel cannot create threads)"        if uses_thread
-        r << "uses Fiber (no fiber concept in BPF)"                 if uses_fiber
-        r << "uses closure with captured outer vars"                if uses_closure
-        r << "calls itself recursively (BPF call graph is a DAG)"   if uses_recursion
-        r << "uses bignum (BPF integers are 64-bit max)"            if uses_bignum
-        r << "has loop without static upper bound"                  if uses_unbounded_loop
-        r << "signature uses non-int type (string/array/hash/...)"  if uses_unsupported_type
-        r << "calls another method that is eBPF-impossible"         if inherits_unsupported
-        r
+        reasons_for(TargetProfile::LINUX_EBPF)
       end
     end
 
@@ -287,7 +296,7 @@ module SpinelEbpf
     end
 
     # Whole-program partition result.
-    Result = Struct.new(:methods, :program_warnings, keyword_init: true) do
+    Result = Struct.new(:methods, :program_warnings, :target, keyword_init: true) do
       def by_qualified_name
         methods.to_h { |m| [m.qualified_name, m] }
       end
@@ -1352,7 +1361,7 @@ module SpinelEbpf
                   m.flags.uses_recursion = true
                   changed = true
                 end
-              elsif callee_mi.flags.ebpf_impossible?
+              elsif callee_mi.flags.impossible_for?(@target || TargetProfile::LINUX_EBPF)   # propagation follows the target too
                 if !m.flags.inherits_unsupported
                   m.flags.inherits_unsupported = true
                   changed = true
@@ -1379,12 +1388,13 @@ module SpinelEbpf
       # eBPF-eligible (pure int) but MUST stay native — they run as the workload
       # and the self-uprobe attaches to their sp_<name> symbols. Force them native.
       return mi.tag = :native if force_native && force_native.include?(mi.method_name)
-      mi.tag = mi.flags.ebpf_impossible? ? :native : :ebpf
+      mi.tag = mi.flags.impossible_for?(@target || TargetProfile::LINUX_EBPF) ? :native : :ebpf
     end
 
     # ---------- Top-level entry ----------
 
-    def classify(ir, ast, force_native: nil)
+    def classify(ir, ast, force_native: nil, target: TargetProfile::LINUX_EBPF)
+      @target = target                          # eligibility is target-relative
       @ffi_modules = collect_ffi_modules(ast)
       methods = enumerate_methods(ir, ast)
       methods.each do |mi|
@@ -1412,7 +1422,8 @@ module SpinelEbpf
       # Announcing a handler that cannot exist is the same failure as dropping
       # one that can, pointing the other way; a refused program must not be told
       # it got a handler.
-      Result.new(methods: methods, program_warnings: program_warnings(ir))
+      Result.new(methods: methods, program_warnings: program_warnings(ir),
+                 target: @target || TargetProfile::LINUX_EBPF)
     end
 
     # pull per-method signature (param types + return type) from IR and

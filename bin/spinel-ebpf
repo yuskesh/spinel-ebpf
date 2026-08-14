@@ -230,6 +230,7 @@ def cmd_compile(argv)
       known = ["linux", *AMP_BOARDS.keys]
       abort "error: unknown --target '#{t}' (expected #{known.map { |k| "'#{k}'" }.join(', ')})" unless known.include?(t)
       opts[:amp] = AMP_BOARDS[t]   # nil for 'linux'
+      opts[:target] = t
     }
     op.on("--build",
           "also compile/link into single binary (requires Linux + clang + libbpf-dev + bpftool)") { opts[:build] = true }
@@ -432,12 +433,34 @@ def cmd_compile(argv)
   # Ruby backtrace on top of one buries the part the author has to read, which
   # is what the unknown-kind case did until now.
   begin
-    result = SpinelEbpf::Partition.classify(ir, ast, force_native: opts[:self_targets])
+    # Eligibility is target-relative. The AMP targets get the AMP profile
+    # (same structural flags as eBPF plus the closed builtin surface), so an
+    # unsupported call is named here, before codegen, instead of surfacing as
+    # the C backstop's die deeper in the pipeline.
+    target_profile = opts[:amp] ? SpinelEbpf::TargetProfile::AMP : SpinelEbpf::TargetProfile::LINUX_EBPF
+    result = SpinelEbpf::Partition.classify(ir, ast, force_native: opts[:self_targets],
+                                            target: target_profile)
   rescue SpinelEbpf::Partition::PartitionError => e
     abort "error: #{e.message}"
   end
 
   print_partition_table(result, base)
+
+  # On an AMP target, a method that is structurally eBPF-eligible but calls
+  # outside the closed builtin surface is rejected here, by name, instead of
+  # being carried into codegen and dying at the C backstop. The message keeps
+  # the same shape as amp_scan_supported's.
+  if opts[:amp]
+    result.methods.each do |mi|
+      next unless mi.scope == :top_level
+      bad = mi.flags.unsupported_calls_for(SpinelEbpf::TargetProfile::AMP)
+      next if bad.empty?
+      next if mi.flags.impossible_for?(SpinelEbpf::TargetProfile::LINUX_EBPF)  # structurally-native methods are out of scope
+      abort "error: #{opts[:target]} (--target #{opts[:target]}) does not support '#{bad.first}' in v0. " \
+            "Supported: #{SpinelEbpf::TargetProfile::AMP.supported_summary}. " \
+            "Move this logic to the A55 side, or extend the amp helper set (method: #{mi.method_name})"
+    end
+  end
 
   # Fail loudly, before code generation runs, on the gaps between partitioning
   # and codegen: an attach handler that would silently fall back to native, an
@@ -3893,7 +3916,7 @@ def print_partition_table(result, base)
   puts (fmt % ["tag", "method", "reasons (when native)"])
   puts (fmt % ["-" * 7, "-" * 40, "-" * 30])
   result.methods.each do |m|
-    reasons = m.flags.reasons.join("; ")
+    reasons = m.flags.reasons_for(result.target || SpinelEbpf::TargetProfile::LINUX_EBPF).join("; ")
     puts (fmt % [m.tag, m.qualified_name, m.tag == :native ? reasons : ""])
   end
 end
