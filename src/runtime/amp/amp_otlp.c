@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * amp_otlp.c -- the drain on the application core. Turns the records in the shared
  * ring into OTLP logs. On real hardware the consumer invalidates the index before

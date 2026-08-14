@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 OR MIT
  *
  * spinel-ebpf shared types -- used by both eBPF C (generated) and host C.
  * This is the host<->kernel ringbuf record header.

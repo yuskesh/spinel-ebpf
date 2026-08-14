@@ -1,5 +1,5 @@
 /*
- * SPDX-License-Identifier: GPL-2.0
+ * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * a55_drain.c -- A55-side drain for the M7 shared ring.
  *

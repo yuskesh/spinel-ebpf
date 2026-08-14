@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * probe_capability.c -- publish, read and admit against the capability
  * table. Freestanding C: no allocation, no libc beyond memcpy/memset, so the

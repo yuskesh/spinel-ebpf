@@ -474,14 +474,15 @@ ones that decode a payload need `SPNL_WITH_PROTO=1`, the TLS ones need
 ## License
 
 Most of this project — the toolchain, the host runtime, the generated host glue,
-the shared header, examples and tests — is dual-licensed **MIT OR Apache-2.0**
+examples and tests — is dual-licensed **MIT OR Apache-2.0**
 (see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE); use
 whichever you prefer — Apache-2.0 adds an explicit patent grant, MIT is
 GPLv2-compatible). spinel itself is MIT (© Yukihiro Matsumoto); the Linux kernel
 and libbpf are under their own licenses and are not redistributed here.
 
 The **generated eBPF programs** (`tests/golden/*.bpf.c`, and every `.bpf.c` the
-codegen emits) are dual-licensed **GPL-2.0 OR MIT** and declare
+codegen emits) and the one header compiled into them (`include/spnl/types.h`)
+are dual-licensed **GPL-2.0 OR MIT** and declare
 `SEC("license") = "Dual MIT/GPL"` — this is the cilium model. An eBPF program that
 calls GPL-only kernel helpers must present a GPL-compatible license to the kernel,
 so the GPL arm satisfies the verifier while the MIT arm lets you reuse the program

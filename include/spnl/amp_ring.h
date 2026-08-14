@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * spnl/amp_ring.h -- SPSC event ring in the DDR carveout shared between the M7 and the A55.
  *

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * amp_check.c -- a bytecode checker run before a program is shipped to the
  * real-time core. The verification is decoupled from execution.

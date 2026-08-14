@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // spnl_load_check -- load-only eBPF verifier probe for `spinel-ebpf check`.
 //

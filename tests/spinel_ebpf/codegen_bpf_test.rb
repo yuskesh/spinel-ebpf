@@ -54,7 +54,7 @@ class CodegenBpfTest < Minitest::Test
     c = emit_for("04_class_with_ivars")
     assert_includes c, '#include "vmlinux.h"'
     assert_includes c, '#include <bpf/bpf_helpers.h>'
-    assert_includes c, 'char LICENSE[] SEC("license") = "GPL";'
+    assert_includes c, 'char LICENSE[] SEC("license") = "Dual MIT/GPL";'
   end
 
   def test_header_mentions_source_unit_and_counts

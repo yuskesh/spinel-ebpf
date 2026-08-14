@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * spnl/amp_abi_imx95m7.h -- fixed AMP ABI (board profile: FRDM-IMX95 Cortex-M7)
  *
