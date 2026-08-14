@@ -1323,13 +1323,13 @@ static int cc_slice_lit_idx(char **tab, int *n, const char *lit, const char *who
   return (*n)++;
 }
 
-/* attach types (full defs below) -- declared here so cc_lower_expr can resolve a
- * pkt_* builtin's ctx kind (xdp vs tc) from the method being lowered. */
-typedef enum { AK_NONE, AK_KPROBE, AK_KRETPROBE, AK_TRACEPOINT, AK_FENTRY, AK_FEXIT, AK_XDP, AK_TC,
-               AK_SK_VERDICT, AK_UPROBE, AK_URETPROBE, AK_USDT, AK_LSM, AK_FMOD_RET,
-               AK_ITER_TASK, AK_RAW_TP, AK_PERF_EVENT, AK_SOCK_OPS,
-               AK_KPROBE_MULTI, AK_TIMER,
-               AK_USER_RINGBUF } AttachKind;
+/* attach vocabulary -- the AttachKind enum and the per-kind declaration table
+ * (prefix, SEC pattern, ctx type, facets) live in attach_schema.h, the single
+ * declaration both cc_detect_attach() and tools/gen_attach_schema.c (the
+ * Ruby-side JSON) consume. Included here so cc_lower_expr can resolve a pkt_*
+ * builtin's ctx kind (xdp vs tc) from the method being lowered. */
+#include "attach_schema.h"
+#include "builtin_schema.h"   /* declared-arity axis of the builtin vocabulary */
 /* ctx_prefixed: the inner takes the kernel ctx as its first arg (xdp/tc, for pkt_*).
  * verdict: the wrapper propagates the inner's int return (XDP_ / TC_ACT_ values).
  * iter_guard: emit `if (!ctx->task) return 0;` (the bpf_iter NULL terminator).
@@ -1475,6 +1475,38 @@ enum { CC_CTX_XDP = 1, CC_CTX_TC_INGRESS = 2, CC_CTX_TC_EGRESS = 4 };
 #define CC_SKB_WHY "it reads or rewrites `struct __sk_buff`, and XDP runs before " \
                    "an skb exists (its ctx is a struct xdp_md)"
 
+/* Refuse a surplus argument to a builtin whose handler does not check its own
+ * arity (the measured-silent set, builtin_schema.h). Runs at the CallNode entry
+ * of both lowering functions, before any handler matches. Bare calls only: a
+ * receiver-dot call (`pkt.len`, `t.pid` on a kptr) is a chain, not a builtin
+ * call, and its trailing name may legitimately collide with a row. */
+static void cc_require_declared_arity(AST *ast, int nid, const char *name) {
+  if (!name) return;
+  if (nt_ref(ast, nid, "receiver") >= 0) return;
+  for (int i = 0; i < CC_N_DECLARED_ARITY; i++) {
+    if (strcmp(name, cc_declared_arity[i].name)) continue;
+    int args_id = nt_ref(ast, nid, "arguments");
+    int na = 0;
+    if (args_id >= 0) nt_arr(ast, args_id, "arguments", &na);
+    if (na != cc_declared_arity[i].arity) {
+      die(msprintf("%s takes %s (got %d) -- this used to be accepted and the surplus "
+                   "SILENTLY ignored, so a wrong call shape compiled and answered the "
+                   "no-argument question.\n"
+                   "  Fix: %s. The builtin reads the hook context, not its arguments.\n"
+                   "  The call was",
+                   name,
+                   cc_declared_arity[i].arity == 0 ? "no arguments"
+                                                   : "exactly 1 argument (the flow name)",
+                   na,
+                   cc_declared_arity[i].arity == 0
+                     ? msprintf("write `%s` with no argument list", name)
+                     : "pass only the flow name declared in flow()"),
+          name);
+    }
+    return;
+  }
+}
+
 static void cc_require_pkt_ctx(const char *who, int allow, const char *why) {
   Attach a = {0};
   AttachKind k = g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE;
@@ -1509,6 +1541,28 @@ static void cc_require_pkt_ctx(const char *who, int allow, const char *why) {
                        "\n  (context gate, measured; downstream this is a clang or verifier error "
                        "that names a C identifier or a helper number instead of the hook you chose.)"
                        "\n  You wrote it in", who, where, why, forms);
+  die(msg, g_method ? g_method->name : "<none>");
+}
+
+/* sock_addr_ip4 / sock_addr_port read `struct bpf_sock_addr` fields straight off
+ * ctx. Outside the two cgroup sock_addr hooks the same member access reaches
+ * clang against a different ctx struct -- a compile error that names a C field,
+ * not the hook the author chose. Measured: before this gate the call compiled
+ * silently in 14 foreign attach kinds. */
+static void cc_require_sock_addr_ctx(const char *who) {
+  Attach a = {0};
+  (void)(g_method ? cc_detect_attach(g_method->name, &a) : AK_NONE);
+  int ok = a.kname && (!strcmp(a.kname, "cgroup_connect4") || !strcmp(a.kname, "cgroup_bind4"));
+  if (a.sec) free(a.sec);
+  if (ok) return;
+  char *msg = msprintf(
+    "%s reads `struct bpf_sock_addr` and is only available inside the cgroup sock_addr hooks.\n"
+    "  Contexts that can supply it:"
+    "\n    def cgroup__connect4__<name>   (outbound connect control)"
+    "\n    def cgroup__bind4__<name>      (bind control)"
+    "\n  (context gate, measured; downstream this is a clang error about `ctx->user_ip4`,"
+    "\n  which names a C field, not the hook you chose.)"
+    "\n  You wrote it in", who);
   die(msg, g_method ? g_method->name : "<none>");
 }
 
@@ -2309,6 +2363,19 @@ static int cc_in_tcp_cc(void) {
   return g_method && g_method->name && !strncmp(g_method->name, "tcp_cc__", 8);
 }
 
+/* The same shape for the other two struct_ops families. The class post-pass
+ * synthesizes sched_ext__<member> / qdisc__<member> names (and the flat `def`
+ * spelling carries the prefix already), so the prefix IS the context. Before
+ * these gates the scx_* and qdisc_* kfunc calls compiled silently in every
+ * attach kind (measured: 15 foreign kinds each) and failed only at the verifier,
+ * as an "unknown kfunc" that names neither the builtin nor the hook. */
+static int cc_in_sched_ext(void) {
+  return g_method && g_method->name && !strncmp(g_method->name, "sched_ext__", 11);
+}
+static int cc_in_qdisc(void) {
+  return g_method && g_method->name && !strncmp(g_method->name, "qdisc__", 7);
+}
+
 static const char *cc_tcp_sock_reader_field(const char *name) {   /* tcp_sock_<field>(sk) */
   if (!name) return NULL;
   if (!strcmp(name, "tcp_sock_snd_cwnd"))       return "snd_cwnd";
@@ -2805,6 +2872,7 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
   }
   if (!strcmp(ty, "CallNode")) {
     const char *name = nt_str(ast, nid, "name");
+    cc_require_declared_arity(ast, nid, name);
     if (name && cc_is_binary_op(name)) {   /* `lhs op rhs` via CAst (precedence-driven parens) */
       ce_print(cc_build_expr(ast, nid), b);
       return;
@@ -3382,6 +3450,11 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
     }
     if (name && !strcmp(name, "latency_end"))  { buf_puts(b, "spnl_latency_end()"); return; }
     if (name && (!strcmp(name, "scx_consume") || !strcmp(name, "scx_pick_idle_cpu"))) {   /* scx kfunc (value) */
+      if (!cc_in_sched_ext())
+        die("scx_* kfuncs are only valid inside sched_ext__<member> methods "
+            "(class <N> < BPF::SchedExt, or flat def sched_ext__<member>) -- outside them "
+            "the kfunc reaches the verifier as unavailable for the program type, which names "
+            "neither the builtin nor the hook.\n  You wrote", name);
       const char *kf = !strcmp(name, "scx_consume") ? "scx_bpf_dsq_move_to_local" : "scx_bpf_pick_idle_cpu";
       int arity = !strcmp(name, "scx_consume") ? 1 : 2;
       const char *c0 = !strcmp(name, "scx_consume") ? NULL : "(const struct cpumask *)(unsigned long)";
@@ -3424,6 +3497,8 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
      * three-way family with a hole in the middle. */
     if (name && (!strcmp(name, "xsk_redirect") || !strcmp(name, "dev_redirect") ||
                  !strcmp(name, "cpumap_redirect"))) {
+      cc_require_pkt_ctx(name, CC_CTX_XDP,   /* was silently accepted in 14 foreign kinds */
+                         "bpf_redirect_map's verdict is an XDP action the wrapper must return");
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
       if (na != 1) die("xsk_redirect/dev_redirect/cpumap_redirect expects 1 arg", name);
@@ -3531,8 +3606,8 @@ static void cc_lower_expr(AST *ast, int nid, Buf *b) {
       buf_puts(b, "((__s64)ctx->hash)");
       return;
     }
-    if (name && !strcmp(name, "sock_addr_ip4"))  { buf_puts(b, "((__s64)(__u32)__builtin_bswap32(ctx->user_ip4))"); return; }
-    if (name && !strcmp(name, "sock_addr_port")) { buf_puts(b, "((__s64)(__u32)__builtin_bswap16((__u16)ctx->user_port))"); return; }
+    if (name && !strcmp(name, "sock_addr_ip4"))  { cc_require_sock_addr_ctx(name); buf_puts(b, "((__s64)(__u32)__builtin_bswap32(ctx->user_ip4))"); return; }
+    if (name && !strcmp(name, "sock_addr_port")) { cc_require_sock_addr_ctx(name); buf_puts(b, "((__s64)(__u32)__builtin_bswap16((__u16)ctx->user_port))"); return; }
     if (name && (!strcmp(name, "mim_inc") || !strcmp(name, "mim_get"))) {   /* map-in-map */
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
@@ -4143,6 +4218,7 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
   }
   if (!strcmp(ty, "CallNode")) {
     const char *name = nt_str(ast, nid, "name");
+    cc_require_declared_arity(ast, nid, name);
     if (name && !strcmp(name, "spnl_emit")) {   /* ringbuf reserve/submit block */
       int args_id = nt_ref(ast, nid, "arguments");
       int na = 0; const int *ids = args_id >= 0 ? nt_arr(ast, args_id, "arguments", &na) : NULL;
@@ -4214,6 +4290,11 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
     if (name && !strcmp(name, "times") && nt_ref(ast, nid, "block") >= 0)   /* n.times { } */
       return cc_times_call(ast, nid, body);
     if (name && (!strcmp(name, "scx_dispatch") || !strcmp(name, "scx_kick_cpu") || !strcmp(name, "scx_create_dsq"))) {
+      if (!cc_in_sched_ext())
+        die("scx_* kfuncs are only valid inside sched_ext__<member> methods "
+            "(class <N> < BPF::SchedExt, or flat def sched_ext__<member>) -- outside them "
+            "the kfunc reaches the verifier as unavailable for the program type, which names "
+            "neither the builtin nor the hook.\n  You wrote", name);
       const char *kf; int arity; const char *c0 = NULL;   /* scx kfunc (side effect) */
       if      (!strcmp(name, "scx_dispatch")) { kf = "scx_bpf_dsq_insert"; arity = 4; c0 = "(struct task_struct *)(unsigned long)"; }
       else if (!strcmp(name, "scx_kick_cpu")) { kf = "scx_bpf_kick_cpu";   arity = 2; }
@@ -4226,6 +4307,11 @@ static char *cc_lower_stmt(AST *ast, int nid, Lines *body) {
     if (name) {   /* qdisc kfuncs -- all side-effecting statements */
       const QdiscKf *qkf = cc_qdisc_kf(name);
       if (qkf) {
+        if (!cc_in_qdisc())
+          die("qdisc_* kfuncs are only valid inside qdisc__<member> methods "
+              "(class <N> < BPF::Qdisc, or flat def qdisc__<member>) -- outside them "
+              "the kfunc reaches the verifier as unavailable for the program type, which names "
+              "neither the builtin nor the hook.\n  You wrote", name);
         char *cs = cc_qdisc_call_str(ast, nid, qkf);
         lines_push(body, msprintf("%s;", cs));
         free(cs);
@@ -5380,118 +5466,45 @@ static void cc_refuse_withdrawn_attach(const char *name) {
 static AttachKind cc_detect_attach(const char *name, Attach *a) {
   const char *rest;
   memset(a, 0, sizeof *a);
-  /* `on :kprobe, %w[...]` -- ONE body, N symbols. The SEC named here is
-   * the multi lowering's; when the codegen picks expansion the wrapper loop
-   * emits SEC("kprobe/<sym>") per symbol instead and never consults this field.
-   * Checked before "kprobe__" only for reading order -- the prefixes do not
-   * overlap ("kprobe_multi__" does not start with "kprobe__"). */
-  if      (cc_starts(name, "kprobe_multi__", &rest)) { a->kind = AK_KPROBE_MULTI; a->sec = strdup("kprobe.multi"); a->ctx_type = "struct pt_regs *"; a->kname = "kprobe_multi"; }
-  else if (cc_starts(name, "kprobe__", &rest))    { a->kind = AK_KPROBE;    a->sec = msprintf("kprobe/%s", rest);    a->ctx_type = "struct pt_regs *"; a->kname = "kprobe"; }
-  else if (cc_starts(name, "kretprobe__", &rest)) { a->kind = AK_KRETPROBE; a->sec = msprintf("kretprobe/%s", rest); a->ctx_type = "struct pt_regs *"; a->kname = "kretprobe"; }
-  else if (cc_starts(name, "fentry__", &rest))    { a->kind = AK_FENTRY;    a->sec = msprintf("fentry/%s", rest);    a->ctx_type = "__u64 *"; a->kname = "fentry"; }
-  else if (cc_starts(name, "fexit__", &rest))     { a->kind = AK_FEXIT;     a->sec = msprintf("fexit/%s", rest);     a->ctx_type = "__u64 *"; a->kname = "fexit"; }
-  else if (cc_starts(name, "tc__ingress__", &rest)) { a->kind = AK_TC; a->sec = strdup("tcx/ingress"); a->ctx_type = "struct __sk_buff *"; a->kname = "tc_ingress"; a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "tc__egress__", &rest))  { a->kind = AK_TC; a->sec = strdup("tcx/egress");  a->ctx_type = "struct __sk_buff *"; a->kname = "tc_egress";  a->ctx_prefixed = 1; a->verdict = 1; }
-  /* verdict-style socket programs (SK_PASS/SK_DROP), ctx-prefixed inner. */
-  else if (cc_starts(name, "sk_reuseport__", &rest))   { a->kind = AK_SK_VERDICT; a->sec = strdup("sk_reuseport");        a->ctx_type = "struct sk_reuseport_md *"; a->kname = "sk_reuseport";    a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "sk_msg__", &rest))         { a->kind = AK_SK_VERDICT; a->sec = strdup("sk_msg");              a->ctx_type = "struct sk_msg_md *";       a->kname = "sk_msg";          a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "sk_skb__verdict__", &rest)){ a->kind = AK_SK_VERDICT; a->sec = strdup("sk_skb/stream_verdict"); a->ctx_type = "struct __sk_buff *";       a->kname = "sk_skb_verdict";  a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "sk_skb__parser__", &rest)) { a->kind = AK_SK_VERDICT; a->sec = strdup("sk_skb/stream_parser");  a->ctx_type = "struct __sk_buff *";       a->kname = "sk_skb_parser";   a->ctx_prefixed = 1; a->verdict = 1; }
-  /* socket_filter / flow_dissector / sk_lookup -- verdict + ctx-prefixed. */
-  else if (cc_starts(name, "socket_filter__", &rest)) { a->kind = AK_SK_VERDICT; a->sec = strdup("socket");         a->ctx_type = "struct __sk_buff *";     a->kname = "socket_filter"; a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "flow_dissector__", &rest)){ a->kind = AK_SK_VERDICT; a->sec = strdup("flow_dissector"); a->ctx_type = "struct __sk_buff *";     a->kname = "flow_dissector"; a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "sk_lookup__", &rest))     { a->kind = AK_SK_VERDICT; a->sec = strdup("sk_lookup");      a->ctx_type = "struct bpf_sk_lookup *"; a->kname = "sk_lookup";     a->ctx_prefixed = 1; a->verdict = 1; }
-  /* cgroup/connect4 / bind4 (sock_addr) -- verdict (1=allow/0=deny) + ctx-prefixed. */
-  else if (cc_starts(name, "cgroup__connect4__", &rest)) { a->kind = AK_SK_VERDICT; a->sec = strdup("cgroup/connect4"); a->ctx_type = "struct bpf_sock_addr *"; a->kname = "cgroup_connect4"; a->ctx_prefixed = 1; a->verdict = 1; }
-  else if (cc_starts(name, "cgroup__bind4__", &rest))    { a->kind = AK_SK_VERDICT; a->sec = strdup("cgroup/bind4");    a->ctx_type = "struct bpf_sock_addr *"; a->kname = "cgroup_bind4";    a->ctx_prefixed = 1; a->verdict = 1; }
-  /* uprobe / uretprobe -- pt_regs args (like kprobe), SEC is the bare kind. */
-  else if (cc_starts(name, "uprobe__", &rest))    { a->kind = AK_UPROBE;    a->sec = strdup("uprobe");    a->ctx_type = "struct pt_regs *"; a->kname = "uprobe"; }
-  else if (cc_starts(name, "uretprobe__", &rest)) { a->kind = AK_URETPROBE; a->sec = strdup("uretprobe"); a->ctx_type = "struct pt_regs *"; a->kname = "uretprobe"; }
-  /* USDT -- bpf_usdt_arg prologue, SEC("usdt"). usdt__<provider>__<probe>. */
-  else if (cc_starts(name, "usdt__", &rest) && strstr(rest, "__")) { a->kind = AK_USDT; a->sec = strdup("usdt"); a->ctx_type = "struct pt_regs *"; a->kname = "usdt"; a->usdt = 1; }
-  /* LSM / fmod_ret -- ctx[i] args (like fexit) + verdict propagate. */
-  else if (cc_starts(name, "lsm__", &rest))       { a->kind = AK_LSM;      a->sec = msprintf("lsm/%s", rest);       a->ctx_type = "__u64 *"; a->kname = "lsm";      a->verdict = 1; }
-  else if (cc_starts(name, "fmod_ret__", &rest))  { a->kind = AK_FMOD_RET; a->sec = msprintf("fmod_ret/%s", rest);  a->ctx_type = "__u64 *"; a->kname = "fmod_ret"; a->verdict = 1; }
-  /* bpf_iter over tasks -- ctx-prefixed, NULL-terminator guard. */
-  else if (cc_starts(name, "iter__task__", &rest)) { a->kind = AK_ITER_TASK; a->sec = strdup("iter/task"); a->ctx_type = "struct bpf_iter__task *"; a->kname = "iter_task"; a->ctx_prefixed = 1; a->iter_guard = 1; }
-  /* SOCK_OPS -- cgroup-scoped TCP state observation. ctx-prefixed
-   * (sock_ops_op / sock_ops_state read ctx), NOT verdict-propagating: the return
-   * of a sockops program is not a policy decision, so the wrapper returns 0
-   * (same rule the Ruby oracle applied -- :sock_ops is absent from its
-   * propagating_retval list). The glue side (_spnl_sockops_attach_all)
-   * survived the port to the C codegen and attaches every SEC("sockops") prog to
-   * $SPNL_CGROUP_PATH; only this line was missing, so the whole kind degraded
-   * to a plain SEC("syscall") wrapper that nothing ever attached. */
-  else if (cc_starts(name, "sock_ops__", &rest)) { a->kind = AK_SOCK_OPS; a->sec = strdup("sockops"); a->ctx_type = "struct bpf_sock_ops *"; a->kname = "sock_ops"; a->ctx_prefixed = 1; }
-  /* raw tracepoint -- ctx->args[i] extraction, auto-attach. */
-  else if (cc_starts(name, "raw_tp__", &rest))    { a->kind = AK_RAW_TP; a->sec = msprintf("raw_tp/%s", rest); a->ctx_type = "struct bpf_raw_tracepoint_args *"; a->kname = "raw_tp"; }
-  /* perf_event sampling -- ctx-prefixed (sample data + regs), non-verdict. */
-  else if (cc_starts(name, "perf_event__", &rest)) { a->kind = AK_PERF_EVENT; a->sec = strdup("perf_event"); a->ctx_type = "struct bpf_perf_event_data *"; a->kname = "perf_event"; a->ctx_prefixed = 1; }
-  /* the reactor's `on :timer` handler. Named here even though the emit
-   * loop short-circuits it (a timer is a callback plus an arm program, not the
-   * usual inner+wrapper), because every CONTEXT gate in this file asks
-   * cc_detect_attach who it is lowering into. Left as AK_NONE the handler would
-   * look like a plain SEC("syscall") test-run entry, and the gates read that as
-   * "not an event": has_cap would be allowed to read whatever task the softirq
-   * landed on, and `filter_by` would skip it -- filtering every other handler in
-   * the unit and leaving this one open, which is precisely the "looks narrowed
-   * and is not" artefact the common filter refuses. `sec` is what the arm program actually
-   * carries; the callback has no SEC at all. */
-  else if (cc_starts(name, "spnl_timer__", &rest)) { a->kind = AK_TIMER; a->sec = strdup("syscall"); a->ctx_type = "__u64 *"; a->kname = "timer"; }
-  /* the USER_RINGBUF callback. The ONLY attach kind that emits no
-   * program at all -- it is a `static long cb(struct bpf_dynptr *, void *)` that
-   * bpf_user_ringbuf_drain calls once per pending record, so it has no SEC, no
-   * ctx and no userspace-visible name. `sec` stays NULL for that reason; the
-   * per-method loop short-circuits on this kind before anything reads it.
-   *
-   * It is still an AttachKind rather than AK_NONE for the same reason the timer
-   * is: every context gate in this file asks cc_detect_attach what it
-   * is lowering, and AK_NONE would present a drain callback as a plain method.
-   * The difference from the timer is that this one DOES run in the draining
-   * program's context (whatever that is), so it is deliberately NOT added to the
-   * "not process context" lists -- see cc_ak_process_ctx. */
-  else if (cc_starts(name, "user_ringbuf__", &rest)) { a->kind = AK_USER_RINGBUF; a->sec = NULL; a->ctx_type = NULL; a->kname = "user_ringbuf"; }
-  /* a tail-call target. Deliberately AK_XDP (see the `xdp_tail` note
-   * on struct Attach): the emitted program is an ordinary SEC("xdp") one, and
-   * only the loader treats it differently -- _spnl_prog_array_populate
-   * writes it into `spnl_prog_array` and _spnl_xdp_attach_all skips it, both
-   * keyed on this literal prefix. `kname` is "xdp_tail" because it names the
-   * surface the author wrote, and it is what the wrapper comment prints.
-   * The prefix does not overlap "xdp__" ("xdp_t" vs "xdp__"), so the order of
-   * these two branches is for reading, not for correctness. */
-  else if (cc_starts(name, "xdp_tail__", &rest)) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp_tail"; a->ctx_prefixed = 1; a->verdict = 1; a->xdp_tail = 1; }
-  /* the pure-XDP TCP slice. AK_XDP for the same reason `xdp_tail` is
-   * (see the note on struct Attach): the emitted program is an ordinary
-   * SEC("xdp") one and every context gate here asks cc_detect_attach what it is
-   * lowering. What differs is that the METHOD BODY is discarded -- the marker the
-   * author writes is replaced by the generated state machine -- so the per-method
-   * loop short-circuits on `tcp_slice`, the way it does for the timer and the
-   * USER_RINGBUF callback. `kname` names the surface the author wrote, which is
-   * what the wrapper comment and the diagnostics print.
-   *
-   * Checked BEFORE the plain `xdp__` branch, and this order IS load-bearing:
-   * "xdp__tcp_slice__health" starts with "xdp__". Getting it wrong is exactly
-   * the false negative that let an unported attach kind look present (a prefix
-   * scan answers "present" because the name begins with an implemented prefix),
-   * so the plain branch below keeps its
-   * explicit exclusion as a second line of defence rather than relying on
-   * branch order alone. */
-  else if (cc_starts(name, "xdp__tcp_slice__", &rest)) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp_tcp_slice"; a->ctx_prefixed = 1; a->verdict = 1; a->tcp_slice = 1; }
-  else if (cc_starts(name, "xdp__", &rest)) {        /* plain XDP (not xdp__tcp_slice__/xdp_tail__, Stage 1) */
-    if (strncmp(rest, "tcp_slice__", 11) != 0) { a->kind = AK_XDP; a->sec = strdup("xdp"); a->ctx_type = "struct xdp_md *"; a->kname = "xdp"; a->ctx_prefixed = 1; a->verdict = 1; }
-  }
-  else if (cc_starts(name, "tracepoint__", &rest)) {
-    const char *sep = strstr(rest, "__");
-    if (sep) {
+  /* Walk the declaration table (attach_schema.h). Table order is match order --
+   * the first prefix row that matches wins, exactly as the old else-if chain
+   * did; every per-kind rationale comment moved to its row. */
+  for (int i = 0; i < CC_N_ATTACH_DECLS; i++) {
+    const CcAttachDecl *d = &cc_attach_decls[i];
+    if (d->detect != CC_AD_PREFIX) continue;      /* struct_ops: class post-pass */
+    if (!cc_starts(name, d->prefix, &rest)) continue;
+    if (d->rest_needs_sep && !strstr(rest, "__")) continue;   /* usdt__foo falls through */
+    if (d->rest_excludes && !strncmp(rest, d->rest_excludes, strlen(d->rest_excludes)))
+      return a->kind;   /* matched but excluded: AK_NONE, stop (second line of defence) */
+    if (d->sec_mode == CC_SEC_SPLIT2) {
+      /* tracepoint__<cat>__<event> -- the one genuinely irregular branch: the
+       * split and the syscalls sys_enter_/sys_exit_ struct rule stay as code.
+       * A name without the second "__" stops with AK_NONE, as the chain did. */
+      const char *sep = strstr(rest, "__");
+      if (!sep) return a->kind;
       char cat[128]; size_t cl = (size_t)(sep - rest); if (cl >= sizeof cat) cl = sizeof cat - 1;
-      memcpy(cat, rest, cl); cat[cl] = '\0';
-      a->kind = AK_TRACEPOINT; a->sec = msprintf("tracepoint/%s/%s", cat, sep + 2);
-      a->ctx_type = "void *"; a->kname = "tracepoint";
+      memcpy(cat, rest, cl); cat[cl] = 0;
+      a->kind = d->kind; a->sec = msprintf("tracepoint/%s/%s", cat, sep + 2);
+      a->ctx_type = d->ctx_type; a->kname = d->kname;
       const char *evt = sep + 2;   /* syscalls sys_enter_/sys_exit_ -> positional args[i] struct */
       a->tp_cat = strdup(cat); a->tp_event = strdup(evt);   /* named-field lookup */
       if (!strcmp(cat, "syscalls") && !strncmp(evt, "sys_enter_", 10)) a->tp_struct = "trace_event_raw_sys_enter";
       else if (!strcmp(cat, "syscalls") && !strncmp(evt, "sys_exit_", 9)) a->tp_struct = "trace_event_raw_sys_exit";
+      return a->kind;
     }
+    a->kind = d->kind; a->ctx_type = d->ctx_type; a->kname = d->kname;
+    a->ctx_prefixed = d->ctx_prefixed; a->verdict = d->verdict;
+    a->iter_guard = d->iter_guard; a->usdt = d->usdt;
+    a->xdp_tail = d->xdp_tail; a->tcp_slice = d->tcp_slice;
+    switch (d->sec_mode) {
+      case CC_SEC_FIXED:    a->sec = strdup(d->sec_pattern); break;
+      case CC_SEC_TEMPLATE: { const char *lt = strchr(d->sec_pattern, 60 /* < */);
+                              a->sec = msprintf("%.*s%s", (int)(lt - d->sec_pattern),
+                                                d->sec_pattern, rest); break; }
+      case CC_SEC_NONE:     a->sec = NULL; break;
+      case CC_SEC_SPLIT2:   break;   /* handled above */
+    }
+    return a->kind;
   }
   return a->kind;
 }
@@ -6822,7 +6835,7 @@ static void amp_scan_supported(AST *ast, int nid) {
   if (!strcmp(ty, "DefNode") || !strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) return;
   if (!strcmp(ty, "CallNode")) {
     const char *nm = nt_str(ast, nid, "name");
-    if (nm && !cc_is_binary_op(nm) && strcmp(nm, "spnl_emit") != 0 && strcmp(nm, "ktime_ns") != 0) {
+    if (nm && !cc_is_binary_op(nm) && !cc_builtin_on_target(nm, CC_TGT_AMP)) {   /* the table is the authority */
       char msg[256];
       snprintf(msg, sizeof msg,
         "amp-m7 (--target amp-m7) does not support '%s' in v0. "

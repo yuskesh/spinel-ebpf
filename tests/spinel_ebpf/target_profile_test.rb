@@ -7,10 +7,11 @@
 #   (1) the linux-ebpf profile is exactly equivalent to the historical
 #       ebpf_impossible?/reasons pair (every existing caller, through the
 #       delegators, is unchanged to the character)
-#   (2) the AMP profile's call_allowlist is in lockstep with the C-side
-#       backstop (amp_scan_supported in src/codegen_c/spinel_ebpf_cc.c) --
-#       change either side alone and this test names the drift (the same
-#       shape as the two-partitioner discipline)
+#   (2) the AMP profile's call_allowlist is in lockstep with the declaration
+#       both it and the C-side backstop (amp_scan_supported in
+#       src/codegen_c/spinel_ebpf_cc.c) derive from -- change one side alone and
+#       this test names the drift (the same shape as the two-partitioner
+#       discipline)
 #   (3) the allowlist governs identifier-shaped calls only (operator
 #       CallNodes are structural)
 
@@ -52,20 +53,43 @@ class TargetProfileTest < Minitest::Test
   end
 
   # ---- (2) AMP allowlist is in lockstep with the C backstop ----
+  #
+  # The allowlist's authority is now cc_builtin_targets in
+  # src/codegen_c/builtin_schema.h: the Ruby profile reads the generated JSON and
+  # the C backstop walks the same table through cc_builtin_on_target(). So this
+  # test pins two things:
+  #   (a) the profile's allowlist == the table's rows for this target (catching a
+  #       re-literalization of what is supplied from the JSON)
+  #   (b) the backstop really does consult the table (the mechanism's witness --
+  #       a regression to an inline strcmp chain would keep dying on the old set
+  #       however far the table is widened)
 
   C_SOURCE = File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__)
+  SCHEMA_H = File.expand_path("../../src/codegen_c/builtin_schema.h", __dir__)
 
-  def c_side_allowlist
+  def schema_side_allowlist(tgt_macro)
+    src = File.read(SCHEMA_H)
+    table = src[/static const CcBuiltinTargets cc_builtin_targets\[\] = \{(.*?)\n\};/m, 1]
+    refute_nil table, "cc_builtin_targets is not in builtin_schema.h (did its shape change?)"
+    table.scan(/\{\s*"(\w+)",\s*([^}]+)\}/)
+         .select { |_, bits| bits.include?(tgt_macro) }
+         .map(&:first).sort
+  end
+
+  def assert_backstop_walks_the_table(scan_fn, tgt_macro)
     src = File.read(C_SOURCE)
-    fn = src[/static void amp_scan_supported.*?\n\}/m]
-    refute_nil fn, "amp_scan_supported not found in spinel_ebpf_cc.c — the C backstop moved; update this test AND the profile together"
-    # Extract names from the acceptance lines (cc_is_binary_op || strcmp(nm, "..."))
-    fn.scan(/strcmp\(nm,\s*"(\w+)"\)/).flatten.sort
+    fn = src[/static void #{scan_fn}.*?\n\}/m]
+    refute_nil fn, "#{scan_fn} not found in spinel_ebpf_cc.c — the C backstop moved; update this test AND the profile together"
+    assert_includes fn, "cc_builtin_on_target(nm, #{tgt_macro})",
+                    "#{scan_fn} does not consult cc_builtin_on_target(#{tgt_macro}) — " \
+                    "a backstop that regresses to another spelling keeps dying however " \
+                    "far the table is widened"
   end
 
   def test_amp_allowlist_lockstep_with_c_backstop
-    assert_equal c_side_allowlist, P::AMP.call_allowlist.sort,
-                 "AMP profile and amp_scan_supported (C) allowlists have drifted — only one side was changed"
+    assert_equal schema_side_allowlist("CC_TGT_AMP"), P::AMP.call_allowlist.sort,
+                 "AMP profile and the builtin_schema.h allowlist have drifted — only one side was changed"
+    assert_backstop_walks_the_table("amp_scan_supported", "CC_TGT_AMP")
   end
 
   def test_amp_supported_summary_matches_c_message

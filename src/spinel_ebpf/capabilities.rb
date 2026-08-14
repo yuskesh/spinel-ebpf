@@ -1641,20 +1641,27 @@ module SpinelEbpf
         "path_starts_with" => { secs: DPATH_OK_SECS },
         "path_contains"    => { secs: DPATH_OK_SECS },
         "parent_path_eq"   => { secs: DPATH_OK_SECS },
-        "cpumap_redirect"  => { kinds: %i[xdp] },
-        "xsk_redirect"     => { kinds: %i[xdp] },
+        # Any mask that claims :xdp claims :xdp_tail too. A tail-call target
+        # shares AK_XDP in the C codegen (what a tail lands in IS an XDP program)
+        # and the C gate does not tell the two apart -- measured by writing
+        # payload_starts and pkt_len inside an `xdp_tail__` method. Leaving the
+        # mask at :xdp alone would make the affordance hide a legal move, which is
+        # the direction this axis was found drifting. :xdp_tcp_slice stays out: its
+        # body is discarded, so "allowed" would be a lie (see below).
+        "cpumap_redirect"  => { kinds: %i[xdp xdp_tail] },
+        "xsk_redirect"     => { kinds: %i[xdp xdp_tail] },
         # The helper's first parameter is a `struct xdp_md *`
         # (bpf_dynptr_from_xdp). TC has bpf_dynptr_from_skb, but that side was never
         # shipped and TC already reads bytes with skb_load_byte, so
         # the gate is XDP-only -- the same mask the C codegen enforces.
-        "pkt_dynptr_byte_at" => { kinds: %i[xdp] },
+        "pkt_dynptr_byte_at" => { kinds: %i[xdp xdp_tail] },
         # A tail call lands in a program of the CALLER's own type, and
         # `spnl_prog_array` only ever holds this unit's `def xdp_tail__<name>` --
         # XDP programs. `xdp_tail` is itself an XDP kind here (a target may jump
         # onward, up to the kernel's 33-deep limit), so the one mask covers both
         # spellings of a dispatcher.
         "tail_call_to"     => { kinds: %i[xdp xdp_tail] },
-        "dev_redirect"     => { kinds: %i[xdp] },
+        "dev_redirect"     => { kinds: %i[xdp xdp_tail] },
         # The seven TCP-slice builtins. XDP-only because they
         # rewrite and RESIZE the raw frame (bpf_xdp_adjust_tail) through
         # `struct xdp_md`, and the two syncookie ones bottom out in kfuncs whose
@@ -1662,13 +1669,13 @@ module SpinelEbpf
         # mask: that kind's body is discarded, so a builtin written in it would
         # be silently dropped -- which is the one context where "allowed" would
         # be a lie. (The load status of each builtin per program type was measured.)
-        "tcp_syncookie_gen"   => { kinds: %i[xdp] },
-        "tcp_syncookie_check" => { kinds: %i[xdp] },
-        "tcp_reply_header"    => { kinds: %i[xdp] },
-        "tcp_reply_synack"    => { kinds: %i[xdp] },
-        "tcp_synack_cookie"   => { kinds: %i[xdp] },
-        "tcp_reply_data"      => { kinds: %i[xdp] },
-        "payload_starts"      => { kinds: %i[xdp] },
+        "tcp_syncookie_gen"   => { kinds: %i[xdp xdp_tail] },
+        "tcp_syncookie_check" => { kinds: %i[xdp xdp_tail] },
+        "tcp_reply_header"    => { kinds: %i[xdp xdp_tail] },
+        "tcp_reply_synack"    => { kinds: %i[xdp xdp_tail] },
+        "tcp_synack_cookie"   => { kinds: %i[xdp xdp_tail] },
+        "tcp_reply_data"      => { kinds: %i[xdp xdp_tail] },
+        "payload_starts"      => { kinds: %i[xdp xdp_tail] },
         "sock_addr_ip4"    => { kinds: %i[cgroup_connect4 cgroup_bind4] },
         "sock_addr_port"   => { kinds: %i[cgroup_connect4 cgroup_bind4] },
         "sock_ops_op"      => { kinds: %i[sock_ops] },
@@ -1685,9 +1692,9 @@ module SpinelEbpf
         # refuses these rather than emitting a constant.
         "attached_index"     => { kinds: %i[kprobe_multi] },
         "attached_symbol_eq" => { kinds: %i[kprobe_multi] },
-        "flow_get"         => { kinds: %i[xdp tc_ingress tc_egress] },
-        "flow_set"         => { kinds: %i[xdp tc_ingress tc_egress] },
-        "flow_del"         => { kinds: %i[xdp tc_ingress tc_egress] },
+        "flow_get"         => { kinds: %i[xdp xdp_tail tc_ingress tc_egress] },
+        "flow_set"         => { kinds: %i[xdp xdp_tail tc_ingress tc_egress] },
+        "flow_del"         => { kinds: %i[xdp xdp_tail tc_ingress tc_egress] },
       }
       # The packet-context gate (cc_require_pkt_ctx). The generator has refused
       # these outside a packet program for some time, but the affordance never said
@@ -1697,7 +1704,7 @@ module SpinelEbpf
       # so it is recorded here rather than left for a reader to discover by
       # hitting it. Masks mirror the C exactly.
       %w[redirect sk_lookup_tcp fib_lookup fib_lookup6]      # CC_CTX_PKT
-        .each { |b| reqs[b] = { kinds: %i[xdp tc_ingress tc_egress] } }
+        .each { |b| reqs[b] = { kinds: %i[xdp xdp_tail tc_ingress tc_egress] } }
       # CC_CTX_TC: they read/write `struct __sk_buff`, which XDP does not have.
       %w[skb_load_byte skb_load_u16 skb_load_u32
          skb_store_byte skb_store_u16 skb_store_u32
@@ -1713,10 +1720,10 @@ module SpinelEbpf
       # (file_type is deliberately NOT here: it reads the hook's own pointer, so
       # it is ungated like kfield.)
       %w[has_cap has_cap_permitted has_cap_inheritable cap_effective ns_id in_host_ns]
-        .each { |b| reqs[b] = { kinds: %i[kprobe kretprobe tracepoint raw_tp fentry fexit
-                                          uprobe uretprobe usdt perf_event lsm fmod_ret
-                                          cgroup_connect4 cgroup_bind4] } }
-      PKT_FIELD_BUILTINS.each { |b| reqs[b] = { kinds: %i[xdp tc_ingress tc_egress] } }
+        .each { |b| reqs[b] = { kinds: %i[kprobe kretprobe kprobe_multi tracepoint raw_tp
+                                          fentry fexit uprobe uretprobe usdt perf_event
+                                          lsm fmod_ret cgroup_connect4 cgroup_bind4] } }
+      PKT_FIELD_BUILTINS.each { |b| reqs[b] = { kinds: %i[xdp xdp_tail tc_ingress tc_egress] } }
       (TCP_SOCK_READER_BUILTINS + TCP_SOCK_WRITER_BUILTINS + TCP_SOCK_ADDER_BUILTINS)
         .each { |b| reqs[b] = { kinds: %i[tcp_cc] } }
       %w[scx_dispatch scx_consume scx_kick_cpu scx_pick_idle_cpu scx_create_dsq]
@@ -1941,48 +1948,68 @@ note: "Packet field accessors for XDP and TC: no arguments, host order. The pkt.
     # for a mechanism that is not yet paying for itself.
     ATTACH_MULTI_THRESHOLD = 16
 
+    # The machine axes of the attach vocabulary (the kind set, sec, ctx_type, kname
+    # and the facets) are declared once in src/codegen_c/attach_schema.h -- the same
+    # table cc_detect_attach() walks. `make -C src/codegen_c attach-schema` renders it
+    # as JSON and this reads that, the same "C header is the authority, Ruby reads the
+    # artifact" shape the record schema uses. ATTACH_KINDS below sources `sec:` from
+    # the table rather than writing the value a second time, because the axes without a
+    # cross-check are exactly the ones measured to drift. The prose (args_convention,
+    # context_note) stays here on purpose: it is not a machine axis, and none of the
+    # measured drifts were in prose. A stale or hand-edited artifact is refused by
+    # tools/attach_gate.rb.
+    ATTACH_SCHEMA = begin
+      require "json"
+      path = File.expand_path("attach_schema_gen.json", __dir__)
+      unless File.exist?(path)
+        raise "attach schema artifact missing: #{path} " \
+              "(run: make -C src/codegen_c attach-schema)"
+      end
+      JSON.parse(File.read(path)).map { |r| [r.fetch("kind"), r.freeze] }.to_h.freeze
+    end
+
     # The conventions of each attach kind, one for one with the generator's own attach
     # patterns; a test enforces that the two sets match. args_convention says which
     # ABI the declared parameters are extracted from in the attach context.
     ATTACH_KINDS = [
-      { kind: :kprobe,        method_prefix: "kprobe__<func>",           sec: "kprobe/<func>",         ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx) -- the kernel function's arguments, named through BTF", context_note: "the entry of a kernel function" },
-      { kind: :kprobe_multi,  method_prefix: "on :kprobe, %w[<func> <func> ...] (reactor form only)", sec: "kprobe.multi", ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx), as for kprobe. In addition, attached_symbol_eq(\"<func>\") and attached_index answer \"which symbol am I on\" -- in **one spelling**, which lowers to a literal when the definition was expanded and to bpf_get_attach_cookie when it rides kprobe.multi", context_note: "One definition, several attachments. **There are two lowerings and the generator picks one**: below ATTACH_MULTI_THRESHOLD symbols it expands into N separate SEC(\"kprobe/<func>\") programs, at or above it emits one SEC(\"kprobe.multi\") program with a per-symbol cookie and lets the glue attach the symbol array. `via: :expand` and `via: :multi` name one explicitly -- a deployment choice rather than a code one, since kprobe.multi raises the kernel floor to 5.18. Note there is no flat `def` form: a method name cannot hold a list, and `%w[].each { define_method }` does not work because partitioning walks the AST" },
-      { kind: :kretprobe,     method_prefix: "kretprobe__<func>",        sec: "kretprobe/<func>",      ctx_type: "struct pt_regs *", args_convention: "a single parameter, the return value (PT_REGS_RC)", context_note: "the return of a kernel function" },
-      { kind: :uprobe,        method_prefix: "uprobe__<func>",           sec: "uprobe",                ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx); the target binary and pid come from the environment (SPNL_UPROBE_*)", context_note: "the entry of a userspace function" },
-      { kind: :uretprobe,     method_prefix: "uretprobe__<func>",        sec: "uretprobe",             ctx_type: "struct pt_regs *", args_convention: "a return parameter; the target comes from the environment (SPNL_UPROBE_*)", context_note: "the return of a userspace function" },
-      { kind: :usdt,          method_prefix: "usdt__<provider>__<probe>", sec: "usdt",                 ctx_type: "struct pt_regs *", args_convention: "bpf_usdt_arg(ctx, i, &v); the target comes from the environment (SPNL_USDT_*)", context_note: "A USDT static probe. Measured: including the USDT header brings in **three more maps** (a spec table, an ip-to-spec-id table, and the kconfig section), none of which appear as declarations in the generated C" },
-      { kind: :tracepoint,    method_prefix: "tracepoint__<cat>__<event>", sec: "tracepoint/<cat>/<event>", ctx_type: "void *", args_convention: "for the syscall tracepoints, positional arguments in ctx->args[i]; for a named-field tracepoint, the parameter name selects the struct field", context_note: "kernel tracepoint" },
-      { kind: :fentry,        method_prefix: "fentry__<func>",           sec: "fentry/<func>",         ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments, named through BTF", context_note: "BPF trampoline entry (~50ns)" },
-      { kind: :fexit,         method_prefix: "fexit__<func>",            sec: "fexit/<func>",          ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments; the last parameter is the return value", context_note: "BPF trampoline exit" },
-      { kind: :lsm,           method_prefix: "lsm__<hook>",              sec: "lsm/<hook>",            ctx_type: "__u64 *", args_convention: "ctx[i] holds the hook's arguments; the last parameter is the verdict so far", context_note: "An LSM security hook. To deny, return a negative errno; to allow, return the last parameter, which carries the prior verdict, rather than a literal 0. Note that an LSM hook only fires when the kernel was booted with BPF LSM enabled (lsm=...,bpf on the command line) -- otherwise it attaches and is a silent no-op, which is why fmod_ret on the matching security_* function is the portable way to enforce." },
-      { kind: :fmod_ret,      method_prefix: "fmod_ret__<func>",         sec: "fmod_ret/<func>",       ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments and the last parameter is the return value, so a handler takes one more argument than the hook does. security_file_open takes one argument, hence `def fmod_ret__security_file_open(file, ret)`", context_note: "BPF_MODIFY_RETURN: replaces the target function's return value. Return a negative errno to deny, or return the last parameter unchanged to allow. Attaching to a security_* function gives a portable denial that does not depend on the kernel's boot-time LSM configuration -- an LSM hook that was never enabled is a silent no-op -- which is why this is the default way to enforce" },
-      { kind: :sock_ops,      method_prefix: "sock_ops__<name>",         sec: "sockops",               ctx_type: "struct bpf_sock_ops *", args_convention: "no declared parameters; read the context with sock_ops_op and sock_ops_state", context_note: "Observing TCP state, attached to a cgroup ($SPNL_CGROUP_PATH) by the generated glue. The return value is not a verdict; the wrapper returns 0" },
-      { kind: :cgroup_connect4, method_prefix: "cgroup__connect4__<name>", sec: "cgroup/connect4",     ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with sock_addr_ip4 and sock_addr_port", context_note: "controls outbound connect; return 1 to allow, 0 to deny" },
-      { kind: :cgroup_bind4,  method_prefix: "cgroup__bind4__<name>",    sec: "cgroup/bind4",          ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with the sock_addr_* builtins", context_note: "controls bind; return 1 to allow, 0 to deny" },
-      { kind: :xdp_tail,      method_prefix: "xdp_tail__<name>",         sec: "xdp",                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters (a tail call carries none); read the packet with the pkt_* builtins", context_note: "a tail-call TARGET. The emitted program is an ordinary SEC(\"xdp\") one; what differs is **only how the loader treats it** -- it is not attached to an interface, its fd is written into `spnl_prog_array` at the **slot matching its declaration order** (0, 1, ...) by `_spnl_prog_array_populate`. The caller uses `tail_call_to(slot)`, from a plain `def xdp__<name>` or from another `def xdp_tail__<name>` (the kernel allows 33 levels). **The motive is that the one-million instruction budget is per program**, which makes this the only way to split an XDP program. WARNING: **failure is silent** -- a jump into an empty slot just falls through, so if the slot numbers and the declaration order drift apart the result is not \"it jumped to the wrong program\" but \"it did not jump and execution continued\". An integer literal slot is range-checked at compile time; a computed one is not. `spinel-ebpf describe` prints the slot-to-method table. WARNING: a unit that declares targets nobody jumps to is **legal** (the map is emitted and the loader populates it), so that \"I have not written the dispatcher yet\" is not refused. WARNING: **the kernel floor is not \"4.2\"** -- bpf_tail_call and PROG_ARRAY themselves are 4.2, but the generated dispatcher makes its tail call from inside `<name>_inner`, a BPF-to-BPF **subprogram** (confirmed in the kernel's own translated dump). A tail call from a subprogram is a later, separate capability that each architecture's JIT has to support, and **its floor was not measured**, so the portability contract reports 4.2 as the feature's floor and declares the shape's floor unknown on its own line (it does work on 7.1.5/aarch64). The effective floor is at least SEC(\"xdp\")'s **5.9**" },
-      { kind: :xdp_tcp_slice, method_prefix: "xdp__tcp_slice__<name>",  sec: "xdp", ctx_type: "struct xdp_md *", args_convention: "**no declared parameters, and the body is not used either** -- the method body is a marker the code generator replaces wholesale", body: :discarded, emits: "spnl_tcp_slice_main", context_note: "**an HTTP reply that never touches the kernel TCP stack**: no listening socket is created on port 8080, and the SYN, the handshake ACK, the GET and the FIN are all completed in XDP. `bpf_tcp_raw_gen_syncookie_ipv4` establishes the three-way handshake statelessly, a 4-tuple-keyed `bpf_conntab` (LRU_HASH) holds ESTABLISHED / RESP_SENT / CLOSED, and `GET /health ` is answered with `HTTP/1.0 200 OK` over XDP_TX. Retransmission handling is included (a repeated GET in RESP_SENT resends the response; a repeated FIN in CLOSED resends the FIN-ACK), as is a per-state time-to-live `bpf_timer`. WARNING: **the body is discarded** -- the `XDP_PASS` in `def xdp__tcp_slice__health; XDP_PASS; end` appears nowhere in the generated C. Writing logic there **does nothing and produces no diagnostic** (since a marker's definition does not depend on its spelling, refusing non-markers was judged to produce more false positives). WARNING: **port 8080 and `/health` are fixed**. WARNING: **one slice per unit** -- the generated symbol names are fixed, so a second one dies at compile time. WARNING: there is no `on :xdp_tcp_slice` reactor form (there would be no body to synthesise). WARNING: **its `bpf_timer` is a different mechanism from `on :timer`**: that one arms a single timer in an array slot once at load time; this one arms a **per-connection timer embedded in the LRU_HASH value** from BPF, and the callback deletes its own entry. All they share is `struct bpf_timer` and the 5.15 floor" },
-      { kind: :timer,         method_prefix: "on :timer, every: N.<unit> (reactor form only; the synthesised name is spnl_timer__main)", sec: "syscall", ctx_type: "__u64 * (the arming program only; the callback takes (void *map, int *key, struct spnl_timer_value *v))", args_convention: "no declared parameters. **The interval is a compile-time constant** -- an integer literal with a unit, such as `every: 5.seconds`, `500.ms` or `1000.ns`; neither an expression nor a `param` will do, because the value is folded into bpf_timer_start", context_note: "three things are emitted: `spnl_timer_map` (an ARRAY with one slot), a SEC-less callback `spnl_timer_cb_main` (the handler body plus a re-arm of itself), and `SEC(\"syscall\") spnl_timer_arm_main`, which the glue fires exactly once at load time through `bpf_prog_test_run`. WARNING: **one timer per unit** (the callback name is fixed, so a second one dies at compile time). WARNING: **the return value is ignored** -- the verifier requires a literal `return 0` in the callback. WARNING: it is **not process context**, so reading the current task (`has_cap`, `pid` and the like) is refused and it cannot coexist with `filter_by`: both would end up pointing at whichever task happens to be on the CPU. Kernel floor **5.15** (bpf_timer)" },
-      { kind: :user_ringbuf,  method_prefix: "user_ringbuf__<name>(value) / on :user_cmd do |cmd| ... end", sec: nil,
+      { kind: :kprobe,        method_prefix: "kprobe__<func>",           sec: ATTACH_SCHEMA.fetch("kprobe")["sec"],         ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx) -- the kernel function's arguments, named through BTF", context_note: "the entry of a kernel function" },
+      { kind: :kprobe_multi,  method_prefix: "on :kprobe, %w[<func> <func> ...] (reactor form only)", sec: ATTACH_SCHEMA.fetch("kprobe_multi")["sec"], ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx), as for kprobe. In addition, attached_symbol_eq(\"<func>\") and attached_index answer \"which symbol am I on\" -- in **one spelling**, which lowers to a literal when the definition was expanded and to bpf_get_attach_cookie when it rides kprobe.multi", context_note: "One definition, several attachments. **There are two lowerings and the generator picks one**: below ATTACH_MULTI_THRESHOLD symbols it expands into N separate SEC(\"kprobe/<func>\") programs, at or above it emits one SEC(\"kprobe.multi\") program with a per-symbol cookie and lets the glue attach the symbol array. `via: :expand` and `via: :multi` name one explicitly -- a deployment choice rather than a code one, since kprobe.multi raises the kernel floor to 5.18. Note there is no flat `def` form: a method name cannot hold a list, and `%w[].each { define_method }` does not work because partitioning walks the AST" },
+      { kind: :kretprobe,     method_prefix: "kretprobe__<func>",        sec: ATTACH_SCHEMA.fetch("kretprobe")["sec"],      ctx_type: "struct pt_regs *", args_convention: "a single parameter, the return value (PT_REGS_RC)", context_note: "the return of a kernel function" },
+      { kind: :uprobe,        method_prefix: "uprobe__<func>",           sec: ATTACH_SCHEMA.fetch("uprobe")["sec"],                ctx_type: "struct pt_regs *", args_convention: "PT_REGS_PARM<N>(ctx); the target binary and pid come from the environment (SPNL_UPROBE_*)", context_note: "the entry of a userspace function" },
+      { kind: :uretprobe,     method_prefix: "uretprobe__<func>",        sec: ATTACH_SCHEMA.fetch("uretprobe")["sec"],             ctx_type: "struct pt_regs *", args_convention: "a return parameter; the target comes from the environment (SPNL_UPROBE_*)", context_note: "the return of a userspace function" },
+      { kind: :usdt,          method_prefix: "usdt__<provider>__<probe>", sec: ATTACH_SCHEMA.fetch("usdt")["sec"],                 ctx_type: "struct pt_regs *", args_convention: "bpf_usdt_arg(ctx, i, &v); the target comes from the environment (SPNL_USDT_*)", context_note: "A USDT static probe. Measured: including the USDT header brings in **three more maps** (a spec table, an ip-to-spec-id table, and the kconfig section), none of which appear as declarations in the generated C" },
+      { kind: :tracepoint,    method_prefix: "tracepoint__<cat>__<event>", sec: ATTACH_SCHEMA.fetch("tracepoint")["sec"], ctx_type: "void *", args_convention: "for the syscall tracepoints, positional arguments in ctx->args[i]; for a named-field tracepoint, the parameter name selects the struct field", context_note: "kernel tracepoint" },
+      { kind: :fentry,        method_prefix: "fentry__<func>",           sec: ATTACH_SCHEMA.fetch("fentry")["sec"],         ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments, named through BTF", context_note: "BPF trampoline entry (~50ns)" },
+      { kind: :fexit,         method_prefix: "fexit__<func>",            sec: ATTACH_SCHEMA.fetch("fexit")["sec"],          ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments; the last parameter is the return value", context_note: "BPF trampoline exit" },
+      { kind: :lsm,           method_prefix: "lsm__<hook>",              sec: ATTACH_SCHEMA.fetch("lsm")["sec"],            ctx_type: "__u64 *", args_convention: "ctx[i] holds the hook's arguments; the last parameter is the verdict so far", context_note: "An LSM security hook. To deny, return a negative errno; to allow, return the last parameter, which carries the prior verdict, rather than a literal 0. Note that an LSM hook only fires when the kernel was booted with BPF LSM enabled (lsm=...,bpf on the command line) -- otherwise it attaches and is a silent no-op, which is why fmod_ret on the matching security_* function is the portable way to enforce." },
+      { kind: :fmod_ret,      method_prefix: "fmod_ret__<func>",         sec: ATTACH_SCHEMA.fetch("fmod_ret")["sec"],       ctx_type: "__u64 *", args_convention: "ctx[i] holds the function's arguments and the last parameter is the return value, so a handler takes one more argument than the hook does. security_file_open takes one argument, hence `def fmod_ret__security_file_open(file, ret)`", context_note: "BPF_MODIFY_RETURN: replaces the target function's return value. Return a negative errno to deny, or return the last parameter unchanged to allow. Attaching to a security_* function gives a portable denial that does not depend on the kernel's boot-time LSM configuration -- an LSM hook that was never enabled is a silent no-op -- which is why this is the default way to enforce" },
+      { kind: :sock_ops,      method_prefix: "sock_ops__<name>",         sec: ATTACH_SCHEMA.fetch("sock_ops")["sec"],               ctx_type: "struct bpf_sock_ops *", args_convention: "no declared parameters; read the context with sock_ops_op and sock_ops_state", context_note: "Observing TCP state, attached to a cgroup ($SPNL_CGROUP_PATH) by the generated glue. The return value is not a verdict; the wrapper returns 0" },
+      { kind: :cgroup_connect4, method_prefix: "cgroup__connect4__<name>", sec: ATTACH_SCHEMA.fetch("cgroup_connect4")["sec"],     ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with sock_addr_ip4 and sock_addr_port", context_note: "controls outbound connect; return 1 to allow, 0 to deny" },
+      { kind: :cgroup_bind4,  method_prefix: "cgroup__bind4__<name>",    sec: ATTACH_SCHEMA.fetch("cgroup_bind4")["sec"],          ctx_type: "struct bpf_sock_addr *", args_convention: "no declared parameters; read the context with the sock_addr_* builtins", context_note: "controls bind; return 1 to allow, 0 to deny" },
+      { kind: :xdp_tail,      method_prefix: "xdp_tail__<name>",         sec: ATTACH_SCHEMA.fetch("xdp_tail")["sec"],                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters (a tail call carries none); read the packet with the pkt_* builtins", context_note: "a tail-call TARGET. The emitted program is an ordinary SEC(\"xdp\") one; what differs is **only how the loader treats it** -- it is not attached to an interface, its fd is written into `spnl_prog_array` at the **slot matching its declaration order** (0, 1, ...) by `_spnl_prog_array_populate`. The caller uses `tail_call_to(slot)`, from a plain `def xdp__<name>` or from another `def xdp_tail__<name>` (the kernel allows 33 levels). **The motive is that the one-million instruction budget is per program**, which makes this the only way to split an XDP program. WARNING: **failure is silent** -- a jump into an empty slot just falls through, so if the slot numbers and the declaration order drift apart the result is not \"it jumped to the wrong program\" but \"it did not jump and execution continued\". An integer literal slot is range-checked at compile time; a computed one is not. `spinel-ebpf describe` prints the slot-to-method table. WARNING: a unit that declares targets nobody jumps to is **legal** (the map is emitted and the loader populates it), so that \"I have not written the dispatcher yet\" is not refused. WARNING: **the kernel floor is not \"4.2\"** -- bpf_tail_call and PROG_ARRAY themselves are 4.2, but the generated dispatcher makes its tail call from inside `<name>_inner`, a BPF-to-BPF **subprogram** (confirmed in the kernel's own translated dump). A tail call from a subprogram is a later, separate capability that each architecture's JIT has to support, and **its floor was not measured**, so the portability contract reports 4.2 as the feature's floor and declares the shape's floor unknown on its own line (it does work on 7.1.5/aarch64). The effective floor is at least SEC(\"xdp\")'s **5.9**" },
+      { kind: :xdp_tcp_slice, method_prefix: "xdp__tcp_slice__<name>",  sec: ATTACH_SCHEMA.fetch("xdp_tcp_slice")["sec"], ctx_type: "struct xdp_md *", args_convention: "**no declared parameters, and the body is not used either** -- the method body is a marker the code generator replaces wholesale", body: :discarded, emits: "spnl_tcp_slice_main", context_note: "**an HTTP reply that never touches the kernel TCP stack**: no listening socket is created on port 8080, and the SYN, the handshake ACK, the GET and the FIN are all completed in XDP. `bpf_tcp_raw_gen_syncookie_ipv4` establishes the three-way handshake statelessly, a 4-tuple-keyed `bpf_conntab` (LRU_HASH) holds ESTABLISHED / RESP_SENT / CLOSED, and `GET /health ` is answered with `HTTP/1.0 200 OK` over XDP_TX. Retransmission handling is included (a repeated GET in RESP_SENT resends the response; a repeated FIN in CLOSED resends the FIN-ACK), as is a per-state time-to-live `bpf_timer`. WARNING: **the body is discarded** -- the `XDP_PASS` in `def xdp__tcp_slice__health; XDP_PASS; end` appears nowhere in the generated C. Writing logic there **does nothing and produces no diagnostic** (since a marker's definition does not depend on its spelling, refusing non-markers was judged to produce more false positives). WARNING: **port 8080 and `/health` are fixed**. WARNING: **one slice per unit** -- the generated symbol names are fixed, so a second one dies at compile time. WARNING: there is no `on :xdp_tcp_slice` reactor form (there would be no body to synthesise). WARNING: **its `bpf_timer` is a different mechanism from `on :timer`**: that one arms a single timer in an array slot once at load time; this one arms a **per-connection timer embedded in the LRU_HASH value** from BPF, and the callback deletes its own entry. All they share is `struct bpf_timer` and the 5.15 floor" },
+      { kind: :timer,         method_prefix: "on :timer, every: N.<unit> (reactor form only; the synthesised name is spnl_timer__main)", sec: ATTACH_SCHEMA.fetch("timer")["sec"], ctx_type: "__u64 * (the arming program only; the callback takes (void *map, int *key, struct spnl_timer_value *v))", args_convention: "no declared parameters. **The interval is a compile-time constant** -- an integer literal with a unit, such as `every: 5.seconds`, `500.ms` or `1000.ns`; neither an expression nor a `param` will do, because the value is folded into bpf_timer_start", context_note: "three things are emitted: `spnl_timer_map` (an ARRAY with one slot), a SEC-less callback `spnl_timer_cb_main` (the handler body plus a re-arm of itself), and `SEC(\"syscall\") spnl_timer_arm_main`, which the glue fires exactly once at load time through `bpf_prog_test_run`. WARNING: **one timer per unit** (the callback name is fixed, so a second one dies at compile time). WARNING: **the return value is ignored** -- the verifier requires a literal `return 0` in the callback. WARNING: it is **not process context**, so reading the current task (`has_cap`, `pid` and the like) is refused and it cannot coexist with `filter_by`: both would end up pointing at whichever task happens to be on the CPU. Kernel floor **5.15** (bpf_timer)" },
+      { kind: :user_ringbuf,  method_prefix: "user_ringbuf__<name>(value) / on :user_cmd do |cmd| ... end", sec: ATTACH_SCHEMA.fetch("user_ringbuf")["sec"],
         emits: "static long spnl_user_ringbuf_cb_<name>(struct bpf_dynptr *dynptr, void *_uctx)",
         ctx_type: "struct bpf_dynptr * (the record) + void * (unused)",
         args_convention: "**exactly one** declared parameter -- the value the host pushed. The first 8 bytes of the record are read with `bpf_dynptr_read`",
         context_note: "the host-to-kernel command channel, and **the only attach kind that emits no program at all**: what comes out is a `static` callback with no SEC, no context and no userspace-visible name, which `bpf_user_ringbuf_drain` calls once per pending record. It is therefore **not attached to anything** -- it runs only when some handler in the same unit calls `user_ringbuf_drain`, and where that call sits is what sets command latency, so it is never synthesised. WARNING: a callback with no drain, a drain with no callback, and two callbacks in one unit all **die at compile time**. WARNING: **a record is a fixed 8 bytes**; send with the glue's `sp_bpf_user_cmd_push(value)`, because a hand-rolled pusher sending fewer makes the callback fire and the count rise while only the value stays 0. Kernel floor **6.1** (USER_RINGBUF), which is higher than the 5.2 base -- `param` travels further when nothing needs to change while the probe runs" },
-      { kind: :iter_task,     method_prefix: "iter__task__<name>",       sec: "iter/task",             ctx_type: "struct bpf_iter__task *", args_convention: "no declared parameters; iter_task() yields the task pointer", context_note: "enumerating tasks, driven from userspace by the generated glue" },
-      { kind: :raw_tp,        method_prefix: "raw_tp__<event>",          sec: "raw_tp/<event>",        ctx_type: "struct bpf_raw_tracepoint_args *", args_convention: "ctx->args[i]", context_note: "a raw tracepoint, with lower overhead" },
-      { kind: :socket_filter, method_prefix: "socket_filter__<name>",    sec: "socket",                ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "the classic SO_ATTACH_BPF filter; the return value is how many bytes to keep" },
-      { kind: :flow_dissector, method_prefix: "flow_dissector__<name>",  sec: "flow_dissector",        ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "returns BPF_OK or BPF_DROP" },
-      { kind: :sk_lookup,     method_prefix: "sk_lookup__<name>",        sec: "sk_lookup",             ctx_type: "struct bpf_sk_lookup *", args_convention: "no declared parameters", context_note: "selects a listener. The section name takes no sub-name. Returns SK_PASS or SK_DROP" },
-      { kind: :tcp_cc,        method_prefix: "class <N> < BPF::TcpCC (def <member>)", sec: "struct_ops/<member>",   ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::TcpCC` with `def init(sk)`, `def cong_avoid(sk, ack, acked)` and so on -- which is the idiomatic Ruby form. The flat `def tcp_cc__<member>` also registers. Member arguments are declared positionally.", context_note: "a tcp_congestion_ops member. The class form is preferred; the flat form also works" },
-      { kind: :sched_ext,     method_prefix: "class <N> < BPF::SchedExt (def <member>)", sec: "struct_ops/<member>", ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::SchedExt` with a `def` per member. The flat `def sched_ext__<member>` also registers. Member arguments, such as the task, are declared positionally.", context_note: "a sched_ext_ops member -- a CPU scheduler. The class form is preferred; the flat form also works" },
-      { kind: :qdisc,         method_prefix: "class <N> < BPF::Qdisc (def <member>)", sec: "struct_ops/<member>",   ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::Qdisc` with a `def` per member. The flat `def qdisc__<member>` also registers. The required members and their signatures are init(sch, opt, extack), enqueue(skb, sch, to_free), dequeue(sch), reset(sch) and destroy(sch). Note that enqueue MUST release the skb reference: call qdisc_skb_drop(skb, to_free) to drop it, or queue_push(skb, to_free) to forward it. Without that the verifier rejects the program for leaking a reference.", context_note: "a Qdisc_ops member, attached through tc as spnl_qdisc. The class form is preferred; the flat form also works" },
-      { kind: :xdp,           method_prefix: "xdp__<name>",              sec: "xdp",                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters; use the pkt_* builtins or the pkt.* accessors", context_note: "returns XDP_PASS, XDP_DROP, XDP_TX or XDP_REDIRECT; the interface comes from SPNL_XDP_IFACE" },
-      { kind: :tc_ingress,    method_prefix: "tc__ingress__<name>",      sec: "tcx/ingress",           ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
-      { kind: :tc_egress,     method_prefix: "tc__egress__<name>",       sec: "tcx/egress",            ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
-      { kind: :sk_reuseport,  method_prefix: "sk_reuseport__<name>",     sec: "sk_reuseport",          ctx_type: "struct sk_reuseport_md *", args_convention: "no declared parameters", context_note: "decides **which listening socket** a SYN arriving at an SO_REUSEPORT group is handed to. Returning `SK_PASS` accepts the decision (which, if `worker_select` was never called, is the **kernel's own 5-tuple spread**); `SK_DROP` drops the SYN. With `reuseport_hash` and `worker_select` implemented, a BPF program can name the worker itself. Attaching is setsockopt(SO_ATTACH_REUSEPORT_EBPF): the probe's own userspace half calls the glue's `sp_bpf_reuseport_attach(listen_fd, \"sk_reuseport__<name>\")`. It is not auto-attached, because the listening socket is the probe's to create and the loader knows nothing about it. WARNING: **a failed selection is silent** (see worker_select)" },
-      { kind: :sk_msg,        method_prefix: "sk_msg__<name>",           sec: "sk_msg",                ctx_type: "struct sk_msg_md *", args_convention: "no declared parameters", context_note: "A sockmap program, attached with BPF_SK_MSG_VERDICT. Measured: **spinel-ebpf does not create the sockmap itself** -- neither SOCKMAP nor SOCKHASH appears anywhere in the generator -- so the map it attaches to must be provided by userspace" },
-      { kind: :sk_skb_verdict, method_prefix: "sk_skb__verdict__<name>", sec: "sk_skb/stream_verdict", ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream verdict. As above, the sockmap itself must be provided by userspace" },
-      { kind: :sk_skb_parser, method_prefix: "sk_skb__parser__<name>",   sec: "sk_skb/stream_parser",  ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream parser. As above, the sockmap itself must be provided by userspace" },
-      { kind: :perf_event,    method_prefix: "perf_event__<name> / on :perf_event, hz: N", sec: "perf_event", ctx_type: "struct bpf_perf_event_data *", args_convention: "no declared parameters; pair it with stack_id()", context_note: "per-CPU sampling profiler" },
+      { kind: :iter_task,     method_prefix: "iter__task__<name>",       sec: ATTACH_SCHEMA.fetch("iter_task")["sec"],             ctx_type: "struct bpf_iter__task *", args_convention: "no declared parameters; iter_task() yields the task pointer", context_note: "enumerating tasks, driven from userspace by the generated glue" },
+      { kind: :raw_tp,        method_prefix: "raw_tp__<event>",          sec: ATTACH_SCHEMA.fetch("raw_tp")["sec"],        ctx_type: "struct bpf_raw_tracepoint_args *", args_convention: "ctx->args[i]", context_note: "a raw tracepoint, with lower overhead" },
+      { kind: :socket_filter, method_prefix: "socket_filter__<name>",    sec: ATTACH_SCHEMA.fetch("socket_filter")["sec"],                ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "the classic SO_ATTACH_BPF filter; the return value is how many bytes to keep" },
+      { kind: :flow_dissector, method_prefix: "flow_dissector__<name>",  sec: ATTACH_SCHEMA.fetch("flow_dissector")["sec"],        ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "returns BPF_OK or BPF_DROP" },
+      { kind: :sk_lookup,     method_prefix: "sk_lookup__<name>",        sec: ATTACH_SCHEMA.fetch("sk_lookup")["sec"],             ctx_type: "struct bpf_sk_lookup *", args_convention: "no declared parameters", context_note: "selects a listener. The section name takes no sub-name. Returns SK_PASS or SK_DROP" },
+      { kind: :tcp_cc,        method_prefix: "class <N> < BPF::TcpCC (def <member>)", sec: ATTACH_SCHEMA.fetch("tcp_cc")["sec"],   ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::TcpCC` with `def init(sk)`, `def cong_avoid(sk, ack, acked)` and so on -- which is the idiomatic Ruby form. The flat `def tcp_cc__<member>` also registers. Member arguments are declared positionally.", context_note: "a tcp_congestion_ops member. The class form is preferred; the flat form also works" },
+      { kind: :sched_ext,     method_prefix: "class <N> < BPF::SchedExt (def <member>)", sec: ATTACH_SCHEMA.fetch("sched_ext")["sec"], ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::SchedExt` with a `def` per member. The flat `def sched_ext__<member>` also registers. Member arguments, such as the task, are declared positionally.", context_note: "a sched_ext_ops member -- a CPU scheduler. The class form is preferred; the flat form also works" },
+      { kind: :qdisc,         method_prefix: "class <N> < BPF::Qdisc (def <member>)", sec: ATTACH_SCHEMA.fetch("qdisc")["sec"],   ctx_type: nil, args_convention: "A struct_ops implementation is written as a class -- `class N < BPF::Qdisc` with a `def` per member. The flat `def qdisc__<member>` also registers. The required members and their signatures are init(sch, opt, extack), enqueue(skb, sch, to_free), dequeue(sch), reset(sch) and destroy(sch). Note that enqueue MUST release the skb reference: call qdisc_skb_drop(skb, to_free) to drop it, or queue_push(skb, to_free) to forward it. Without that the verifier rejects the program for leaking a reference.", context_note: "a Qdisc_ops member, attached through tc as spnl_qdisc. The class form is preferred; the flat form also works" },
+      { kind: :xdp,           method_prefix: "xdp__<name>",              sec: ATTACH_SCHEMA.fetch("xdp")["sec"],                   ctx_type: "struct xdp_md *", args_convention: "no declared parameters; use the pkt_* builtins or the pkt.* accessors", context_note: "returns XDP_PASS, XDP_DROP, XDP_TX or XDP_REDIRECT; the interface comes from SPNL_XDP_IFACE" },
+      { kind: :tc_ingress,    method_prefix: "tc__ingress__<name>",      sec: ATTACH_SCHEMA.fetch("tc_ingress")["sec"],           ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
+      { kind: :tc_egress,     method_prefix: "tc__egress__<name>",       sec: ATTACH_SCHEMA.fetch("tc_egress")["sec"],            ctx_type: "struct __sk_buff *", args_convention: "no declared parameters; use the pkt_* and skb_* builtins", context_note: "returns one of the TC_ACT_* values; the interface comes from SPNL_TCX_IFACE" },
+      { kind: :sk_reuseport,  method_prefix: "sk_reuseport__<name>",     sec: ATTACH_SCHEMA.fetch("sk_reuseport")["sec"],          ctx_type: "struct sk_reuseport_md *", args_convention: "no declared parameters", context_note: "decides **which listening socket** a SYN arriving at an SO_REUSEPORT group is handed to. Returning `SK_PASS` accepts the decision (which, if `worker_select` was never called, is the **kernel's own 5-tuple spread**); `SK_DROP` drops the SYN. With `reuseport_hash` and `worker_select` implemented, a BPF program can name the worker itself. Attaching is setsockopt(SO_ATTACH_REUSEPORT_EBPF): the probe's own userspace half calls the glue's `sp_bpf_reuseport_attach(listen_fd, \"sk_reuseport__<name>\")`. It is not auto-attached, because the listening socket is the probe's to create and the loader knows nothing about it. WARNING: **a failed selection is silent** (see worker_select)" },
+      { kind: :sk_msg,        method_prefix: "sk_msg__<name>",           sec: ATTACH_SCHEMA.fetch("sk_msg")["sec"],                ctx_type: "struct sk_msg_md *", args_convention: "no declared parameters", context_note: "A sockmap program, attached with BPF_SK_MSG_VERDICT. Measured: **spinel-ebpf does not create the sockmap itself** -- neither SOCKMAP nor SOCKHASH appears anywhere in the generator -- so the map it attaches to must be provided by userspace" },
+      { kind: :sk_skb_verdict, method_prefix: "sk_skb__verdict__<name>", sec: ATTACH_SCHEMA.fetch("sk_skb_verdict")["sec"], ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream verdict. As above, the sockmap itself must be provided by userspace" },
+      { kind: :sk_skb_parser, method_prefix: "sk_skb__parser__<name>",   sec: ATTACH_SCHEMA.fetch("sk_skb_parser")["sec"],  ctx_type: "struct __sk_buff *", args_convention: "no declared parameters", context_note: "A sockmap stream parser. As above, the sockmap itself must be provided by userspace" },
+      { kind: :perf_event,    method_prefix: "perf_event__<name> / on :perf_event, hz: N", sec: ATTACH_SCHEMA.fetch("perf_event")["sec"], ctx_type: "struct bpf_perf_event_data *", args_convention: "no declared parameters; pair it with stack_id()", context_note: "per-CPU sampling profiler" },
     ].freeze
 
 
@@ -3406,6 +3433,77 @@ WITHDRAWN_SUGAR = {}.freeze
                     what: "the table of binary operators" },
     }.freeze
 
+    # The authorities for the reverse coverage of the builtin EXISTENCE axis.
+    #
+    # The generator recognizes a builtin name in more than one way: besides the
+    # strcmp chains in the two lowering functions there are string tables
+    # (PKT_BUILTINS), struct tables whose first column is the name (CC_SOCK_ACC,
+    # QDISC_KFUNCS) and helper functions that bundle a set of strcmps
+    # (the tcp_sock_* resolvers, cc_cap_set). tools/affordance_gate.rb extracts
+    # names from EXACTLY the mechanisms declared here and checks both directions:
+    #   reverse: extracted - claimed - withdrawn - excluded = 0
+    #            (nothing is implemented and unadvertised)
+    #   forward: claimed - extracted = 0
+    #            (this authority list is itself complete -- forget to register a
+    #            new recognition mechanism and its builtins show up as claimed
+    #            but unfound)
+    # A mechanism that is not listed cannot be swept; that residue is what the
+    # forward direction makes visible, the same bargain the syntax coverage takes.
+    BUILTIN_COVERAGE_AUTHORITIES = {
+      lower_fns:     { file: "src/codegen_c/spinel_ebpf_cc.c",
+                       functions: %w[cc_lower_expr cc_lower_stmt],
+                       what: "the chains of strcmp(name|nm, \"...\")" },
+      string_tables: { file: "src/codegen_c/spinel_ebpf_cc.c",
+                       arrays: %w[PKT_BUILTINS],
+                       what: "arrays of builtin name strings" },
+      name_tables:   { file: "src/codegen_c/spinel_ebpf_cc.c",
+                       arrays: %w[CC_SOCK_ACC QDISC_KFUNCS],
+                       what: "struct arrays whose first column is the builtin name" },
+      helper_fns:    { file: "src/codegen_c/spinel_ebpf_cc.c",
+                       functions: %w[cc_tcp_sock_reader_field cc_tcp_sock_writer_field
+                                     cc_tcp_sock_adder_field cc_cap_set],
+                       what: "helpers that bundle strcmps to resolve a name to a member" },
+    }.freeze
+
+    # Names the extraction finds that are not builtins. Declared with a reason
+    # rather than quietly subtracted -- what is opaque has to say so.
+    BUILTIN_COVERAGE_EXCLUSIONS = {
+      "times" => "iterator syntax owned by Capabilities::SYNTAX (it lowers to bpf_loop " \
+                 "or an open-coded iterator). Not a builtin, but the lowering functions " \
+                 "strcmp it as a CallNode name",
+    }.freeze
+
+    # Per-target existence. The authority is cc_builtin_targets in
+    # src/codegen_c/builtin_schema.h: the C backstop walks that table through
+    # cc_builtin_on_target(), and TargetProfile's call_allowlist reads the same
+    # generated JSON. A builtin absent from the table is linux-only (the default).
+    BUILTIN_SCHEMA_JSON = begin
+      require "json"
+      path = File.expand_path("builtin_schema_gen.json", __dir__)
+      unless File.exist?(path)
+        raise "builtin schema artifact missing: #{path} " \
+              "(run: make -C src/codegen_c builtin-schema)"
+      end
+      JSON.parse(File.read(path)).freeze
+    end
+    BUILTIN_TARGETS = BUILTIN_SCHEMA_JSON.fetch("targets")
+                                         .map { |r| [r.fetch("name"), r.fetch("targets").freeze] }
+                                         .to_h.freeze
+    DEFAULT_BUILTIN_TARGETS = BUILTIN_SCHEMA_JSON.fetch("default_targets").freeze
+
+    def valid_targets_for(name)
+      BUILTIN_TARGETS[name] || DEFAULT_BUILTIN_TARGETS
+    end
+
+    # Builtins that exist only on a non-linux target, so they are not part of the
+    # linux builtin surface. Published under their own key rather than mixed into
+    # `builtins`, which is the linux claim.
+    def target_only_builtins
+      BUILTIN_TARGETS.reject { |_, ts| ts.include?("linux") }
+                     .each_with_object({}) { |(n, ts), h| ts.each { |t| (h[t] ||= []) << n } }
+                     .transform_values(&:sort)
+    end
+
     # ===================================================================
     # Making the sugar spellings VISIBLE TO INTROSPECTION.
     #
@@ -3671,6 +3769,9 @@ WITHDRAWN_SUGAR = {}.freeze
         # attributes from the egress declaration.
         record_channel: chan && chan[:id],
         record_schema: chan,
+        # The targets this builtin exists on (authority: builtin_schema.h; the
+        # default is linux only).
+        valid_targets: valid_targets_for(name),
       }
     end
 
@@ -3784,6 +3885,11 @@ WITHDRAWN_SUGAR = {}.freeze
         syntax: SYNTAX,
         withdrawn_syntax: WITHDRAWN_SYNTAX,
         syntax_coverage_authorities: SYNTAX_COVERAGE_AUTHORITIES,
+        builtin_coverage_authorities: BUILTIN_COVERAGE_AUTHORITIES,
+        builtin_coverage_exclusions: BUILTIN_COVERAGE_EXCLUSIONS,
+        # Builtins that exist only on a non-linux target, kept apart from the
+        # linux `builtins` claim above.
+        target_only_builtins: target_only_builtins,
         # The map vocabulary. While this was empty, nothing in the affordance said that
         # writing `@x += 1` creates a map, or that a ring buffer is 256 KiB and drops
         # silently when it overflows. The implementation was sound throughout: this was

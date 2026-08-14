@@ -56,11 +56,15 @@ class TcpSliceTest < Minitest::Test
   # decoration: in TC the same names would reach clang and die naming a C
   # identifier instead of the hook the author chose (a refusal has to be spelled
   # in the author's vocabulary; there is no silent fallback).
+  #
+  # :xdp_tail is in the mask too -- a tail-call target IS an XDP program (AK_XDP
+  # is shared, and the C gate neither can nor needs to tell them apart), and a
+  # claim narrower than the implementation hides a legal move (measured).
   def test_all_seven_are_gated_to_xdp
     BUILTINS.each do |b|
       req = CAP::CONTEXT_REQUIREMENTS[b]
       refute_nil req, "#{b} has no context requirement"
-      assert_equal %i[xdp], req[:kinds], "#{b}'s gate admits something other than xdp"
+      assert_equal %i[xdp xdp_tail], req[:kinds], "#{b}'s gate admits something outside the xdp kinds"
     end
   end
 
@@ -173,12 +177,17 @@ class TcpSliceTest < Minitest::Test
   # answering from the shorter prefix is exactly the false negative that let an
   # unported attach kind look present (a prefix scan answers "present").
   def test_the_bundle_prefix_is_matched_before_plain_xdp
-    i_slice = cc_src.index('cc_starts(name, "xdp__tcp_slice__"')
-    i_plain = cc_src.index('cc_starts(name, "xdp__", &rest)')
-    refute_nil i_slice, "there is no xdp__tcp_slice__ branch"
+    # Match order is the row order in attach_schema.h (cc_detect_attach only
+    # walks it, first match wins). The general shadowing rule is enforced by
+    # tools/attach_gate.rb; this pins the specific ordering by name, so the
+    # false negative cannot come back.
+    schema = File.read(File.expand_path("../../src/codegen_c/attach_schema.h", __dir__))
+    i_slice = schema.index('.prefix = "xdp__tcp_slice__"')
+    i_plain = schema.index('.prefix = "xdp__"')
+    refute_nil i_slice, "there is no xdp__tcp_slice__ row"
     refute_nil i_plain
     assert i_slice < i_plain,
-           "the xdp__ branch comes first -- a tcp_slice would be lowered as an " \
+           "the xdp__ row comes first -- a tcp_slice would be lowered as an " \
            "ordinary XDP program"
   end
 

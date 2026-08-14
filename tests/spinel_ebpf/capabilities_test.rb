@@ -169,15 +169,16 @@ class CapabilitiesTest < Minitest::Test
   # is to say one that nothing else can catch. Forbid it structurally.
   def test_tracing_hooks_never_claim_deny
     # Do not hand-write "which attach kinds carry a verdict" into the test --
-    # **read it from the production C generator**, which is what emits the
-    # wrapper (`a->verdict = 1` is what splits `return (int)inner(...)` from
-    # `(void)inner(...); return 0;`). If the registry disagreed with that, the
-    # claim "you can block here" would be false.
-    src = File.read(File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__))
+    # **read it from the declaration table**. The wrapper's branch (`a->verdict`
+    # is what splits `return (int)inner(...)` from `(void)inner(...); return 0;`)
+    # now comes from the single declaration in attach_schema.h, which
+    # cc_detect_attach only walks, so that is what to read. If the registry
+    # disagreed with it, the claim "you can block here" would be false.
+    src = File.read(File.expand_path("../../src/codegen_c/attach_schema.h", __dir__))
     verdict_by_prefix = %w[lsm fmod_ret fentry fexit].to_h { |p|
-      line = src[/^.*cc_starts\(name, "#{p}__".*$/]
-      refute_nil line, "#{p}__ attach detection is not where it was in the C codegen"
-      [p, line.include?("a->verdict = 1")]
+      row = src[/\{ \.ruby_kind = "#{p}",.*?\}/m]
+      refute_nil row, "the #{p} row is not in attach_schema.h (did its shape change?)"
+      [p, row.include?(".verdict = 1")]
     }
     # Pin the premise itself (a fact about the C side) before relying on it.
     assert_equal({ "lsm" => true, "fmod_ret" => true, "fentry" => false, "fexit" => false },
@@ -291,6 +292,81 @@ class CapabilitiesTest < Minitest::Test
       assert_equal CAP::DPATH_HOOKS[sec][:form],  spec[:form],  "#{sec}: the path-supplying form differs between C and Ruby"
       assert_equal CAP::DPATH_HOOKS[sec][:guard], spec[:guard], "#{sec}: the NULL guard differs between C and Ruby"
     end
+  end
+
+  # The :kinds axis of the hook/builtin gate gets the same lockstep the d_path
+  # table has. It used to rest on one line of prose ("The kinds mirror
+  # cc_task_ctx_kind_ok exactly") with nothing checking it, and when that was
+  # measured neither place was exact: kprobe_multi and xdp_tail were both
+  # missing, in the direction where the claim is narrower than the
+  # implementation and the affordance hides a legal move. A prose declaration
+  # that two things mirror each other is not a measurement.
+  def test_task_ctx_kinds_mirror_the_c_switch
+    src = File.read(File.expand_path("../../src/codegen_c/spinel_ebpf_cc.c", __dir__))
+    body = src[/static int cc_task_ctx_kind_ok\(.*?\n\}/m]
+    refute_nil body, "cc_task_ctx_kind_ok is not in the C codegen (did its shape change?)"
+    ak_map = { "AK_KPROBE" => :kprobe, "AK_KRETPROBE" => :kretprobe,
+               "AK_KPROBE_MULTI" => :kprobe_multi, "AK_TRACEPOINT" => :tracepoint,
+               "AK_RAW_TP" => :raw_tp, "AK_FENTRY" => :fentry, "AK_FEXIT" => :fexit,
+               "AK_UPROBE" => :uprobe, "AK_URETPROBE" => :uretprobe, "AK_USDT" => :usdt,
+               "AK_PERF_EVENT" => :perf_event, "AK_LSM" => :lsm, "AK_FMOD_RET" => :fmod_ret }
+    c_kinds = body.scan(/case (AK_\w+):/).flatten.filter_map { |ak| ak_map[ak] }
+    # AK_SK_VERDICT is shared by nine SECs, so those are narrowed by kname: what
+    # the strcmp compares is the kind name itself.
+    c_kinds += body.scan(/strcmp\(kname, "(\w+)"\)/).flatten.map(&:to_sym)
+    claimed = CAP::CONTEXT_REQUIREMENTS["has_cap"][:kinds]
+    assert_equal c_kinds.sort, claimed.sort,
+                 "the task-context gate's kind set differs between C and Ruby " \
+                 "(move one side alone and either a legal move vanishes from the claim, " \
+                 "or a dying one stays in it)"
+    %w[has_cap has_cap_permitted has_cap_inheritable cap_effective ns_id in_host_ns].each do |b|
+      assert_equal claimed, CAP::CONTEXT_REQUIREMENTS[b][:kinds],
+                   "#{b}: same cc_require_task_ctx, different claimed set"
+    end
+  end
+
+  # `xdp_tail__` shares AK_XDP in the C codegen (what a tail call lands in is an
+  # XDP program), so the CC_CTX_XDP gate cannot tell :xdp and :xdp_tail apart.
+  # A mask that claims :xdp must therefore claim :xdp_tail, or it hides a legal
+  # move. :xdp_tcp_slice is the opposite case -- its body is discarded, so
+  # "allowed" would be a lie; including it fails.
+  def test_xdp_masks_include_the_tail_kind
+    src = File.read(File.expand_path("../../src/codegen_c/attach_schema.h", __dir__))
+    row = src[/\{ \.ruby_kind = "xdp_tail",.*?\}/m]
+    refute_nil row, "the xdp_tail row is not in attach_schema.h (did its shape change?)"
+    assert_includes row, ".kind = AK_XDP",
+                    "xdp_tail no longer shares AK_XDP -- revisit this whole rule"
+    xdp_masks = CAP::CONTEXT_REQUIREMENTS.select { |_, r| r[:kinds]&.include?(:xdp) }
+    refute_empty xdp_masks, "not one mask claims :xdp (did the vocabulary change?)"
+    xdp_masks.each do |b, req|
+      assert_includes req[:kinds], :xdp_tail,
+                      "#{b}: C accepts it inside xdp_tail__ too (AK_XDP is shared), " \
+                      "and the claim hides that"
+      refute_includes req[:kinds], :xdp_tcp_slice,
+                      "#{b}: a tcp_slice body is discarded -- \"allowed\" would be a lie"
+    end
+  end
+
+  # The central arity table (cc_declared_arity in builtin_schema.h) holds only
+  # the builtins whose handlers do not check their own arity. Every row has to
+  # match the Ruby side's declared signature: disagree and the C demands N while
+  # the affordance teaches M, so one of them is lying.
+  def test_declared_arity_table_matches_signatures
+    src = File.read(File.expand_path("../../src/codegen_c/builtin_schema.h", __dir__))
+    rows = src.scan(/\{ "([a-z0-9_]+)", (\d+) \}/).map { |n, a| [n, a.to_i] }
+    refute_empty rows, "cc_declared_arity is not there (did its shape change?)"
+    rows.each do |name, arity|
+      sig = begin
+        CAP.signature_for(name)
+      rescue StandardError
+        nil
+      end
+      refute_nil sig, "#{name}: in the table but not in the signatures " \
+                      "(it guards the arity of a builtin that does not exist)"
+      assert_equal sig[:arity], arity, "#{name}: the C declared arity and the Ruby signature disagree"
+    end
+    dup = rows.map(&:first).tally.select { |_, c| c > 1 }.keys
+    assert_empty dup, "duplicate rows in cc_declared_arity: #{dup.join(', ')}"
   end
 
   def test_gated_builtins_are_all_enforcement_domain
@@ -607,7 +683,8 @@ class CapabilitiesTest < Minitest::Test
     # these outside a packet program for a long time while the affordance still said
     # `gated: false` -- an understated constraint, drift in the opposite direction
     # from advertising something that does not exist.
-    assert_equal %w[xdp tc_ingress tc_egress], CAP.context_strings("fib_lookup")
+    # xdp_tail shares AK_XDP, so the C gate accepts it and the claim says so.
+    assert_equal %w[xdp xdp_tail tc_ingress tc_egress], CAP.context_strings("fib_lookup")
     assert_equal %w[tc_ingress tc_egress], CAP.context_strings("l4_offset")
     assert_equal %w[tc_ingress], CAP.context_strings("sk_assign_tcp")
     assert CAP.builtin_entry("l4_offset")[:gated]
