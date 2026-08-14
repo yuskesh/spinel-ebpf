@@ -19,13 +19,39 @@
 #
 # The C-side AMP check (amp_scan_supported in src/codegen_c/spinel_ebpf_cc.c)
 # stays as the backstop on the direct in-process path -- the regression harness
-# drives that binary without Ruby in front. The lockstep between this file's
-# AMP allowlist and the C source is pinned by
-# tests/spinel_ebpf/target_profile_test.rb; change either side and the test
-# names the drift.
+# drives that binary without Ruby in front. Both sides now derive from one
+# declaration: the backstop walks cc_builtin_targets through
+# cc_builtin_on_target(), and the allowlist below reads the same table's
+# generated JSON. tests/spinel_ebpf/target_profile_test.rb pins both halves of
+# that -- the allowlist against the table, and the backstop against the fact
+# that it consults it.
 
 module SpinelEbpf
   class TargetProfile
+    # The per-target existence axis is declared once in
+    # src/codegen_c/builtin_schema.h (the same table the C backstop walks through
+    # cc_builtin_on_target) and rendered by `make -C src/codegen_c
+    # builtin-schema`. The allowlists below are READ from that artifact --
+    # writing them here as literals was a second spelling of one fact. The prose
+    # half (supported_summary) stays here: it is not a shared fact.
+    BUILTIN_SCHEMA = begin
+      require "json"
+      path = File.expand_path("builtin_schema_gen.json", __dir__)
+      unless File.exist?(path)
+        raise "builtin schema artifact missing: #{path} " \
+              "(run: make -C src/codegen_c builtin-schema)"
+      end
+      JSON.parse(File.read(path)).freeze
+    end
+
+    # The builtins declared to exist on target `tname` ("amp"), in declaration
+    # order. Names absent from the table are linux-only (the default).
+    def self.schema_allowlist(tname)
+      BUILTIN_SCHEMA.fetch("targets")
+                    .select { |r| r.fetch("targets").include?(tname) }
+                    .map { |r| r.fetch("name") }.freeze
+    end
+
     attr_reader :name, :fatal_flags, :call_allowlist, :supported_summary
 
     def initialize(name:, fatal_flags:, call_allowlist: nil, supported_summary: nil)
@@ -82,7 +108,7 @@ module SpinelEbpf
     AMP = new(
       name: "amp",
       fatal_flags: ALL_FLAGS,
-      call_allowlist: %w[spnl_emit ktime_ns],
+      call_allowlist: schema_allowlist("amp"),   # authority: builtin_schema.h
       supported_summary: "ivar RMW (@x/@x += n), integer arithmetic, if/locals, spnl_emit, ktime_ns",
     )
   end

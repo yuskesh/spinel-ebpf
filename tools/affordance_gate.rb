@@ -755,6 +755,72 @@ module AffordanceGate
     src[j..k]
   end
 
+  # ---- builtin existence coverage -----------------------------------------
+  # Like cc_function_body but for any `static <words> *?name(` return type --
+  # the recognition helpers return `const char *`, which the one-word pattern
+  # above cannot see. Same brace counting, same nil-on-unreadable rule.
+  def cc_fn_body_general(name)
+    return nil unless File.exist?(CC_SOURCE)
+    src = File.read(CC_SOURCE)
+    i = src.index(/^static [A-Za-z_][A-Za-z_ ]*? \*?#{name}\([^;{]*\)\s*\{/) or return nil
+    j = src.index("{", i) or return nil
+    depth = 0
+    k = j
+    while k < src.length
+      depth += 1 if src[k] == "{"
+      if src[k] == "}"
+        depth -= 1
+        break if depth.zero?
+      end
+      k += 1
+    end
+    src[j..k]
+  end
+
+  # Extract every builtin name the codegen recognizes, from EXACTLY the
+  # mechanisms declared in Capabilities::BUILTIN_COVERAGE_AUTHORITIES. Returns
+  # nil if any declared authority is unreadable (never a silently smaller set).
+  # `auth` is a parameter so the self-check can drop a mechanism and prove the
+  # forward direction notices.
+  def builtin_extracted_names(auth = CAP::BUILTIN_COVERAGE_AUTHORITIES)
+    src = File.read(CC_SOURCE)
+    names = []
+    ((auth.dig(:lower_fns, :functions) || []) + (auth.dig(:helper_fns, :functions) || [])).each do |fn|
+      body = cc_function_body(fn) || cc_fn_body_general(fn)
+      return nil unless body
+      body.each_line do |ln|
+        # No line filter for target-only builtins: they are DECLARED (the
+        # targets axis of builtin_schema.h) and subtracted as data by
+        # existence_violations, instead of pattern-matched out of the source.
+        names += ln.scan(/!strcmp\((?:name|nm), "([a-z0-9_]+)"\)/).flatten
+      end
+    end
+    (auth.dig(:string_tables, :arrays) || []).each do |arr|
+      block = src[/static const [^\n]*#{arr}\[\] = \{(.*?)\n\};/m, 1]
+      return nil unless block
+      names += block.scan(/"([a-z0-9_]+)"/).flatten
+    end
+    (auth.dig(:name_tables, :arrays) || []).each do |arr|
+      block = src[/static const [^\n]*#{arr}\[\] = \{(.*?)\n\};/m, 1]
+      return nil unless block
+      names += block.scan(/\{\s*"([a-z0-9_]+)"/).flatten
+    end
+    names.uniq
+  end
+
+  # Pure so the self-checks can call it on mutated inputs.
+  #   uncovered: recognized by the codegen, claimed by nothing (reverse direction)
+  #   unfound:   claimed, but no declared mechanism recognizes it -- either the
+  #              claim is stale or a recognition mechanism is missing from the
+  #              authority declaration (forward direction)
+  # Target-only builtins (declared in builtin_schema.h, not on the linux
+  # surface) are part of `known` -- and get their own forward direction: a
+  # declared target-only name nothing recognizes is a stale declaration.
+  def existence_violations(extracted, claimed, withdrawn, exclusions, target_only = [])
+    known = claimed + withdrawn + exclusions + target_only
+    [extracted - known, claimed - extracted, target_only - extracted]
+  end
+
   # nil (not []) when unreadable: an empty authority and an unreadable one must
   # not look alike, or coverage passes vacuously -- the same rule the C refusal
   # table is read under.
@@ -1095,6 +1161,63 @@ module AffordanceGate
     [:compiled, nil, shape, call, nil]
   end
 
+  # ---- arity audit --------------------------------------------------------
+  # The declared arity (the signature table) is a claim about a BOUNDARY: "this
+  # builtin takes N arguments". The C handlers enforce it with inline
+  # `if (na != N) die(...)` checks -- per handler, not from a table -- so the
+  # claim and the enforcement can drift per builtin, and an axis with no
+  # lockstep is the kind that does. This probe asks the codegen directly:
+  # compile the affordance's own example (positive control), then the same call
+  # with one surplus argument appended.
+  #   :enforced          surplus die'd (the boundary is real)
+  #   :accepted          surplus compiled and CHANGED the output (it went somewhere)
+  #   :ignored           surplus compiled and the output is byte-identical
+  #                      (the argument silently vanished -- the worst shape)
+  #   :shape_unsupported the positive control itself does not compile in this
+  #                      harness (counted, never silently dropped)
+  def arity_probe(dir, tag, name, plus_override: nil)
+    call = call_text(name)
+    vars = free_vars(name, call)
+    shape = shape_for(name)
+    plus = plus_override ||
+           if call =~ /\(\s*\)\z/ then call.sub(/\(\s*\)\z/, "(0)")
+           elsif call.end_with?(")") then call.sub(/\)\z/, ", 0)")
+           else "#{call}(0)"
+           end
+    a = File.join(dir, "#{tag}_a.rb")
+    File.write(a, source(shape, call, vars))
+    oa, ea, sa = cap3(CC, a, "#{tag}_a")
+    return [:shape_unsupported, ea.lines.map(&:strip).reject(&:empty?).first.to_s, call] unless sa.success?
+    b = File.join(dir, "#{tag}_b.rb")
+    File.write(b, source(shape, plus, vars))
+    # same base name as the control on purpose: the unit name is baked into the
+    # generated C (map names, header comment), so a different base would make
+    # every pair "differ" and the :ignored verdict unreachable (measured).
+    ob, eb, sb = cap3(CC, b, "#{tag}_a")
+    return [:enforced, eb.lines.map(&:strip).reject(&:empty?).first.to_s, plus] unless sb.success?
+    ob == oa ? [:ignored, nil, plus] : [:accepted, nil, plus]
+  end
+
+  # ---- hook-legality matrix -----------------------------------------------
+  # CONTEXT_REQUIREMENTS' :kinds axis claims, per builtin, WHERE it may be
+  # written. That axis was measured drifting wherever nothing checked it, and
+  # only two groups gained a lockstep test; the rest still rest on prose. This
+  # probe asks the codegen directly, both ways:
+  #   claimed kind, probe dies       -> the claim advertises a place that refuses
+  #   unclaimed kind, probe compiles -> the claim hides a legal move, or a gate
+  #                                     is missing
+  # A die in an unclaimed kind needs no reason check: any refusal counts, the
+  # only violation on that side is silent acceptance.
+  def kind_probe(dir, tag, name, kind)
+    call = call_text(name)
+    vars = free_vars(name, call)
+    shape = KIND_TO_SHAPE[kind] or return [:no_shape, nil]
+    f = File.join(dir, "#{tag}.rb")
+    File.write(f, source(shape, call, vars))
+    _o, err, st = cap3(CC, f, tag)
+    st.success? ? [:compiled, nil] : [:died, err.lines.map(&:strip).reject(&:empty?).first.to_s]
+  end
+
   # ---- the controls that do NOT deplete -----------------------------------
   #
   # The WITHDRAWN sets used to BE the negative control: "a demoted surface must
@@ -1259,12 +1382,26 @@ while (a = args.shift)
   when "--only" then only = args.shift
   when "--list" then list = true
   when "--section" then section = args.shift
-  else abort "usage: affordance_gate.rb [--only NAME] [--list] [--section builtins|attach|sugar|syntax|maps]"
+  else abort "usage: affordance_gate.rb [--only NAME] [--list] " \
+             "[--section builtins|attach|sugar|syntax|maps|arity|ctxgate]"
   end
 end
-abort "usage: --section builtins|attach|sugar|syntax|maps|all" unless
-  %w[all builtins attach sugar syntax maps].include?(section)
+abort "usage: --section builtins|attach|sugar|syntax|maps|arity|ctxgate|all" unless
+  %w[all builtins attach sugar syntax maps arity ctxgate].include?(section)
 do_builtins = %w[all builtins].include?(section)
+# The declared-arity boundary. Audited first (157 handlers enforced it, 38 were
+# silent), folded into the declared-arity table in
+# src/codegen_c/builtin_schema.h, enforcing since -- a builtin that silently
+# swallows a surplus argument fails the gate until it gets a row there or its
+# handler grows its own (richer) check.
+do_arity    = %w[all arity].include?(section)
+# The hook-legality matrix. Audited first (73 silent acceptances across four
+# ungated families: the redirect-map trio, the sock_addr readers, the scx
+# kfuncs and the qdisc kfuncs), folded into context gates in the codegen,
+# enforcing since -- a builtin that compiles in a kind its claim excludes fails
+# the gate until it gets a gate or the claim widens (whichever the C semantics
+# say is true).
+do_ctxgate  = %w[all ctxgate].include?(section)
 do_attach   = %w[all attach].include?(section)
 do_sugar    = %w[all sugar].include?(section)
 do_syntax   = %w[all syntax].include?(section)
@@ -1279,7 +1416,7 @@ abort "affordance gate: production codegen missing: #{CC}\n" \
       "  Run this in the build container:\n" \
       "    container exec spnlbuild sh -c 'cd /work && ruby tools/affordance_gate.rb'" unless File.executable?(CC)
 
-advertised = do_builtins ? CAP.all_builtins.sort : []
+advertised = (do_builtins || do_arity) ? CAP.all_builtins.sort : []
 withdrawn  = do_builtins ? CAP::WITHDRAWN.keys.sort : []
 akinds     = do_attach ? CAP::ATTACH_KINDS.map { |a| a[:kind] } : []
 awithdrawn = do_attach ? CAP::WITHDRAWN_ATTACH.keys : []
@@ -1458,6 +1595,117 @@ mseen = []    # every distinct map the sweep saw -- printed so a scanner that
               # stopped finding anything cannot look like "nothing uncovered"
 mselfcheck = []
 Dir.mktmpdir("affordance-gate") do |dir|
+  if do_ctxgate
+    scope = CAP::CONTEXT_REQUIREMENTS.select { |_, r| r[:kinds] }
+    shapeable = SHAPES.keys
+    sets = scope.group_by { |_, r| r[:kinds] }
+    viol = Hash.new { |h, k| h[k] = [] }
+    probes = 0
+    # (1) representative x full kind space: one builtin per distinct kind-set,
+    # probed in EVERY shapeable kind -- catches claim-narrower drift anywhere.
+    sets.each_with_index do |(kset, entries), si|
+      rep = entries.map(&:first).sort.first
+      shapeable.each_with_index do |k, ki|
+        v, msg = AffordanceGate.kind_probe(dir, "cg#{si}_#{ki}", rep, k)
+        probes += 1
+        if kset.include?(k) && v == :died
+          viol[:claimed_kind_died] << [rep, k, msg]
+        elsif !kset.include?(k) && v == :compiled
+          viol[:undeclared_kind_accepted] << [rep, k]
+        end
+      end
+    end
+    # (2) per-builtin membership: every entry gets one claimed-kind probe and
+    # one unclaimed-kind probe (a builtin whose gate differs from its group's
+    # representative would slip a matrix that only samples representatives).
+    scope.each_with_index do |(b, r), i|
+      ak = (r[:kinds] & shapeable).first
+      dk = (%i[kprobe xdp tc_ingress sock_ops] - r[:kinds]).find { |k| shapeable.include?(k) }
+      if ak
+        v, msg = AffordanceGate.kind_probe(dir, "cm#{i}a", b, ak)
+        probes += 1
+        viol[:claimed_kind_died] << [b, ak, msg] if v == :died
+      end
+      if dk
+        v, = AffordanceGate.kind_probe(dir, "cm#{i}d", b, dk)
+        probes += 1
+        viol[:undeclared_kind_accepted] << [b, dk] if v == :compiled
+      end
+    end
+    puts format("  ctxgate  probed %4d  (%d builtins, %d kind-sets x %d shapeable kinds)  " \
+                "claimed_died=%d  undeclared_accepted=%d",
+                probes, scope.size, sets.size, shapeable.size,
+                viol[:claimed_kind_died].size, viol[:undeclared_kind_accepted].size)
+    viol[:claimed_kind_died].uniq.each do |b, k, msg|
+      puts format("  -- claimed_kind_died:      %-24s in %-16s %s", b, k, msg.to_s[0, 80])
+    end
+    viol[:undeclared_kind_accepted].uniq.each do |b, k|
+      puts format("  -- undeclared_kind_accepted: %-24s in %s", b, k)
+    end
+    # Synthesized self-checks. The classification predicate itself is a one-line
+    # set test, so what actually needs re-proving each run is the arm underneath
+    # it: that kind_probe can still SEE an acceptance and a refusal.
+    # (a) has_cap in :kprobe compiles (a known-legal pair must read :compiled --
+    #     if it reads :died, every acceptance is invisible and the matrix would
+    #     report a clean 0 while measuring nothing)
+    # (b) pkt_len in :kprobe dies (a known-illegal pair must read :died)
+    sca_v, = AffordanceGate.kind_probe(dir, "cgsc_a", "has_cap", :kprobe)
+    scb_v, = AffordanceGate.kind_probe(dir, "cgsc_b", "pkt_len", :kprobe)
+    sc_a = sca_v == :compiled ? "caught" : "MISSED"
+    sc_b = scb_v == :died ? "caught" : "MISSED"
+    puts format("  ctxgate  self-check       undeclared_arm=%s claimed_arm=%s", sc_a, sc_b)
+    abort "affordance gate: ctxgate self-check broken (undeclared_arm=#{sc_a}, claimed_arm=#{sc_b})" \
+      unless sc_a == "caught" && sc_b == "caught"
+    unless viol[:claimed_kind_died].empty?
+      abort "affordance gate: #{viol[:claimed_kind_died].size} claim(s) advertise a kind that refuses " \
+            "the builtin -- narrow the claim in CONTEXT_REQUIREMENTS, or fix the codegen gate."
+    end
+    unless viol[:undeclared_kind_accepted].empty?
+      abort "affordance gate: #{viol[:undeclared_kind_accepted].size} builtin/kind pair(s) compile " \
+            "where the claim says they cannot -- either the C gate is missing (add one) or the " \
+            "claim hides a legal move (widen it)."
+    end
+    exit 0 if section == "ctxgate"
+  end
+  if do_arity
+    tally = Hash.new { |h, k| h[k] = [] }
+    advertised.each_with_index do |b, i|
+      verdict, msg, probe = AffordanceGate.arity_probe(dir, "ar#{i}", b)
+      tally[verdict] << [b, probe, msg]
+    end
+    puts "  arity    probed      #{advertised.size}  enforced=#{tally[:enforced].size}  " \
+         "silent=#{tally[:accepted].size + tally[:ignored].size}  " \
+         "shape_unsupported=#{tally[:shape_unsupported].size}"
+    %i[ignored accepted shape_unsupported].each do |k|
+      next if tally[k].empty?
+      puts "  -- #{k}:"
+      tally[k].each { |b, probe, _| puts format("     %-28s %s", b, probe) }
+    end
+    # Synthesized controls: the gate must re-prove it can say NO.
+    # (a) the byte-comparison arm: probe with the surplus call FORCED equal to
+    #     the control -- outputs are identical by construction, so anything but
+    #     :ignored means the comparison is dead.
+    # (b) the die-detection arm: a handler-enforced builtin with a surplus arg
+    #     must come back :enforced.
+    sc_ig, = AffordanceGate.arity_probe(dir, "arsc1", "ktime_ns",
+                                        plus_override: AffordanceGate.call_text("ktime_ns"))
+    sc_en, = AffordanceGate.arity_probe(dir, "arsc2", "has_cap")
+    puts "  arity    self-check       identical_pair=#{sc_ig} surplus_on_enforced=#{sc_en}"
+    abort "affordance gate: arity self-check broken (identical_pair=#{sc_ig}, want ignored) -- " \
+          "the byte-comparison arm cannot detect a silently ignored argument" unless sc_ig == :ignored
+    abort "affordance gate: arity self-check broken (surplus_on_enforced=#{sc_en}, want enforced)" unless sc_en == :enforced
+    bad = tally[:accepted] + tally[:ignored]
+    unless bad.empty?
+      abort "affordance gate: #{bad.size} builtin(s) silently swallow a surplus argument -- " \
+            "add each to cc_declared_arity in src/codegen_c/builtin_schema.h, or give " \
+            "the handler its own (richer) check: #{bad.map(&:first).join(', ')}"
+    end
+    unless tally[:shape_unsupported].empty?
+      abort "affordance gate: #{tally[:shape_unsupported].size} builtin(s) not probeable -- " \
+            "a builtin the gate cannot write is a builtin nothing checks"
+    end
+    exit 0 if section == "arity"
+  end
   # Before trusting "diverged=0", prove this run can still SEE a
   # divergence. A pair that is deliberately not equivalent (XDP::PASS vs
   # XDP_DROP) must come back diverged. Unlike the withdrawn sets -- which prove
@@ -1675,6 +1923,64 @@ puts "affordance gate (builtins / attach kinds / surface sugar / syntax / maps)"
 # read as "control missing".
 EMPTY_NOTE = "  (record empty: nothing is withdrawn -- absence is the self-check's job)"
 if do_builtins
+  # existence coverage -- both directions from one extraction.
+  ex = AffordanceGate.builtin_extracted_names
+  abort "affordance gate: a declared builtin-coverage authority is unreadable " \
+        "(BUILTIN_COVERAGE_AUTHORITIES names a function/array the extractor cannot find). " \
+        "An unreadable authority must not look like an empty one." if ex.nil?
+  excl = CAP::BUILTIN_COVERAGE_EXCLUSIONS.keys
+  tonly = CAP.target_only_builtins.values.flatten.uniq
+  uncov, unfound, tstale = AffordanceGate.existence_violations(ex, advertised, withdrawn, excl, tonly)
+  n_mech = CAP::BUILTIN_COVERAGE_AUTHORITIES.sum { |_, a| (a[:functions] || a[:arrays]).size }
+  puts format("  builtin  existence  %3d names from %d declared mechanisms  uncovered=%d  unfound=%d  " \
+              "target_only=%d (stale=%d)",
+              ex.size, n_mech, uncov.size, unfound.size, tonly.size, tstale.size)
+  # A target-only builtin must REFUSE under this (linux) codegen -- if it
+  # compiles here, the target declaration lies about the linux surface. (This
+  # summary block runs outside the sweep tmpdir, so the probes get their own.)
+  tleak = Dir.mktmpdir("affordance-tgl") do |tdir|
+    tonly.reject do |b|
+      v, = AffordanceGate.kind_probe(tdir, "tgl_#{b}", b, :kprobe)
+      v == :died
+    end
+  end
+  puts format("  builtin  target-only       linux-refusal %d/%d", tonly.size - tleak.size, tonly.size)
+  # self-checks (synthesized, inventory-independent): (a) hide a claim that is
+  # certainly recognized -> the reverse arm must flag it; (b) drop a whole
+  # mechanism -> the forward arm must notice its builtins going unfound.
+  sc_hidden = AffordanceGate.existence_violations(ex, advertised - ["ktime_ns"], withdrawn, excl, tonly)
+                            .first.include?("ktime_ns") ? "caught" : "MISSED"
+  ex_wo = AffordanceGate.builtin_extracted_names(
+    CAP::BUILTIN_COVERAGE_AUTHORITIES.reject { |k, _| k == :helper_fns })
+  sc_mech = AffordanceGate.existence_violations(ex_wo || [], advertised, withdrawn, excl, tonly)[1]
+                          .include?("has_cap") ? "caught" : "MISSED"
+  puts format("  builtin  self-check       hidden_claim=%s dropped_mechanism=%s", sc_hidden, sc_mech)
+  abort "affordance gate: existence self-check broken (hidden_claim=#{sc_hidden}, " \
+        "dropped_mechanism=#{sc_mech}) -- a coverage that cannot say no is vacuous" \
+    unless sc_hidden == "caught" && sc_mech == "caught"
+  unless uncov.empty?
+    abort "affordance gate: #{uncov.size} name(s) the codegen recognizes but nothing claims: " \
+          "#{uncov.sort.join(', ')}\n" \
+          "  Advertise each in Capabilities (the domains and the signature table), or add a " \
+          "reasoned BUILTIN_COVERAGE_EXCLUSIONS entry, or delete the dead handler."
+  end
+  unless unfound.empty?
+    abort "affordance gate: #{unfound.size} claimed builtin(s) no declared mechanism recognizes: " \
+          "#{unfound.sort.join(', ')}\n" \
+          "  Either the claim is stale, or a recognition mechanism is missing from " \
+          "BUILTIN_COVERAGE_AUTHORITIES (register it -- an unregistered mechanism is a " \
+          "coverage hole)."
+  end
+  unless tstale.empty?
+    abort "affordance gate: #{tstale.size} target-only builtin(s) declared in builtin_schema.h " \
+          "that nothing recognizes: #{tstale.sort.join(', ')} -- stale declaration."
+  end
+  unless tleak.empty?
+    abort "affordance gate: #{tleak.size} target-only builtin(s) COMPILE under the linux codegen: " \
+          "#{tleak.sort.join(', ')}\n" \
+          "  The targets declaration says they are not on the linux surface; either guard the " \
+          "recognizing strcmp or add \"linux\" to the row."
+  end
   puts format("  builtin  advertised  %3d  broken=%d", advertised.size, broken.size)
   puts format("  builtin  withdrawn   %3d  revived=%d%s", withdrawn.size, revived.size,
               withdrawn.empty? && !only ? EMPTY_NOTE : "")
