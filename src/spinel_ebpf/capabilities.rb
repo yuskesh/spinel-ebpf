@@ -3504,6 +3504,22 @@ WITHDRAWN_SUGAR = {}.freeze
                      .transform_values(&:sort)
     end
 
+    # CALLING SYNTAX for builtins that a non-linux target claims but the linux
+    # surface does not carry, under the same rule as `example_for`: syntax only,
+    # never advice about what to compute. tools/affordance_gate.rb uses these as
+    # the call text for the positive half of a target claim -- until this table
+    # existed, every targets row was covered in the negative direction only ("it
+    # must refuse under the linux codegen"), and nothing asked whether the claim
+    # holds under the target's own codegen. **A row with no example aborts the
+    # gate**: a claim the gate cannot write is a claim nothing checks.
+    #
+    # Empty here, and it stays empty as long as every targets row also exists on
+    # linux: those rows reuse their linux example (the gate falls back to
+    # `example_for`), and duplicating it would be a second spelling of one fact.
+    # A target-only builtin -- a name the linux surface never carries -- has no
+    # linux example to fall back to, and that is what this table is for.
+    TARGET_BUILTIN_EXAMPLES = {}.freeze
+
     # ===================================================================
     # Making the sugar spellings VISIBLE TO INTROSPECTION.
     #
@@ -3890,6 +3906,12 @@ WITHDRAWN_SUGAR = {}.freeze
         # Builtins that exist only on a non-linux target, kept apart from the
         # linux `builtins` claim above.
         target_only_builtins: target_only_builtins,
+        # Calling syntax for those, so a reader writing for a non-linux target
+        # has the same affordance the linux surface gives through `example`.
+        target_builtin_examples: TARGET_BUILTIN_EXAMPLES,
+        # Per-target syntax facts (which constructs a restricted target can
+        # lower). Authority: cc_syntax_targets in src/codegen_c/builtin_schema.h.
+        syntax_targets: BUILTIN_SCHEMA_JSON.fetch("syntax_targets"),
         # The map vocabulary. While this was empty, nothing in the affordance said that
         # writing `@x += 1` creates a map, or that a ring buffer is 256 KiB and drops
         # silently when it overflows. The implementation was sound throughout: this was

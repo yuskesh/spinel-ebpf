@@ -43,5 +43,7 @@
   "targets": [
     { "name": "spnl_emit", "targets": ["linux", "amp"] },
     { "name": "ktime_ns", "targets": ["linux", "amp"] }
+  ],
+  "syntax_targets": [
   ]
 }

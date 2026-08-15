@@ -3,13 +3,14 @@
 #
 # builtin_gate.rb -- the builtin-schema contract gate.
 #
-# src/codegen_c/builtin_schema.h declares two axes (declared arity, per-target
-# existence) and three consumers derive from it: the C codegen includes the
-# header directly, target_profile.rb and capabilities.rb read the generated
-# JSON. This gate asks:
+# src/codegen_c/builtin_schema.h declares three axes (declared arity, per-target
+# builtin existence, per-target syntax) and three consumers derive from it: the
+# C codegen includes the header directly, target_profile.rb and capabilities.rb
+# read the generated JSON. This gate asks:
 #   1. freshness -- is the committed JSON what the header generates now?
 #   2. shape     -- names unique per table; every targets row is a non-default,
-#                   non-empty set (the generator refuses these too; the gate
+#                   non-empty set, and every syntax row names a target that HAS
+#                   an allowlist (the generator refuses these too; the gate
 #                   re-checks the committed artifact so a hand-edit cannot pass)
 #   3. mirror    -- TargetProfile's allowlists equal the schema's selection
 #                   (they are sourced from it; this catches a re-literalization)
@@ -54,7 +55,7 @@ doc = JSON.parse(fresh)
 
 def shape_violations(doc)
   v = []
-  %w[declared_arity targets].each do |tbl|
+  %w[declared_arity targets syntax_targets].each do |tbl|
     dup = doc.fetch(tbl).map { |r| r["name"] }.tally.select { |_, n| n > 1 }.keys
     v << "#{tbl}: duplicate name(s): #{dup.join(', ')}" unless dup.empty?
   end
@@ -62,6 +63,15 @@ def shape_violations(doc)
     ts = r.fetch("targets")
     v << "#{r['name']}: empty target set" if ts.empty?
     v << "#{r['name']}: plain default #{ts.inspect} (scope rule: default rows are not listed)" if ts == ["linux"]
+  end
+  # A syntax row must name a target that HAS an allowlist to be exempt from --
+  # plain {linux} is a dead row, because linux has no allowlist. The table is
+  # empty in this tree, so these checks are the mechanism travelling with it:
+  # they fire the moment a row lands.
+  doc.fetch("syntax_targets").each do |r|
+    ts = r.fetch("targets")
+    v << "syntax #{r['name']}: empty target set" if ts.empty?
+    v << "syntax #{r['name']}: plain {linux} is a dead row" if ts == ["linux"]
   end
   v
 end
@@ -96,6 +106,14 @@ MUTATIONS = {
     mut["targets"] << { "name" => "pid", "targets" => ["linux"] }
     shape_violations(mut).any?
   },
+  # The syntax table is empty here, so its rules never fire on the real
+  # artifact. An empty inventory is exactly where a gate silently stops being
+  # able to say no, so the run synthesizes the row it is meant to refuse.
+  "dead_syntax_row_caught" => lambda { |doc, _|
+    mut = JSON.parse(JSON.generate(doc))
+    mut["syntax_targets"] << { "name" => "times", "targets" => ["linux"] }
+    shape_violations(mut).any?
+  },
 }.freeze
 
 MUTATIONS.each do |name, m|
@@ -106,6 +124,7 @@ end
 
 if $fail.zero?
   puts "builtin_gate: arity_rows=#{doc['declared_arity'].size} target_rows=#{doc['targets'].size} " \
+       "syntax_rows=#{doc['syntax_targets'].size} " \
        "fresh=yes shape=ok mirror=ok self-check=#{MUTATIONS.size}/#{MUTATIONS.size}"
 else
   abort "builtin_gate: #{$fail} violation(s)"
