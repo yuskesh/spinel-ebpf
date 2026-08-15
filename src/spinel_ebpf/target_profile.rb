@@ -72,7 +72,21 @@ module SpinelEbpf
     def allows_call?(name)
       return true if @call_allowlist.nil?
       return true unless identifier_call?(name)
+      return true if syntax_on_target?(name)   # syntax is outside the builtin allowlist
       @call_allowlist.include?(name)
+    end
+
+    # A construct like `n.times` arrives at the partition as an identifier-shaped
+    # CallNode, but it is SYNTAX, not a builtin: whether a target can lower it is
+    # a separate per-target fact with its own table. The authority is
+    # cc_syntax_targets in src/codegen_c/builtin_schema.h -- the C scan walks the
+    # same table through cc_syntax_on_target(). The table is empty in this tree
+    # (see the header for why), so this answers false for everything today; what
+    # it buys is that a construct arriving on a restricted target is one row in
+    # one place rather than a second spelling here.
+    def syntax_on_target?(name)
+      row = self.class::BUILTIN_SCHEMA.fetch("syntax_targets").find { |r| r["name"] == name }
+      row ? row.fetch("targets").include?(@name.sub("linux-ebpf", "linux")) : false
     end
 
     # The reason strings for MethodFlags#reasons, in their long-standing order.

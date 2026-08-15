@@ -6835,7 +6835,10 @@ static void amp_scan_supported(AST *ast, int nid) {
   if (!strcmp(ty, "DefNode") || !strcmp(ty, "ClassNode") || !strcmp(ty, "ModuleNode")) return;
   if (!strcmp(ty, "CallNode")) {
     const char *nm = nt_str(ast, nid, "name");
-    if (nm && !cc_is_binary_op(nm) && !cc_builtin_on_target(nm, CC_TGT_AMP)) {   /* the table is the authority */
+    /* both tables are the authority: the builtin vocabulary, and -- separately --
+     * the constructs the SYNTAX vocabulary declares this target can lower. */
+    if (nm && !cc_is_binary_op(nm) && !cc_builtin_on_target(nm, CC_TGT_AMP)
+           && !cc_syntax_on_target(nm, CC_TGT_AMP)) {
       char msg[256];
       snprintf(msg, sizeof msg,
         "amp-m7 (--target amp-m7) does not support '%s' in v0. "

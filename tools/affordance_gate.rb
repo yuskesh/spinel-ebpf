@@ -1198,6 +1198,48 @@ module AffordanceGate
     ob == oa ? [:ignored, nil, plus] : [:accepted, nil, plus]
   end
 
+  # ---- per-target positive claims -----------------------------------------
+  # A row in the targets table claims "this builtin exists on target T". The
+  # negative half -- it must NOT compile under the linux codegen -- has been
+  # measured since the table landed. This is the positive half, and until it
+  # existed nobody asked it: the claim's own example must COMPILE under target
+  # T's codegen, and the call must be load-bearing there (the call-less twin
+  # must differ, the same :ignored trap the arity probe closes).
+  #
+  # Each target is driven through its codegen's env switch; a target with no
+  # mapping here aborts the run rather than being skipped, because a target the
+  # gate cannot drive is a target nothing checks.
+  TARGET_CCENV = { "amp" => "SPNL_AMP_M7" }.freeze
+
+  # The smallest program each target's codegen accepts, with the call spliced
+  # in. AMP: one handler with an ivar RMW (the M-core path needs an eligible
+  # handler and gives the twin something to keep). Free variables in the example
+  # are declared rather than left dangling -- an undeclared local dies for a
+  # reason that has nothing to do with the claim under test.
+  def target_probe_source(target, call, vars = [])
+    decls = vars.map { |v| "  #{v} = 0\n" }.join
+    case target
+    when "amp"
+      "def kprobe__vfs_read\n  @h = @h + 1\n#{decls}  #{call}\nend\n"
+    end
+  end
+
+  def target_claim_probe(dir, tag, target, envk, call, vars = [])
+    src = target_probe_source(target, call, vars) or return [:no_shape, nil]
+    a = File.join(dir, "#{tag}_a.rb")
+    File.write(a, src)
+    oa, ea, sa = cap3({ envk => "1" }, CC, a, "#{tag}_a")
+    return [:died, ea.lines.map(&:strip).reject(&:empty?).first.to_s] unless sa.success?
+    b = File.join(dir, "#{tag}_b.rb")
+    File.write(b, target_probe_source(target, "@h = @h + 0", vars))
+    # same base name as the control, for the reason arity_probe spells out: the
+    # unit name is baked into the generated C, so a different base would make
+    # every pair differ and the no-effect verdict unreachable.
+    ob, _eb, sb = cap3({ envk => "1" }, CC, b, "#{tag}_a")
+    return [:no_effect, "call-less twin emitted identical output"] if sb.success? && ob == oa
+    [:compiled, nil]
+  end
+
   # ---- hook-legality matrix -----------------------------------------------
   # CONTEXT_REQUIREMENTS' :kinds axis claims, per builtin, WHERE it may be
   # written. That axis was measured drifting wherever nothing checked it, and
@@ -1936,15 +1978,58 @@ if do_builtins
               "target_only=%d (stale=%d)",
               ex.size, n_mech, uncov.size, unfound.size, tonly.size, tstale.size)
   # A target-only builtin must REFUSE under this (linux) codegen -- if it
-  # compiles here, the target declaration lies about the linux surface. (This
-  # summary block runs outside the sweep tmpdir, so the probes get their own.)
-  tleak = Dir.mktmpdir("affordance-tgl") do |tdir|
-    tonly.reject do |b|
+  # compiles here, the target declaration lies about the linux surface. And,
+  # the other way round, each target row's claim must COMPILE under its own
+  # target's codegen: without that half a row is only ever checked for what it
+  # is NOT. (This summary block runs outside the sweep tmpdir, so the probes
+  # get their own.)
+  tleak = nil
+  tclaims = { probed: 0, ok: 0, broken: [] }
+  Dir.mktmpdir("affordance-tgl") do |tdir|
+    tleak = tonly.reject do |b|
       v, = AffordanceGate.kind_probe(tdir, "tgl_#{b}", b, :kprobe)
       v == :died
     end
+    # -- positive direction: every non-default (name, target) pair --
+    CAP::BUILTIN_SCHEMA_JSON.fetch("targets").each_with_index do |row, ri|
+      row.fetch("targets").each do |tgt|
+        next if tgt == "linux"
+        envk = AffordanceGate::TARGET_CCENV[tgt] or
+          abort "affordance gate: no CC env mapping for target #{tgt} -- a target the " \
+                "gate cannot drive is a target nothing checks; add it to TARGET_CCENV"
+        exm = CAP::TARGET_BUILTIN_EXAMPLES[row["name"]]
+        exm = CAP.example_for(row["name"]) if exm.nil? && CAP.all_builtins.include?(row["name"])
+        abort "affordance gate: no probe example for target builtin #{row['name']} -- " \
+              "add it to Capabilities::TARGET_BUILTIN_EXAMPLES (a claim the gate cannot " \
+              "write is a claim nothing checks)" if exm.nil?
+        vs = AffordanceGate.free_vars(row["name"], exm)
+        v, msg = AffordanceGate.target_claim_probe(tdir, "tc#{ri}_#{tgt}", tgt, envk, exm, vs)
+        tclaims[:probed] += 1
+        if v == :compiled then tclaims[:ok] += 1
+        else tclaims[:broken] << [row["name"], tgt, v, msg]
+        end
+      end
+    end
+    # -- self-check: the positive arm must be able to SEE a refusal. A
+    # linux-only builtin under a restricted target's codegen must come back
+    # :died; if it does not, every green above is vacuous.
+    tsc, = AffordanceGate.target_claim_probe(tdir, "tsc", "amp", "SPNL_AMP_M7", "p = pid")
+    @tclaim_sc = tsc == :died ? "caught" : "MISSED"
   end
   puts format("  builtin  target-only       linux-refusal %d/%d", tonly.size - tleak.size, tonly.size)
+  puts format("  builtin  target-claims     %d/%d compiled under their target CC  refusal-visible=%s",
+              tclaims[:ok], tclaims[:probed], @tclaim_sc)
+  tclaims[:broken].each do |n, t, v, m|
+    puts format("  -- target-claim broken:   %-20s on %-10s %s %s", n, t, v, m.to_s[0, 70])
+  end
+  abort "affordance gate: target-claims self-check broken (refusal-visible=#{@tclaim_sc}) -- " \
+        "a positive arm that cannot see a refusal proves nothing" unless @tclaim_sc == "caught"
+  unless tclaims[:broken].empty?
+    abort "affordance gate: #{tclaims[:broken].size} target claim(s) do not hold under their " \
+          "own target's codegen -- either the targets row is a lie (remove it) or the " \
+          "lowering broke (fix it); the example lives in Capabilities::TARGET_BUILTIN_EXAMPLES " \
+          "or, for a builtin linux also carries, in its ordinary affordance example."
+  end
   # self-checks (synthesized, inventory-independent): (a) hide a claim that is
   # certainly recognized -> the reverse arm must flag it; (b) drop a whole
   # mechanism -> the forward arm must notice its builtins going unfound.

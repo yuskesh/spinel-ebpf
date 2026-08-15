@@ -369,6 +369,28 @@ class CapabilitiesTest < Minitest::Test
     assert_empty dup, "duplicate rows in cc_declared_arity: #{dup.join(', ')}"
   end
 
+  # Every row of the per-target existence table has to be WRITABLE as a probe:
+  # either it carries its own calling syntax in TARGET_BUILTIN_EXAMPLES, or it
+  # also exists on linux and can reuse `example_for`. tools/affordance_gate.rb
+  # aborts for the same reason (it cannot compose the positive probe without
+  # one); this pins the same completeness in the fast layer of the suite, where
+  # a row added without an example fails in seconds instead of at gate time.
+  def test_every_target_row_has_a_probe_example
+    CAP::BUILTIN_SCHEMA_JSON.fetch("targets").each do |row|
+      name = row.fetch("name")
+      ok = CAP::TARGET_BUILTIN_EXAMPLES.key?(name) ||
+           (CAP.all_builtins.include?(name) && !CAP.example_for(name).nil?)
+      assert ok, "#{name}: in the targets table with no way to write it as a probe -- " \
+                 "add it to TARGET_BUILTIN_EXAMPLES (without one the gate cannot " \
+                 "check the claim at all)"
+    end
+    # and no orphans on the example side: an example for a name no row claims
+    # asserts nothing, it is dead data.
+    orphan = CAP::TARGET_BUILTIN_EXAMPLES.keys -
+             CAP::BUILTIN_SCHEMA_JSON.fetch("targets").map { |r| r["name"] }
+    assert_empty orphan, "examples for names absent from the targets table: #{orphan.join(', ')}"
+  end
+
   def test_gated_builtins_are_all_enforcement_domain
     CAP::CONTEXT_GATES.each_key do |b|
       assert_equal :enforcement, CAP.domain_of(b), "#{b} should be in the enforcement domain"
